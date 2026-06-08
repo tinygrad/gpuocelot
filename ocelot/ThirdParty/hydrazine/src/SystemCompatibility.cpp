@@ -15,7 +15,9 @@
 	#include <sys/types.h>
 	#include <sys/sysctl.h>
 #elif __GNUC__
+#if ENABLE_OPENGL
 	#include <GL/glx.h>
+#endif
 	#include <unistd.h>
 	#include <sys/sysinfo.h>
 	#include <cxxabi.h>
@@ -75,12 +77,16 @@ namespace hydrazine
 
 	bool isAnOpenGLContextAvailable()
 	{
-		#if __APPLE__
-			// TODO fill this in
+		#if ENABLE_OPENGL
+			#if __APPLE__
+				// TODO fill this in
+				return false;
+			#elif __GNUC__
+				GLXContext openglContext = glXGetCurrentContext();
+				return (openglContext != 0);
+			#endif
+		#else
 			return false;
-		#elif __GNUC__
-			GLXContext openglContext = glXGetCurrentContext();
-			return (openglContext != 0);
 		#endif
 	}
 

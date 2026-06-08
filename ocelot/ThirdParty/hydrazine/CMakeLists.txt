@@ -3,14 +3,22 @@ cmake_minimum_required(VERSION 2.8.12)
 project(hydrazine CXX)
 
 find_package(Boost COMPONENTS thread REQUIRED)
+if (ENABLE_OPENGL)
 find_package(OpenGL REQUIRED)
+endif()
 
 file(GLOB SRCS "src/*.cpp")
 add_library(${PROJECT_NAME} STATIC ${SRCS})
 target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 11)
 set_property(TARGET ${PROJECT_NAME} PROPERTY POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(${PROJECT_NAME} Boost::thread OpenGL::GL)
+target_link_libraries(${PROJECT_NAME} Boost::thread)
+if (ENABLE_OPENGL)
+target_link_libraries(${PROJECT_NAME} OpenGL::GL)
+target_compile_definitions(${PROJECT_NAME} PRIVATE ENABLE_OPENGL=1)
+else()
+target_compile_definitions(${PROJECT_NAME} PRIVATE ENABLE_OPENGL=0)
+endif()
 
 include(CTest)
 

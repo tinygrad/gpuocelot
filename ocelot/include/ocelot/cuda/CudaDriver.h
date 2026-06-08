@@ -15,10 +15,14 @@
 #endif
 
 // OpenGL Includes
+#if ENABLE_OPENGL
 #ifdef __APPLE__
 #include <OpenGL/gl.h>
 #else
 #include <GL/gl.h>
+#endif
+#else
+typedef unsigned int GLuint;
 #endif
 
 // Standard Library Includes

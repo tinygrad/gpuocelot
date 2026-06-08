@@ -4,6 +4,7 @@ option(BUILD_LLVM "Use LLVM compiled from sources: default OFF" OFF)
 option(BUILD_TESTS "Build tests: default OFF" OFF)
 option(BUILD_TESTS_CUDA "Build CUDA tests: default ON" ON)
 option(BUILD_TOOLS "Build tool executables: default ON" ON)
+option(ENABLE_OPENGL "Build OpenGL interop support" OFF)
 
 if (NOT APPLE AND BUILD_TESTS AND BUILD_TESTS_CUDA)
 	project(gpuocelot C CXX CUDA ASM)
@@ -36,10 +37,13 @@ set(Boost_USE_MULTITHREADED ON)
 find_package(Boost COMPONENTS filesystem thread REQUIRED)
 find_package(FLEX 2.5 REQUIRED)
 find_package(BISON 2.5 REQUIRED)
-find_package(GLEW REQUIRED)
 find_package(ZLIB REQUIRED)
 find_library(ZSTD_LIB NAMES zstd libzstd)
 find_package(Curses REQUIRED)
+
+if (ENABLE_OPENGL)
+find_package(GLEW REQUIRED)
+endif()
 
 if ("x${BUILD_LLVM}" STREQUAL "xOFF")
 find_package(LLVM REQUIRED CONFIG)
@@ -239,19 +243,25 @@ separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND ${PROJECT_NAME}_DEFINITI
 
 set(${PROJECT_NAME}_INCLUDE_DIRS
 	${LLVM_INCLUDE_DIRS}
-	${GLEW_INCLUDE_DIRS}
 	${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/cuda-fatbin-decompression
 	${CMAKE_CURRENT_SOURCE_DIR}/include
 	${CMAKE_CURRENT_BINARY_DIR})
 
 set(${PROJECT_NAME}_LINK_LIBRARIES
-	GLEW::GLEW
 	hydrazine
 	Boost::filesystem
 	ZLIB::ZLIB
 	${CURSES_LIBRARIES}
 	${ZSTD_LIB}
 	${CMAKE_DL_LIBS})
+
+if (ENABLE_OPENGL)
+list(APPEND ${PROJECT_NAME}_INCLUDE_DIRS ${GLEW_INCLUDE_DIRS})
+list(APPEND ${PROJECT_NAME}_LINK_LIBRARIES GLEW::GLEW)
+list(APPEND ${PROJECT_NAME}_DEFINITIONS ENABLE_OPENGL=1)
+else()
+list(APPEND ${PROJECT_NAME}_DEFINITIONS ENABLE_OPENGL=0)
+endif()
 
 if ("x${BUILD_LLVM}" STREQUAL "xON")
 list(APPEND ${PROJECT_NAME}_LINK_LIBRARIES llvm)

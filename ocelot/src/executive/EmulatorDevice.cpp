@@ -24,7 +24,9 @@
 #endif
 
 // OpenGL includes
+#if ENABLE_OPENGL
 #include <GL/glew.h>
+#endif
 
 // Standard library includes
 #include <cstring>
@@ -574,6 +576,7 @@ namespace executive
 	void EmulatorDevice::mapGraphicsResource(void** resource, int count, 
 		unsigned int stream)
 	{
+#if ENABLE_OPENGL
 		report("mapGraphicsResource(" << resource << ", " 
 			<< count << ", " << stream << ")");
 		
@@ -626,6 +629,9 @@ namespace executive
 				Throw("OpenGL Error in mapGraphicsResource() - glBindBuffer2.")
 			}
 		}
+#else
+		Throw("OpenGL interop disabled.");
+#endif
 	}
 
 	void* EmulatorDevice::getPointerToMappedGraphicsResource(size_t& size, 
@@ -668,6 +674,7 @@ namespace executive
 	void EmulatorDevice::unmapGraphicsResource(void** resource, int count,
 		unsigned int streamID)
 	{
+#if ENABLE_OPENGL
 		for (int i = 0; i < count; i++) {
 			unsigned int handle = hydrazine::bit_cast<unsigned int>(
 				resource[i]);
@@ -713,6 +720,9 @@ namespace executive
 				Throw("OpenGL Error in unmapGraphicsResource() - glBindBuffer.")
 			}
 		}
+#else
+		Throw("OpenGL interop disabled.");
+#endif
 	}
 
 	void EmulatorDevice::load(const ir::Module* module)
