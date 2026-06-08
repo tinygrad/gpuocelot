@@ -27,7 +27,7 @@ jobs:
         run: cmake -S ocelot -B ocelot/build -G Ninja -DBUILD_TESTS=ON -DBUILD_TESTS_CUDA=OFF -DLLVM_DIR=$(llvm-config-15 --cmakedir)
       - name: Configure (macOS)
         if: runner.os == 'macOS'
-        run: cmake -S ocelot -B ocelot/build -G Ninja -DBUILD_TESTS=ON -DBUILD_TESTS_CUDA=OFF
+        run: cmake -S ocelot -B ocelot/build -G Ninja -DBUILD_TESTS=ON -DBUILD_TESTS_CUDA=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
       - name: Build
         run: cmake --build ocelot/build
       - name: Test
