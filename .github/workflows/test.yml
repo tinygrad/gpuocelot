@@ -33,12 +33,10 @@ jobs:
         run: |
           cd ${{ github.workspace }}/boost
           git submodule update --depth 1 --init tools/boostdep
-          git submodule update --depth 1 --init libs/filesystem
-          git submodule update --depth 1 --init libs/thread
-          git submodule update --depth 1 --init libs/random
           python tools/boostdep/depinst/depinst.py -X test -g "--depth 1" filesystem
           python tools/boostdep/depinst/depinst.py -X test -g "--depth 1" thread
           python tools/boostdep/depinst/depinst.py -X test -g "--depth 1" random
+          python tools/boostdep/depinst/depinst.py -X test -g "--depth 1" asio
           ./bootstrap.sh --prefix=${{ github.workspace }}/boost-fpic
           ./b2 install link=static runtime-link=shared threading=multi variant=release cxxflags=-fPIC
       - name: Configure (Linux)
