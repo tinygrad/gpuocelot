@@ -32,7 +32,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cd ${{ github.workspace }}/boost
-          git submodule update --depth 1 --init tools/boostdep
+          git submodule update --depth 1 --init tools/boostdep libs/filesystem libs/thread libs/random libs/asio
           python tools/boostdep/depinst/depinst.py -X test -g "--depth 1" filesystem
           python tools/boostdep/depinst/depinst.py -X test -g "--depth 1" thread
           python tools/boostdep/depinst/depinst.py -X test -g "--depth 1" random
