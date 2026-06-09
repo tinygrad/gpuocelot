@@ -21,7 +21,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get -y --no-install-recommends install git g++ cmake ninja-build llvm-15-dev zlib1g-dev libglew-dev flex bison libfl-dev libboost-thread-dev libboost-filesystem-dev libzstd-dev
       - name: Install macOS deps
         if: runner.os == 'macOS'
-        run: brew install cmake ninja llvm@15 zlib glew flex bison boost@1.85 zstd ncurses
+        run: brew install cmake ninja llvm@15 zlib glew flex bison boost zstd ncurses
       - name: Configure (Linux)
         if: runner.os == 'Linux'
         run: cmake -S ocelot -B ocelot/build -G Ninja -DBUILD_TESTS=ON -DBUILD_TESTS_CUDA=OFF -DLLVM_DIR=$(llvm-config-15 --cmakedir)

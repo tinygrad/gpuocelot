@@ -30,7 +30,10 @@ if (APPLE)
 		"/opt/homebrew/opt/bison")
 endif()
 
-find_package(Boost COMPONENTS system filesystem REQUIRED)
+set(Boost_USE_STATIC_LIBS ON)
+set(Boost_USE_MULTITHREADED ON)
+
+find_package(Boost COMPONENTS filesystem thread REQUIRED)
 find_package(FLEX 2.5 REQUIRED)
 find_package(BISON 2.5 REQUIRED)
 find_package(GLEW REQUIRED)
@@ -244,7 +247,6 @@ set(${PROJECT_NAME}_INCLUDE_DIRS
 set(${PROJECT_NAME}_LINK_LIBRARIES
 	GLEW::GLEW
 	hydrazine
-	Boost::system
 	Boost::filesystem
 	ZLIB::ZLIB
 	${CURSES_LIBRARIES}
