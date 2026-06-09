@@ -18,10 +18,10 @@ jobs:
           submodules: recursive
       - name: Install Linux deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get -y --no-install-recommends install git g++ cmake ninja-build llvm-15-dev zlib1g-dev libglew-dev flex bison libfl-dev libzstd-dev
+        run: sudo apt-get update && sudo apt-get -y --no-install-recommends install git g++ cmake ninja-build llvm-15-dev zlib1g-dev flex bison libfl-dev libzstd-dev
       - name: Install macOS deps
         if: runner.os == 'macOS'
-        run: brew install cmake ninja llvm@15 zlib glew flex bison boost zstd ncurses
+        run: brew install cmake ninja llvm@15 zlib flex bison boost zstd ncurses
       - uses: actions/checkout@v6
         if: runner.os == 'Linux'
         with:
