@@ -9,7 +9,9 @@
 #include <ocelot/executive/NVIDIAGPUDevice.h>
 #include <ocelot/executive/ATIGPUDevice.h>
 #include <ocelot/executive/EmulatorDevice.h>
+#if ENABLE_LLVM
 #include <ocelot/executive/MulticoreCPUDevice.h>
+#endif
 #include <ocelot/executive/RemoteDevice.h>
 #include <ocelot/executive/PassThroughDevice.h>
 #include <ocelot/api/OcelotConfiguration.h>
@@ -86,7 +88,9 @@ executive::DeviceVector executive::Device::createDevices(
 		break;
 		case ir::Instruction::LLVM:
 		{
+#if ENABLE_LLVM
 			devices.push_back(new MulticoreCPUDevice(flags));
+#endif
 		}
 		break;
 		case ir::Instruction::CAL:
@@ -135,7 +139,11 @@ unsigned int executive::Device::deviceCount(ir::Instruction::Architecture isa,
 		break;
 		case ir::Instruction::LLVM:
 		{
+#if ENABLE_LLVM
 			return 1;
+#else
+			return 0;
+#endif
 		}
 		break;
 		case ir::Instruction::CAL:

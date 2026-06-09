@@ -9,9 +9,11 @@
 
 // Ocelot Includes
 #include <ocelot/ir/ExternalFunctionSet.h>
-#include <ocelot/executive/LLVMState.h>
 #include <ocelot/ir/PTXKernel.h>
+#if ENABLE_LLVM
 #include <ocelot/ir/LLVMKernel.h>
+#include <ocelot/executive/LLVMState.h>
+#endif
 
 // Hydrazine Includes
 #include <hydrazine/Casts.h>
@@ -19,6 +21,7 @@
 #include <hydrazine/Exception.h>
 
 // LLVM Includes
+#if ENABLE_LLVM
 #include <llvm/Transforms/Scalar.h>
 #include "llvm/IR/LegacyPassManager.h"
 #include <llvm/ExecutionEngine/ExecutionEngine.h>
@@ -28,6 +31,7 @@
 #include <llvm/IR/Module.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
+#endif
 
 // Preprocessor Macros
 #ifdef REPORT_BASE
@@ -37,6 +41,7 @@
 #define REPORT_BASE 0
 #define REPORT_LLVM 0
 
+#if ENABLE_LLVM
 using namespace llvm::legacy;
 
 namespace llvm {
@@ -44,6 +49,7 @@ namespace llvm {
 LLVMContext &getGlobalContext();
 
 } // namespace llvm
+#endif
 
 namespace ir
 {
@@ -54,6 +60,7 @@ static unsigned int align(unsigned int address, unsigned int alignment)
 	return remainder == 0 ? address : (address + alignment - remainder);
 }
 
+#if ENABLE_LLVM
 static LLVMInstruction::DataType translateType(PTXOperand::DataType t)
 {
 	switch(t)
@@ -118,7 +125,7 @@ static std::string getValueString(unsigned int value)
 	return stream.str();
 }
 
-static std::unique_ptr<llvm::Module> jitFunction(
+static std::unique_ptr<ExternalFunctionModule> jitFunction(
 	const ExternalFunctionSet::ExternalFunction& f,
 	const PTXKernel::Prototype& prototype)
 {
@@ -344,9 +351,10 @@ static std::unique_ptr<llvm::Module> jitFunction(
 	// done, the function is now in the module
 	return m;
 }
+#endif // ENABLE_LLVM
 
 ExternalFunctionSet::ExternalFunction::ExternalFunction(const std::string& i,
-	void* f, llvm::Module* m)
+	void* f, ExternalFunctionModule* m)
 : _name(i), _functionPointer(f), _module(m), _externalFunctionPointer(0)
 {
 	
@@ -355,6 +363,7 @@ ExternalFunctionSet::ExternalFunction::ExternalFunction(const std::string& i,
 void ExternalFunctionSet::ExternalFunction::call(void* parameters,
 	const ir::PTXKernel::Prototype& p)
 {
+#if ENABLE_LLVM
 	if(!_externalFunctionPointer)
 	{	
 		assert(_module);
@@ -375,6 +384,9 @@ void ExternalFunctionSet::ExternalFunction::call(void* parameters,
 	
 	// call through the interface to the external function
 	_externalFunctionPointer(parameters);
+#else
+	throw hydrazine::Exception("Calling registered host functions requires LLVM support.");
+#endif
 }
 
 const std::string& ExternalFunctionSet::ExternalFunction::name() const
@@ -397,17 +409,19 @@ ExternalFunctionSet::ExternalFunctionSet()
 {
 }
 
-llvm::Module* ExternalFunctionSet::_module()
+ExternalFunctionModule* ExternalFunctionSet::_module()
 {
+#if ENABLE_LLVM
 	if (!module)
 		module = new llvm::Module("_ZOcelotExternalFunctionModule",
                 	llvm::getGlobalContext());
-
+#endif
 	return module;
 }
 
 ExternalFunctionSet::~ExternalFunctionSet()
 {
+#if ENABLE_LLVM
 	for(FunctionSet::const_iterator external = _functions.begin();
 		external != _functions.end(); ++external)
 	{
@@ -424,6 +438,7 @@ ExternalFunctionSet::~ExternalFunctionSet()
 	executive::LLVMState::jit()->removeModule(_module());
 
 	delete _module();
+#endif
 }
 
 void ExternalFunctionSet::add(const std::string& name, void* pointer)
@@ -450,6 +465,7 @@ void ExternalFunctionSet::remove(const std::string& name)
 	
 	report("Removing function " << name);
 
+#if ENABLE_LLVM
 	llvm::Function* llvmFunction = _module()->getFunction(
 		function->second.mangledName());
 	if(llvmFunction != 0)
@@ -466,6 +482,7 @@ void ExternalFunctionSet::remove(const std::string& name)
 			<< function->second.name() << " in module.");
 		global->eraseFromParent();
 	}
+#endif
 
 	_functions.erase(function);
 }

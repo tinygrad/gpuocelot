@@ -11,10 +11,18 @@
 #include <ocelot/ir/PTXKernel.h>
 
 // Forward Declarations
+#if ENABLE_LLVM
 namespace llvm { class Module; }
+#endif
 
 namespace ir
 {
+
+#if ENABLE_LLVM
+typedef llvm::Module ExternalFunctionModule;
+#else
+struct ExternalFunctionModule;
+#endif
 
 /*! \brief Holds a collection of external functions
 
@@ -33,7 +41,7 @@ public:
 	{
 	public:
 		ExternalFunction(const std::string& identifier = "",
-			void* functionPointer = 0, llvm::Module* m = 0);
+			void* functionPointer = 0, ExternalFunctionModule* m = 0);
 	
 	public:
 		void call(void* parameters, const ir::PTXKernel::Prototype& p);
@@ -45,10 +53,10 @@ public:
 		typedef void (*ExternalCallType)(void*);
 		
 	private:
-		std::string      _name;
-		void*            _functionPointer;
-		llvm::Module*    _module;
-		ExternalCallType _externalFunctionPointer;
+		std::string             _name;
+		void*                   _functionPointer;
+		ExternalFunctionModule* _module;
+		ExternalCallType        _externalFunctionPointer;
 	};
 
 	typedef std::map<std::string, ExternalFunction> FunctionSet;
@@ -71,10 +79,10 @@ public:
 	ExternalFunction* find(const std::string& name) const;
 	
 private:
-	FunctionSet   _functions;
-	llvm::Module* module;
+	FunctionSet             _functions;
+	ExternalFunctionModule* module;
 
-	llvm::Module* _module();
+	ExternalFunctionModule* _module();
 
 };
 
