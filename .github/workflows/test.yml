@@ -20,7 +20,7 @@ jobs:
           submodules: recursive
       - name: Install Linux deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get -y --no-install-recommends install cmake ninja-build
+        run: sudo apt-get update && sudo apt-get -y --no-install-recommends install cmake ninja-build libfl-dev
       - name: Install macOS deps
         if: runner.os == 'macOS'
         run: brew install flex bison boost
@@ -43,7 +43,7 @@ jobs:
           ./b2 install link=static runtime-link=shared threading=multi variant=release cxxflags=-fPIC
       - name: Configure (Linux)
         if: runner.os == 'Linux'
-        run: cmake -S ocelot -B ocelot/build -G Ninja -DBUILD_TESTS=ON -DBUILD_TESTS_CUDA=OFF -DLLVM_DIR=$(llvm-config-15 --cmakedir) -DBOOST_ROOT=${{ github.workspace }}/boost-fpic
+        run: cmake -S ocelot -B ocelot/build -G Ninja -DBUILD_TESTS=ON -DBUILD_TESTS_CUDA=OFF -DBOOST_ROOT=${{ github.workspace }}/boost-fpic
       - name: Configure (macOS)
         if: runner.os == 'macOS'
         run: cmake -S ocelot -B ocelot/build -G Ninja -DBUILD_TESTS=ON -DBUILD_TESTS_CUDA=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
