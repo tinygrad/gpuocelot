@@ -859,6 +859,52 @@ ir::PTXS64 executive::CooperativeThreadArray::getRegAsS64(int threadID,
 	\param threadID ID of the active thread
 	\reg register index
 */
+/*!
+	PTX keeps .f16 values as an IEEE754 binary16 bit pattern in the low half of the
+	register slot. f32 represents every f16 exactly, so widening is lossless and a
+	cvt from f16 is exactly the cvt from the widened f32.
+*/
+static ir::PTXF32 halfToFloat(ir::PTXU16 h) {
+	ir::PTXU32 sign = (ir::PTXU32)(h & 0x8000) << 16;
+	ir::PTXU32 exp = (h >> 10) & 0x1f, mant = h & 0x3ff, bits;
+	if (exp == 0) {
+		if (mant == 0) bits = sign;
+		else {
+			exp = 127 - 15 + 1;
+			while ((mant & 0x400) == 0) { mant <<= 1; --exp; }
+			bits = sign | (exp << 23) | ((mant & 0x3ff) << 13);
+		}
+	}
+	else if (exp == 0x1f) bits = sign | 0x7f800000 | (mant << 13);
+	else bits = sign | ((exp - 15 + 127) << 23) | (mant << 13);
+	return hydrazine::bit_cast<ir::PTXF32>(bits);
+}
+
+/*! binary32 to binary16, round to nearest even, which is the PTX cvt.rn default. */
+static ir::PTXU16 floatToHalf(ir::PTXF32 f) {
+	ir::PTXU32 bits = hydrazine::bit_cast<ir::PTXU32>(f);
+	ir::PTXU16 sign = (ir::PTXU16)((bits >> 16) & 0x8000);
+	ir::PTXU32 rawexp = (bits >> 23) & 0xff, mant = bits & 0x7fffff;
+	if (rawexp == 0xff) {
+		return sign | 0x7c00 | (mant ? (ir::PTXU16)((mant >> 13) | 0x200) : 0);
+	}
+	int exp = (int)rawexp - 127 + 15;
+	if (exp >= 0x1f) return sign | 0x7c00;
+	if (exp <= 0) {
+		if (exp < -10) return sign;
+		mant |= 0x800000;
+		int shift = 14 - exp;
+		ir::PTXU32 h = mant >> shift;
+		ir::PTXU32 rem = mant & ((1u << shift) - 1), half = 1u << (shift - 1);
+		if (rem > half || (rem == half && (h & 1))) ++h;
+		return sign | (ir::PTXU16)h;
+	}
+	ir::PTXU16 h = (ir::PTXU16)((exp << 10) | (mant >> 13));
+	ir::PTXU32 rem = mant & 0x1fff;
+	if (rem > 0x1000 || (rem == 0x1000 && (h & 1))) ++h;
+	return sign | h;
+}
+
 ir::PTXF32 executive::CooperativeThreadArray::getRegAsF32(int threadID,
 	ir::PTXOperand::RegisterType reg) {
 	ir::PTXF32 r = *( (ir::PTXF32*)(
@@ -1500,6 +1546,9 @@ ir::PTXF32 executive::CooperativeThreadArray::operandAsF32(int threadID,
 	const ir::PTXOperand &op) {
 	switch (op.addressMode) {
 		case ir::PTXOperand::Register:
+			if (op.type == ir::PTXOperand::f16) {
+				return halfToFloat(getRegAsB16(threadID, op.reg));
+			}
 			return getRegAsF32(threadID, op.reg);
 		case ir::PTXOperand::Immediate:
 			return (ir::PTXF32)(op.imm_single);
@@ -1717,7 +1766,16 @@ void executive::CooperativeThreadArray::eval_Abs(CTAContext &context,
 void executive::CooperativeThreadArray::eval_Add(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
-	if (instr.type == ir::PTXOperand::f32) {
+	if (instr.type == ir::PTXOperand::f16) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			ir::PTXF32 a = operandAsF32(threadID, instr.a),
+				b = operandAsF32(threadID, instr.b);
+			setRegAsB16(threadID, instr.d.reg,
+				floatToHalf(sat(instr.modifier, a + b)));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f32) {
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
 			ir::PTXF32 d, a = ftz(instr.modifier, operandAsF32(threadID, instr.a)),
@@ -3009,6 +3067,13 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
+					case ir::PTXOperand::f16:
+						{
+							setRegAsB16(threadID, instr.d.reg,
+								floatToHalf(toF32(operandAsB8(threadID, instr.a),
+								instr.modifier)));
+						}
+						break;
 					case ir::PTXOperand::f32:
 						{
 							setRegAsF32(threadID, instr.d.reg,
@@ -3057,6 +3122,13 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 								a = max(a, 0);
 							}
 							setRegAsU64(threadID, instr.d.reg, a);
+						}
+						break;
+					case ir::PTXOperand::f16:
+						{
+							setRegAsB16(threadID, instr.d.reg,
+								floatToHalf(toF32(operandAsS8(threadID, instr.a),
+								instr.modifier)));
 						}
 						break;
 					case ir::PTXOperand::f32:
@@ -3126,6 +3198,13 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
+					case ir::PTXOperand::f16:
+						{
+							setRegAsB16(threadID, instr.d.reg,
+								floatToHalf(toF32(operandAsB16(threadID, instr.a),
+								instr.modifier)));
+						}
+						break;
 					case ir::PTXOperand::f32:
 						{
 							setRegAsF32(threadID, instr.d.reg,
@@ -3190,6 +3269,13 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 								a = max(a, 0);
 							}
 							setRegAsU64(threadID, instr.d.reg, a);
+						}
+						break;
+					case ir::PTXOperand::f16:
+						{
+							setRegAsB16(threadID, instr.d.reg,
+								floatToHalf(toF32(operandAsS16(threadID, instr.a),
+								instr.modifier)));
 						}
 						break;
 					case ir::PTXOperand::f32:
@@ -3274,6 +3360,13 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
+					case ir::PTXOperand::f16:
+						{
+							setRegAsB16(threadID, instr.d.reg,
+								floatToHalf(toF32(operandAsU32(threadID, instr.a),
+								instr.modifier)));
+						}
+						break;
 					case ir::PTXOperand::f32:
 						{
 							setRegAsF32(threadID, instr.d.reg,
@@ -3352,6 +3445,13 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 						{
 							ir::PTXS32 a = operandAsS32(threadID, instr.a);
 							setRegAsS64(threadID, instr.d.reg, a);
+						}
+						break;
+					case ir::PTXOperand::f16:
+						{
+							setRegAsB16(threadID, instr.d.reg,
+								floatToHalf(toF32(operandAsS32(threadID, instr.a),
+								instr.modifier)));
 						}
 						break;
 					case ir::PTXOperand::f32:
@@ -3447,6 +3547,13 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 						{
 							ir::PTXS64 a = operandAsS64(threadID, instr.a);
 							setRegAsS64(threadID, instr.d.reg, a);
+						}
+						break;
+					case ir::PTXOperand::f16:
+						{
+							setRegAsB16(threadID, instr.d.reg,
+								floatToHalf(toF32(operandAsS64(threadID, instr.a),
+								instr.modifier)));
 						}
 						break;
 					case ir::PTXOperand::f32:
@@ -3546,6 +3653,13 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
+					case ir::PTXOperand::f16:
+						{
+							setRegAsB16(threadID, instr.d.reg,
+								floatToHalf(toF32(operandAsU64(threadID, instr.a),
+								instr.modifier)));
+						}
+						break;
 					case ir::PTXOperand::f32:
 						{
 							setRegAsF32(threadID, instr.d.reg,
@@ -3567,6 +3681,7 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 				}
 			}
 			break;
+			case ir::PTXOperand::f16: // fall through, widened by operandAsF32
 			case ir::PTXOperand::f32:
 			{
 				switch (instr.type) {
@@ -3725,6 +3840,17 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 								d = fd;
 							}
 							setRegAsS64(threadID, instr.d.reg, d);
+						}
+						break;
+					case ir::PTXOperand::f16:
+						{
+							ir::PTXF32 a = operandAsF32(threadID, instr.a);
+
+							a = roundToInt(a, instr.modifier, context,
+								instr);
+
+							setRegAsB16(threadID, instr.d.reg,
+								floatToHalf(sat(instr.modifier, a)));
 						}
 						break;
 					case ir::PTXOperand::f32:
@@ -3912,6 +4038,13 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 								d = a;
 							}
 							setRegAsS64(threadID, instr.d.reg, d);
+						}
+						break;
+					case ir::PTXOperand::f16:
+						{
+							ir::PTXF64 a = operandAsF64(threadID, instr.a);
+							setRegAsB16(threadID, instr.d.reg,
+								floatToHalf(toF32(a, instr.modifier)));
 						}
 						break;
 					case ir::PTXOperand::f32:
@@ -4373,7 +4506,15 @@ void executive::CooperativeThreadArray::eval_Div(CTAContext &context,
 void executive::CooperativeThreadArray::eval_Ex2(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
-	if (instr.type == ir::PTXOperand::f32) {
+	if (instr.type == ir::PTXOperand::f16) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			ir::PTXF32 a = operandAsF32(threadID, instr.a);
+			setRegAsB16(threadID, instr.d.reg,
+				floatToHalf(hydrazine::exp2f(a)));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f32) {
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
 
@@ -5316,7 +5457,19 @@ void executive::CooperativeThreadArray::eval_Mad(CTAContext &context,
 void executive::CooperativeThreadArray::eval_Max(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
-	if (instr.type == ir::PTXOperand::f32) {
+	if (instr.type == ir::PTXOperand::f16) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			ir::PTXF32 a = operandAsF32(threadID, instr.a),
+				b = operandAsF32(threadID, instr.b);
+			ir::PTXF32 d;
+			if (hydrazine::isnan(a)) d = b;
+			else if (hydrazine::isnan(b)) d = a;
+			else d = (a > b) ? a : b;
+			setRegAsB16(threadID, instr.d.reg, floatToHalf(d));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f32) {
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
 
@@ -5808,6 +5961,7 @@ void executive::CooperativeThreadArray::eval_Mov_imm(CTAContext &context,
 		case ir::PTXOperand::u16:
 		case ir::PTXOperand::s16:
 		case ir::PTXOperand::b16:
+		case ir::PTXOperand::f16: // PTX materializes a half constant as mov.b16 into an .f16 reg
 			{
 				ir::PTXU16 a = operandAsU16(threadID, instr.a);
 				setRegAsU16(threadID, instr.d.reg, a);
@@ -5950,7 +6104,16 @@ void executive::CooperativeThreadArray::eval_Mul24(CTAContext &context, const ir
 */
 void executive::CooperativeThreadArray::eval_Mul(CTAContext &context, const ir::PTXInstruction &instr) {
 	trace();
-	if (instr.type == ir::PTXOperand::f32) {
+	if (instr.type == ir::PTXOperand::f16) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			ir::PTXF32 a = operandAsF32(threadID, instr.a),
+				b = operandAsF32(threadID, instr.b);
+			setRegAsB16(threadID, instr.d.reg,
+				floatToHalf(sat(instr.modifier, a * b)));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f32) {
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
 
@@ -7132,6 +7295,7 @@ void executive::CooperativeThreadArray::eval_SetP(CTAContext &context,
 		}
 		break;
 
+		case ir::PTXOperand::f16: // fall through, widened by operandAsF32
 		// single-precision float
 		case ir::PTXOperand::f32:
 		{
