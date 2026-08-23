@@ -425,6 +425,7 @@ namespace executive {
 		ir::PTXS64 operandAsS64(int, const ir::PTXOperand &);
 
 		ir::PTXF32 operandAsF32(int, const ir::PTXOperand &);
+		ir::PTXF32 operandAsHalf(int, const ir::PTXOperand &);
 		ir::PTXF64 operandAsF64(int, const ir::PTXOperand &);
 
 		ir::PTXB8 operandAsB8(int, const ir::PTXOperand &);
