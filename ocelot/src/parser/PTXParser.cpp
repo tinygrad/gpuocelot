@@ -376,7 +376,7 @@ namespace parser
 		
 	}
 	
-	void PTXParser::State::ctapersm( int target, unsigned int ctas )
+	void PTXParser::State::ctapersm( const char* target, unsigned int ctas )
 	{
 		report( "  Rule: shareModel ':' TOKEN_DECIMAL_CONSTANT" );
 	}
@@ -598,15 +598,7 @@ namespace parser
 	void PTXParser::State::targetElement( int token )
 	{
 		report( "  Rule: targetOption" );
-		if( token == TOKEN_SM10 ) statement.targets.push_back( "sm_10" );
-		else if( token == TOKEN_SM11 ) statement.targets.push_back( "sm_11" );
-		else if( token == TOKEN_SM12 ) statement.targets.push_back( "sm_12" );
-		else if( token == TOKEN_SM13 ) statement.targets.push_back( "sm_13" );
-		else if( token == TOKEN_SM20 ) statement.targets.push_back( "sm_20" );
-		else if( token == TOKEN_SM21 ) statement.targets.push_back( "sm_21" );
-		else if( token == TOKEN_SM30 ) statement.targets.push_back( "sm_30" );
-		else if( token == TOKEN_SM35 ) statement.targets.push_back( "sm_35" );
-		else if( token == TOKEN_MAP_F64_TO_F32 )
+		if( token == TOKEN_MAP_F64_TO_F32 )
 		{
 			statement.targets.push_back( "map_f64_to_f32" );
 		}
@@ -620,6 +612,12 @@ namespace parser
 		{
 			assertM(false, "Ocelot internal error - invalid token.");
 		}
+	}
+	
+	void PTXParser::State::targetElement( const char* target )
+	{
+		report( "  Rule: targetOption" );
+		statement.targets.push_back( target );
 	}
 	
 	void PTXParser::State::target()

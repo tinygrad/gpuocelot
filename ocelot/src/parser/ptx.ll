@@ -317,22 +317,7 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
 ".gl"                           { yylval->value = TOKEN_GL; return TOKEN_GL; }
 ".sys"                          { yylval->value = TOKEN_SYS; return TOKEN_SYS; }
 
-"sm_10"                         { yylval->value = TOKEN_SM10; 
-                                    return TOKEN_SM10; }
-"sm_11"                         { yylval->value = TOKEN_SM11; 
-                                    return TOKEN_SM11; }
-"sm_12"                         { yylval->value = TOKEN_SM12; 
-                                    return TOKEN_SM12; }
-"sm_13"                         { yylval->value = TOKEN_SM13; 
-                                    return TOKEN_SM13; }
-"sm_20"                         { yylval->value = TOKEN_SM20; 
-                                    return TOKEN_SM20; }
-"sm_21"                         { yylval->value = TOKEN_SM21; 
-                                    return TOKEN_SM21; }
-"sm_30"                         { yylval->value = TOKEN_SM30; 
-                                    return TOKEN_SM30; }
-"sm_35"                         { yylval->value = TOKEN_SM35; 
-                                    return TOKEN_SM35; }
+"sm_"[0-9]+[a-zA-Z]*            { sstrcpy( yylval->text, yytext, 1024 ); return TOKEN_SHADER_MODEL; }
 "map_f64_to_f32"                { yylval->value = TOKEN_MAP_F64_TO_F32; 
                                     return TOKEN_MAP_F64_TO_F32; }
 "texmode_independent"           { yylval->value = TOKEN_TEXMODE_INDEPENDENT; 

@@ -150,7 +150,7 @@ namespace parser
 					void maxnreg( unsigned int regs );
 					void maxntid( unsigned int tidx, unsigned int tidy = 1024, 
 						unsigned int tidz = 1024 );
-					void ctapersm( int target, unsigned int ctas );
+					void ctapersm( const char* target, unsigned int ctas );
 					void maxnctapersm( unsigned int ctas );
 					void maxnctapersm();
 					void minnctapersm( unsigned int ctas );
@@ -171,6 +171,7 @@ namespace parser
 					void singleList( float value );
 					void singleList1( float value );
 					void targetElement( int token );
+					void targetElement( const char* target );
 					void target();
 					void noAddressSpace();
 					void addressSpace( int token );

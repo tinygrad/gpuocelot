@@ -76,8 +76,8 @@
 %token<value> TOKEN_SECTION TOKEN_ADDRESS_SIZE TOKEN_WEAK
 
 %token<value> TOKEN_MAXNREG TOKEN_MAXNTID TOKEN_MAXNCTAPERSM TOKEN_MINNCTAPERSM 
-%token<value> TOKEN_SM11 TOKEN_SM12 TOKEN_SM13 TOKEN_SM20 TOKEN_MAP_F64_TO_F32
-%token<value> TOKEN_SM21 TOKEN_SM10 TOKEN_SM30 TOKEN_SM35
+%token<value> TOKEN_MAP_F64_TO_F32
+%token<text> TOKEN_SHADER_MODEL
 %token<value> TOKEN_TEXMODE_INDEPENDENT TOKEN_TEXMODE_UNIFIED
 
 %token<value> TOKEN_CONST TOKEN_GLOBAL TOKEN_LOCAL TOKEN_PARAM TOKEN_PRAGMA TOKEN_PTR
@@ -259,16 +259,17 @@ singleList : '{' singleListSingle '}' ',' '{' singleListSingle '}';
 singleInitializer : singleList |  '{' singleList '}' | '{' singleListSingle '}' 
 	| singleListSingle;
 
-shaderModel : TOKEN_SM10 | TOKEN_SM11 | TOKEN_SM12 | TOKEN_SM13 | TOKEN_SM20
-	| TOKEN_SM21 | TOKEN_SM30 | TOKEN_SM35;
-	
 floatingPointOption : TOKEN_MAP_F64_TO_F32;
 textureOption: TOKEN_TEXMODE_INDEPENDENT | TOKEN_TEXMODE_UNIFIED;
 
-targetOption : shaderModel | floatingPointOption | textureOption;
+targetOption : floatingPointOption | textureOption;
 targetElement : targetOption
 {
 	state.targetElement( $<value>1 );
+}
+	| TOKEN_SHADER_MODEL
+{
+	state.targetElement( $<text>1 );
 };
 
 targetElementList : /* empty string */ | targetElement 
@@ -603,9 +604,9 @@ maxntid : TOKEN_MAXNTID TOKEN_DECIMAL_CONSTANT ',' TOKEN_DECIMAL_CONSTANT ','
 	state.maxntid( $<value>2, $<value>4, $<value>6 );
 };
 
-ctapersm : shaderModel ':' TOKEN_DECIMAL_CONSTANT
+ctapersm : TOKEN_SHADER_MODEL ':' TOKEN_DECIMAL_CONSTANT
 {
-	state.ctapersm( $<value>1, $<value>3 );
+	state.ctapersm( $<text>1, $<value>3 );
 };
 
 ctapersmList : ctapersm | ctapersmList ',' ctapersm;
