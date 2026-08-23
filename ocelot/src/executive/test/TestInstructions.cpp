@@ -209,6 +209,164 @@ public:
 	/*!
 		Tests several forms of the abs instruction
 	*/
+	/*! \brief half bit patterns used below */
+	enum { H0 = 0x0000, H1 = 0x3C00, H2 = 0x4000, H3 = 0x4200, H4 = 0x4400,
+		HNEG1 = 0xBC00 };
+
+	/*! \brief an f16 operand. tinygrad's PTX renderer declares halves .f16;
+		nvrtc declares them .b16 and leaves the type in relaxedType. */
+	PTXOperand f16reg(PTXOperand::RegisterType r, bool declaredB16 = false) {
+		PTXOperand op = reg("h", declaredB16 ? PTXOperand::b16
+			: PTXOperand::f16, r);
+		if (declaredB16) op.relaxedType = PTXOperand::f16;
+		return op;
+	}
+
+	bool checkHalf(const char* what, PTXOperand::RegisterType r, PTXU16 want) {
+		for (int t = 0; t < threadCount; t++) {
+			PTXU16 got = cta->getRegAsB16(t, r);
+			if (got != want) {
+				status << what << " failed (thread " << t << "): expected 0x"
+					<< std::hex << want << ", got 0x" << got << std::dec << "\n";
+				return false;
+			}
+		}
+		return true;
+	}
+
+	void setHalf(PTXOperand::RegisterType r, PTXU16 bits) {
+		for (int t = 0; t < threadCount; t++) cta->setRegAsB16(t, r, bits);
+	}
+
+	/*! \brief cvt and the ALU rejected or mishandled f16, so no target from
+		sm_53 on could use half at all */
+	bool test_f16() {
+		PTXInstruction ins;
+		cta->reset();
+
+		// cvt.f32.f16, with .f16 and with the .b16 declaration nvrtc emits
+		for (int b16 = 0; b16 < 2; b16++) {
+			ins = PTXInstruction();
+			ins.opcode = PTXInstruction::Cvt;
+			ins.type = PTXOperand::f32;
+			ins.d = reg("f", PTXOperand::f32, 0);
+			ins.a = f16reg(1, b16 != 0);
+			setHalf(1, H2);
+			cta->eval_Cvt(cta->getActiveContext(), ins);
+			for (int t = 0; t < threadCount; t++) {
+				if (cta->getRegAsF32(t, 0) != 2.0f) {
+					status << "cvt.f32.f16 failed for "
+						<< (b16 ? ".b16" : ".f16") << " operand: got "
+						<< cta->getRegAsF32(t, 0) << "\n";
+					return false;
+				}
+			}
+		}
+
+		// cvt.rn.f16.f32 rounds to nearest even, so the two midpoints go to the
+		// even mantissa rather than both going up
+		const float mids[2] = { 1.00048828125f, 1.00146484375f };
+		const PTXU16 wants[2] = { 0x3C00, 0x3C02 };
+		for (int i = 0; i < 2; i++) {
+			ins = PTXInstruction();
+			ins.opcode = PTXInstruction::Cvt;
+			ins.type = PTXOperand::f16;
+			ins.modifier = PTXInstruction::rn;
+			ins.d = f16reg(0);
+			ins.a = reg("f", PTXOperand::f32, 1);
+			for (int t = 0; t < threadCount; t++) cta->setRegAsF32(t, 1, mids[i]);
+			cta->eval_Cvt(cta->getActiveContext(), ins);
+			if (!checkHalf("cvt.rn.f16.f32 ties to even", 0, wants[i])) return false;
+		}
+
+		// binary arithmetic, 2 op 1, with mixed operand declarations
+		ins = PTXInstruction();
+		ins.type = PTXOperand::f16;
+		ins.d = f16reg(0);
+		ins.a = f16reg(1);
+		ins.b = f16reg(2, true);
+		setHalf(1, H2);
+		setHalf(2, H1);
+
+		ins.opcode = PTXInstruction::Add;
+		cta->eval_Add(cta->getActiveContext(), ins);
+		if (!checkHalf("add.f16", 0, H3)) return false;
+
+		ins.opcode = PTXInstruction::Sub;
+		cta->eval_Sub(cta->getActiveContext(), ins);
+		if (!checkHalf("sub.f16", 0, H1)) return false;
+
+		ins.opcode = PTXInstruction::Mul;
+		cta->eval_Mul(cta->getActiveContext(), ins);
+		if (!checkHalf("mul.f16", 0, H2)) return false;
+
+		ins.opcode = PTXInstruction::Min;
+		cta->eval_Min(cta->getActiveContext(), ins);
+		if (!checkHalf("min.f16", 0, H1)) return false;
+
+		ins.opcode = PTXInstruction::Max;
+		cta->eval_Max(cta->getActiveContext(), ins);
+		if (!checkHalf("max.f16", 0, H2)) return false;
+
+		// abs and neg of -1
+		ins = PTXInstruction();
+		ins.type = PTXOperand::f16;
+		ins.d = f16reg(0);
+		ins.a = f16reg(1);
+		setHalf(1, HNEG1);
+
+		ins.opcode = PTXInstruction::Abs;
+		cta->eval_Abs(cta->getActiveContext(), ins);
+		if (!checkHalf("abs.f16", 0, H1)) return false;
+
+		ins.opcode = PTXInstruction::Neg;
+		cta->eval_Neg(cta->getActiveContext(), ins);
+		if (!checkHalf("neg.f16", 0, H1)) return false;
+
+		// fma.rn.f16: 2 * 1 + 1 == 3
+		ins = PTXInstruction();
+		ins.opcode = PTXInstruction::Fma;
+		ins.type = PTXOperand::f16;
+		ins.modifier = PTXInstruction::rn;
+		ins.d = f16reg(0);
+		ins.a = f16reg(1);
+		ins.b = f16reg(2);
+		ins.c = f16reg(3);
+		setHalf(1, H2);
+		setHalf(2, H1);
+		setHalf(3, H1);
+		cta->eval_Fma(cta->getActiveContext(), ins);
+		if (!checkHalf("fma.rn.f16", 0, H3)) return false;
+
+		// set.eq.f16.f16 writes 1.0h or 0.0h, into a register nvrtc declares .b16
+		for (int equal = 0; equal < 2; equal++) {
+			ins = PTXInstruction();
+			ins.opcode = PTXInstruction::Set;
+			ins.type = PTXOperand::f16;
+			ins.comparisonOperator = PTXInstruction::Eq;
+			ins.d = f16reg(0, true);
+			ins.a = f16reg(1, true);
+			ins.b = f16reg(2, true);
+			setHalf(1, H2);
+			setHalf(2, equal ? H2 : H1);
+			cta->eval_Set(cta->getActiveContext(), ins);
+			if (!checkHalf("set.eq.f16.f16", 0, equal ? H1 : H0)) return false;
+		}
+
+		// mov.b16 of a half constant into an .f16 register did nothing at all,
+		// because eval_Mov_imm switches on d.type and fell through to default
+		ins = PTXInstruction();
+		ins.opcode = PTXInstruction::Mov;
+		ins.type = PTXOperand::b16;
+		ins.d = f16reg(0);
+		ins.a = imm_uint("c", PTXOperand::b16, H4);
+		setHalf(0, H0);
+		cta->eval_Mov(cta->getActiveContext(), ins);
+		if (!checkHalf("mov.b16 immediate", 0, H4)) return false;
+
+		return true;
+	}
+
 	bool test_Abs() {
 		bool result = true;
 
@@ -4445,6 +4603,7 @@ public:
 			// cvt instruction
 	
 			// arithmetic instructions
+			result = (result && test_f16());
 			result = (result && test_Abs());
 			result = (result && test_Add());
 			result = (result && test_Sub());
