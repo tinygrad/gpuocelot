@@ -19,6 +19,7 @@
 #include <ocelot/executive/CooperativeThreadArray.h>
 
 #include <cmath>
+#include <limits>
 
 using namespace std;
 using namespace ir;
@@ -42,7 +43,7 @@ public:
 
 		status << "Test output:\n";
 
-		threadCount = 16;
+		threadCount = 32;
 
 		const std::string ptx = "TestInstructions_ptx";
 
@@ -323,6 +324,37 @@ public:
 
 		PTXInstruction ins;
 
+		// f16
+		//
+		if (result) {
+			ins.opcode = PTXInstruction::Add;
+			ins.type = PTXOperand::f16;
+			ins.modifier = PTXInstruction::rn;
+			ins.a = reg("r1", PTXOperand::b16, 0);
+			ins.b = reg("r2", PTXOperand::b16, 1);
+			ins.d = reg("r3", PTXOperand::b16, 2);
+
+			for (int i = 0; i < threadCount; i++) {
+				cta->setRegAsU16(i, 0, 0x3e00); // 1.5
+				cta->setRegAsU16(i, 1, 0x4000); // 2.0
+				cta->setRegAsU16(i, 2, 0);
+			}
+			if (!ins.valid().empty()) {
+				result = false;
+				status << "add.f16 rejected\n";
+			}
+			else {
+				cta->eval_Add(cta->getActiveContext(), ins);
+				for (int i = 0; i < threadCount; i++) {
+					if (cta->getRegAsU16(i, 2) != 0x4300) { // 3.5
+						result = false;
+						status << "add.f16 incorrect\n";
+						break;
+					}
+				}
+			}
+		}
+
 		// u16
 		//
 		if (result) {
@@ -596,6 +628,36 @@ public:
 
 		PTXInstruction ins;
 		ins.opcode = PTXInstruction::Sub;
+
+		// f16
+		//
+		if (result) {
+			ins.type = PTXOperand::f16;
+			ins.modifier = PTXInstruction::rn;
+			ins.a = reg("r1", PTXOperand::b16, 0);
+			ins.b = reg("r2", PTXOperand::b16, 1);
+			ins.d = reg("r3", PTXOperand::b16, 2);
+
+			for (int i = 0; i < threadCount; i++) {
+				cta->setRegAsU16(i, 0, 0x4000); // 2.0
+				cta->setRegAsU16(i, 1, 0x3e00); // 1.5
+				cta->setRegAsU16(i, 2, 0);
+			}
+			if (!ins.valid().empty()) {
+				result = false;
+				status << "sub.f16 rejected\n";
+			}
+			else {
+				cta->eval_Sub(cta->getActiveContext(), ins);
+				for (int i = 0; i < threadCount; i++) {
+					if (cta->getRegAsU16(i, 2) != 0x3800) { // 0.5
+						result = false;
+						status << "sub.f16 incorrect\n";
+						break;
+					}
+				}
+			}
+		}
 
 		// u16
 		//
@@ -1451,6 +1513,62 @@ public:
 		PTXInstruction ins;
 		ins.opcode = PTXInstruction::Neg;
 
+		// bf16
+		//
+		if (result) {
+			ins.type = PTXOperand::bf16;
+			ins.modifier = PTXInstruction::rn;
+			ins.a = reg("r1", PTXOperand::b16, 0);
+			ins.d = reg("r3", PTXOperand::b16, 2);
+
+			for (int i = 0; i < threadCount; i++) {
+				cta->setRegAsU16(i, 0, 0x3fc0); // 1.5
+				cta->setRegAsU16(i, 2, 0);
+			}
+			if (!ins.valid().empty()) {
+				result = false;
+				status << "neg.bf16 rejected\n";
+			}
+			else {
+				cta->eval_Neg(cta->getActiveContext(), ins);
+				for (int i = 0; i < threadCount; i++) {
+					if (cta->getRegAsU16(i, 2) != 0xbfc0) { // -1.5
+						result = false;
+						status << "neg.bf16 incorrect\n";
+						break;
+					}
+				}
+			}
+		}
+
+		// f16
+		//
+		if (result) {
+			ins.type = PTXOperand::f16;
+			ins.modifier = PTXInstruction::rn;
+			ins.a = reg("r1", PTXOperand::b16, 0);
+			ins.d = reg("r3", PTXOperand::b16, 2);
+
+			for (int i = 0; i < threadCount; i++) {
+				cta->setRegAsU16(i, 0, 0x3e00); // 1.5
+				cta->setRegAsU16(i, 2, 0);
+			}
+			if (!ins.valid().empty()) {
+				result = false;
+				status << "neg.f16 rejected\n";
+			}
+			else {
+				cta->eval_Neg(cta->getActiveContext(), ins);
+				for (int i = 0; i < threadCount; i++) {
+					if (cta->getRegAsU16(i, 2) != 0xbe00) { // -1.5
+						result = false;
+						status << "neg.f16 incorrect\n";
+						break;
+					}
+				}
+			}
+		}
+
 		// s16
 		//
 		if (result) {
@@ -2150,6 +2268,39 @@ public:
 		PTXInstruction ins;
 		ins.opcode = PTXInstruction::Mul;
 
+		// f16
+		//
+		if (result) {
+			ins.type = PTXOperand::f16;
+			ins.modifier = 0;
+			ins.a = reg("r1", PTXOperand::b16, 0);
+			ins.b = reg("r2", PTXOperand::b16, 1);
+			ins.c = reg("r3", PTXOperand::b16, 2);
+			ins.d = reg("r4", PTXOperand::b16, 3);
+
+			for (int i = 0; i < threadCount; i++) {
+				cta->setRegAsU16(i, 0, 0x3e00); // 1.5
+				cta->setRegAsU16(i, 1, 0x4000); // 2.0
+				cta->setRegAsU16(i, 2, 0);
+				cta->setRegAsU16(i, 3, 0);
+			}
+			std::string error = ins.valid();
+			if (!error.empty()) {
+				result = false;
+				status << "mul.f16 rejected: " << error << "\n";
+			}
+			else {
+				cta->eval_Mul(cta->getActiveContext(), ins);
+				for (int i = 0; i < threadCount; i++) {
+					if (cta->getRegAsU16(i, 3) != 0x4200) { // 3.0
+						result = false;
+						status << "mul.f16 incorrect\n";
+						break;
+					}
+				}
+			}
+		}
+
 		// u16
 		//
 		if (result) {
@@ -2684,6 +2835,195 @@ public:
 		}
 
 		return result;
+	}
+
+	bool test_Bf16Fma() {
+		PTXInstruction ins;
+		ins.opcode = PTXInstruction::Fma;
+		ins.type = PTXOperand::bf16;
+		ins.modifier = PTXInstruction::rn;
+		ins.a = reg("r1", PTXOperand::b16, 0);
+		ins.b = reg("r2", PTXOperand::b16, 1);
+		ins.c = reg("r4", PTXOperand::b16, 3);
+		ins.d = reg("r3", PTXOperand::b16, 2);
+
+		// 1.0 * 1.0078125 + 0.00390625 is halfway between
+		// 0x3f81 and 0x3f82, so round to the even result 0x3f82.
+		for (int i = 0; i < threadCount; i++) {
+			cta->setRegAsU16(i, 0, 0x3f80);
+			cta->setRegAsU16(i, 1, 0x3f81);
+			cta->setRegAsU16(i, 3, 0x3b80);
+			cta->setRegAsU16(i, 2, 0);
+		}
+
+		cta->eval_Fma(cta->getActiveContext(), ins);
+		for (int i = 0; i < threadCount; i++) {
+			if (cta->getRegAsU16(i, 2) != 0x3f82) {
+				status << "fma.rn.bf16 incorrect [" << i << "]\n";
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	bool test_F16Fma() {
+		PTXInstruction ins;
+		ins.opcode = PTXInstruction::Fma;
+		ins.type = PTXOperand::f16;
+		ins.modifier = PTXInstruction::rn;
+		ins.a = reg("a", PTXOperand::b16, 0);
+		ins.b = reg("b", PTXOperand::b16, 1);
+		ins.c = reg("c", PTXOperand::b16, 3);
+		ins.d = reg("d", PTXOperand::b16, 2);
+
+		// 1.0 * (1.0 + 2^-10) - 2^-11 is halfway between
+		// 1.0 and the next half value, so round to the even result 1.0.
+		for (int i = 0; i < threadCount; i++) {
+			cta->setRegAsU16(i, 0, 0x3c00);
+			cta->setRegAsU16(i, 1, 0x3c01);
+			cta->setRegAsU16(i, 3, 0x9000);
+			cta->setRegAsU16(i, 2, 0);
+		}
+
+		cta->eval_Fma(cta->getActiveContext(), ins);
+		for (int i = 0; i < threadCount; i++) {
+			if (cta->getRegAsU16(i, 2) != 0x3c00) {
+				status << "fma.rn.f16 incorrect [" << i << "]\n";
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	bool test_Mma() {
+		PTXInstruction ins;
+		ins.opcode = PTXInstruction::Mma;
+		ins.type = PTXOperand::f32;
+		ins.modifier = PTXInstruction::rn;
+
+		auto vector = [this](PTXOperand::DataType type,
+			PTXOperand::DataType elementType, PTXOperand::Vec vec,
+			int firstRegister, int count) {
+			PTXOperand operand;
+			operand.addressMode = PTXOperand::Register;
+			operand.type = type;
+			operand.vec = vec;
+			for(int i = 0; i < count; ++i) {
+				operand.array.push_back(reg("mma", elementType,
+					(PTXOperand::RegisterType)(firstRegister + i)));
+			}
+			return operand;
+		};
+
+		ins.d = vector(PTXOperand::f32, PTXOperand::f32,
+			PTXOperand::v4, 0, 4);
+		ins.c = vector(PTXOperand::f32, PTXOperand::f32,
+			PTXOperand::v4, 6, 4);
+		ins.a = vector(PTXOperand::f16, PTXOperand::b32,
+			PTXOperand::v4, 0, 4);
+		ins.b = vector(PTXOperand::f16, PTXOperand::b32,
+			PTXOperand::v2, 4, 2);
+
+		const PTXU16 f16Values[17] = {
+			0x0000, 0x3c00, 0x4000, 0x4200, 0x4400, 0x4500,
+			0x4600, 0x4700, 0x4800, 0x4880, 0x4900, 0x4980,
+			0x4a00, 0x4a80, 0x4b00, 0x4b80, 0x4c00
+		};
+		cta->reset();
+		for(int thread = 0; thread < threadCount; ++thread) {
+			const int lane = thread & 31;
+			const int groupID = lane >> 2;
+			const int threadInGroup = lane & 3;
+			for(int regIndex = 0; regIndex < 4; ++regIndex) {
+				PTXU32 packed = 0;
+				for(int half = 0; half < 2; ++half) {
+					const int i = regIndex * 2 + half;
+					const int row = (i < 2 || (i >= 4 && i < 6))
+						? groupID : groupID + 8;
+					const int value = row + 1;
+					packed |= (PTXU32)f16Values[value] << (16 * half);
+				}
+				cta->setRegAsB32(thread, regIndex, packed);
+			}
+			for(int regIndex = 0; regIndex < 2; ++regIndex) {
+				PTXU32 packed = 0;
+				for(int half = 0; half < 2; ++half) {
+					const int col = groupID;
+					packed |= (PTXU32)f16Values[col + 1] << (16 * half);
+				}
+				cta->setRegAsB32(thread, 4 + regIndex, packed);
+			}
+			for(int i = 0; i < 4; ++i) {
+				const int row = groupID + (i >= 2 ? 8 : 0);
+				const int col = threadInGroup * 2 + (i & 1);
+				cta->setRegAsF32(thread, 6 + i, (PTXF32)(100 * row + col));
+			}
+		}
+
+		cta->eval_Mma(cta->getActiveContext(), ins);
+		for(int thread = 0; thread < threadCount; ++thread) {
+			const int lane = thread & 31;
+			const int groupID = lane >> 2;
+			const int threadInGroup = lane & 3;
+			for(int regIndex = 0; regIndex < 4; ++regIndex) {
+				const int row = groupID + (regIndex >= 2 ? 8 : 0);
+				const int col = threadInGroup * 2 + (regIndex & 1);
+				const PTXF32 expected = 16.0f * (row + 1) * (col + 1)
+					+ (PTXF32)(100 * row + col);
+				if(std::fabs(cta->getRegAsF32(thread, regIndex) - expected) > 0.001f) {
+					status << "mma.m16n8k16.f16 incorrect ["
+						<< thread << "]\n";
+					return false;
+				}
+			}
+		}
+
+		ins.a.type = PTXOperand::bf16;
+		ins.b.type = PTXOperand::bf16;
+		const PTXU32 bf16One = 0x3f803f80u;
+		const PTXU32 bf16Two = 0x40004000u;
+		cta->reset();
+		for(int thread = 0; thread < threadCount; ++thread) {
+			for(int regIndex = 0; regIndex < 4; ++regIndex) {
+				cta->setRegAsB32(thread, regIndex, bf16One);
+			}
+			for(int regIndex = 4; regIndex < 6; ++regIndex) {
+				cta->setRegAsB32(thread, regIndex, bf16Two);
+			}
+			for(int regIndex = 6; regIndex < 10; ++regIndex) {
+				cta->setRegAsF32(thread, regIndex, 3.0f);
+			}
+		}
+
+		cta->eval_Mma(cta->getActiveContext(), ins);
+		for(int thread = 0; thread < threadCount; ++thread) {
+			for(int regIndex = 0; regIndex < 4; ++regIndex) {
+				if(std::fabs(cta->getRegAsF32(thread, regIndex) - 35.0f) > 0.001f) {
+					status << "mma.m16n8k16.bf16 incorrect ["
+						<< thread << "]\n";
+					return false;
+				}
+			}
+		}
+
+		// MMA is warp-collective: a partially active warp must not execute it.
+		cta->getActiveContext().active[0] = false;
+		bool rejectedPartialWarp = false;
+		try {
+			cta->eval_Mma(cta->getActiveContext(), ins);
+		}
+		catch (RuntimeException &) {
+			rejectedPartialWarp = true;
+		}
+		cta->getActiveContext().active[0] = true;
+		if (!rejectedPartialWarp) {
+			status << "mma.m16n8k16 accepted a partial warp\n";
+			return false;
+		}
+
+		return true;
 	}
 
 	bool test_Lg2() {
@@ -3784,6 +4124,52 @@ public:
 			}
 		}
 
+		// pack a 16-bit immediate and register into a 32-bit destination
+		if (result) {
+			ins.d = reg("f10", PTXOperand::f32, 0);
+			ins.a = PTXOperand();
+			ins.a.addressMode = PTXOperand::Register;
+			ins.a.type = PTXOperand::s16;
+			ins.a.vec = PTXOperand::v2;
+			ins.a.array.push_back(imm_uint("0", PTXOperand::s16, 0));
+			ins.a.array.push_back(reg("rs1", PTXOperand::s16, 1));
+			ins.type = PTXOperand::b32;
+
+			for (int i = 0; i < threadCount; ++i) {
+				cta->setRegAsB16(i, 1, 0x3f80);
+			}
+
+			cta->eval_Mov(cta->getActiveContext(), ins);
+
+			for (int i = 0; i < threadCount; ++i) {
+				if (cta->getRegAsB32(i, 0) != 0x3f800000) {
+					result = false;
+					status << "mov.b32 f10, {0, rs1} failed\n";
+					break;
+				}
+			}
+		}
+
+		// pack two 16-bit immediates into a 32-bit destination
+		if (result) {
+			ins.a = PTXOperand();
+			ins.a.addressMode = PTXOperand::Register;
+			ins.a.type = PTXOperand::b16;
+			ins.a.vec = PTXOperand::v2;
+			ins.a.array.push_back(imm_uint("5", PTXOperand::b16, 5));
+			ins.a.array.push_back(imm_uint("3", PTXOperand::b16, 3));
+
+			cta->eval_Mov(cta->getActiveContext(), ins);
+
+			for (int i = 0; i < threadCount; ++i) {
+				if (cta->getRegAsB32(i, 0) != 0x00030005) {
+					result = false;
+					status << "mov.b32 f10, {5, 3} failed\n";
+					break;
+				}
+			}
+		}
+
 		// from label
 	
 		return result;
@@ -3797,7 +4183,160 @@ public:
 
 		cta->reset();
 
-		// 
+		// cvt.rn.bf16.f32
+		ins.type = PTXOperand::bf16;
+		ins.modifier = PTXInstruction::rn;
+		ins.d = reg("d", PTXOperand::b16, 0);
+		ins.a = reg("a", PTXOperand::f32, 1);
+
+		const PTXU32 input[] = {
+			0x3f800000, // exact
+			0x3f807fff, // below halfway
+			0x3f808000, // halfway, upper even
+			0x3f808001, // above halfway
+			0x3f818000, // halfway, upper odd
+			0x00000000, // +0
+			0x80000000, // -0
+			0x7f800000, // +infinity
+			0x7fc00000  // NaN
+		};
+		const PTXU16 expected[] = {
+			0x3f80,
+			0x3f80,
+			0x3f80,
+			0x3f81,
+			0x3f82,
+			0x0000,
+			0x8000,
+			0x7f80,
+			0x7fff
+		};
+		const int cases = sizeof(input) / sizeof(input[0]);
+
+		for (int i = 0; i < threadCount; ++i) {
+			cta->setRegAsU32(i, 1, input[i % cases]);
+			cta->setRegAsU16(i, 0, 0);
+		}
+
+		cta->eval_Cvt(cta->getActiveContext(), ins);
+
+		for (int i = 0; i < threadCount; ++i) {
+			PTXU16 got = cta->getRegAsU16(i, 0);
+			if (got != expected[i % cases]) {
+				status << "cvt.rn.bf16.f32 failed (thread " << i
+					<< "): expected 0x" << hex << expected[i % cases]
+					<< ", got 0x" << got << dec << "\n";
+				result = false;
+				break;
+			}
+		}
+
+		if (result) {
+			ins.modifier = PTXInstruction::rz;
+			try {
+				cta->eval_Cvt(cta->getActiveContext(), ins);
+				status << "cvt.rz.bf16.f32 should not be implemented\n";
+				result = false;
+			} catch (RuntimeException &) {
+				// Expected: only .rn is implemented.
+			}
+		}
+
+		if (result) {
+			// cvt.f32.bf16
+			ins.type = PTXOperand::f32;
+			ins.modifier = 0;
+			ins.d = reg("d", PTXOperand::f32, 0);
+			ins.a = reg("a", PTXOperand::bf16, 1);
+
+			cta->setRegAsU16(0, 1, 0xc020);
+			cta->eval_Cvt(cta->getActiveContext(), ins);
+
+			if (cta->getRegAsU32(0, 0) != 0xc0200000) {
+				status << "cvt.f32.bf16 failed\n";
+				result = false;
+			}
+		}
+
+		if (result) {
+			// cvt.rn.f16.f32
+			ins.type = PTXOperand::f16;
+			ins.modifier = PTXInstruction::rn;
+			ins.d = reg("d", PTXOperand::b16, 0);
+			ins.a = reg("a", PTXOperand::f32, 1);
+
+			cta->setRegAsF32(0, 1, 2049.0f);
+			cta->eval_Cvt(cta->getActiveContext(), ins);
+
+			if (cta->getRegAsU16(0, 0) != 0x6800) {
+				status << "cvt.rn.f16.f32 failed\n";
+				result = false;
+			}
+		}
+
+		if (result) {
+			// cvt.f32.f16
+			ins.type = PTXOperand::f32;
+			ins.modifier = 0;
+			ins.d = reg("d", PTXOperand::f32, 0);
+			ins.a = reg("a", PTXOperand::f16, 1);
+
+			cta->setRegAsU16(0, 1, 0x3c00);
+			cta->eval_Cvt(cta->getActiveContext(), ins);
+
+			if (cta->getRegAsU32(0, 0) != 0x3f800000) {
+				status << "cvt.f32.f16 failed\n";
+				result = false;
+			}
+		}
+
+		if (result) {
+			// cvt.rzi.s32.f16
+			ins.type = PTXOperand::s32;
+			ins.modifier = PTXInstruction::rzi;
+			ins.d = reg("d", PTXOperand::s32, 0);
+			ins.a = reg("a", PTXOperand::f16, 1);
+
+			cta->setRegAsU16(0, 1, 0x3e00);
+			cta->eval_Cvt(cta->getActiveContext(), ins);
+
+			if (cta->getRegAsS32(0, 0) != 1) {
+				status << "cvt.rzi.s32.f16 failed\n";
+				result = false;
+			}
+		}
+
+		if (result) {
+			// cvt.rn.f16.s64
+			ins.type = PTXOperand::f16;
+			ins.modifier = PTXInstruction::rn;
+			ins.d = reg("d", PTXOperand::b16, 0);
+			ins.a = reg("a", PTXOperand::s64, 1);
+
+			cta->setRegAsS64(0, 1, 2049);
+			cta->eval_Cvt(cta->getActiveContext(), ins);
+
+			if (cta->getRegAsU16(0, 0) != 0x6800) {
+				status << "cvt.rn.f16.s64 failed\n";
+				result = false;
+			}
+		}
+
+		if (result) {
+			// cvt.rn.f16.f64
+			ins.type = PTXOperand::f16;
+			ins.modifier = PTXInstruction::rn;
+			ins.d = reg("d", PTXOperand::b16, 0);
+			ins.a = reg("a", PTXOperand::f64, 1);
+
+			cta->setRegAsF64(0, 1, 1.0);
+			cta->eval_Cvt(cta->getActiveContext(), ins);
+
+			if (cta->getRegAsU16(0, 0) != 0x3c00) {
+				status << "cvt.rn.f16.f64 failed\n";
+				result = false;
+			}
+		}
 	
 		return result;
 	}
@@ -3897,6 +4436,35 @@ public:
 						<< "; failed on thread " << i << "\n";
 					result = false; break;
 				}
+			}
+		}
+
+		if (result) {
+			// set.eq.f16.f16.and
+			ins = PTXInstruction();
+			ins.opcode = PTXInstruction::Set;
+			ins.type = PTXOperand::f16;
+			ins.d = reg("d", PTXOperand::b16, 3);
+			ins.a = reg("a", PTXOperand::f16, 1);
+			ins.b = reg("b", PTXOperand::f16, 2);
+			ins.c = reg("c", PTXOperand::pred, 0);
+			ins.comparisonOperator = PTXInstruction::Eq;
+			ins.booleanOperator = PTXInstruction::BoolAnd;
+
+			cta->setRegAsU16(0, 1, 0x3c00); // 1.0
+			cta->setRegAsU16(0, 2, 0x3c00); // 1.0
+			cta->setRegAsPredicate(0, 0, true);
+			cta->eval_Set(cta->getActiveContext(), ins);
+			if (cta->getRegAsU16(0, 3) != 0x3c00) {
+				status << "[set.eq.f16.f16.and test] failed\n";
+				result = false;
+			}
+
+			cta->setRegAsPredicate(0, 0, false);
+			cta->eval_Set(cta->getActiveContext(), ins);
+			if (cta->getRegAsU16(0, 3) != 0x0000) {
+				status << "[set.eq.f16.f16.and false predicate test] failed\n";
+				result = false;
 			}
 		}
 
@@ -4116,6 +4684,65 @@ public:
 					result = false;
 					break;
 				}
+			}
+		}
+
+		if (result) {
+			// Unordered floating-point comparisons are true when an input is NaN.
+			ins = PTXInstruction();
+			ins.opcode = PTXInstruction::SetP;
+			ins.type = PTXOperand::f64;
+			ins.d = reg("p", PTXOperand::pred, 3);
+			ins.pq = reg("q", PTXOperand::pred, 4);
+			ins.a = reg("a", PTXOperand::f64, 1);
+			ins.b = reg("b", PTXOperand::f64, 2);
+			ins.comparisonOperator = PTXInstruction::Equ;
+
+			cta->setRegAsF64(0, 1,
+				std::numeric_limits<PTXF64>::quiet_NaN());
+			cta->setRegAsF64(0, 2, 1.0);
+			cta->eval_SetP(cta->getActiveContext(), ins);
+
+			if (!cta->getRegAsPredicate(0, 3) ||
+				cta->getRegAsPredicate(0, 4)) {
+				status << "[f64 Equ NaN test] " << ins.toString()
+					<< " failed\n";
+				result = false;
+			}
+		}
+
+		if (result) {
+			// Half inputs are widened exactly, with FTZ applied before widening.
+			ins = PTXInstruction();
+			ins.opcode = PTXInstruction::SetP;
+			ins.type = PTXOperand::f16;
+			ins.d = reg("p", PTXOperand::pred, 3);
+			ins.pq = reg("q", PTXOperand::pred, 4);
+			ins.a = reg("a", PTXOperand::b16, 1);
+			ins.b = reg("b", PTXOperand::b16, 2);
+			ins.comparisonOperator = PTXInstruction::Lt;
+
+			cta->setRegAsU16(0, 1, 0x3c00); // 1.0
+			cta->setRegAsU16(0, 2, 0x4000); // 2.0
+			cta->eval_SetP(cta->getActiveContext(), ins);
+			const bool normal = cta->getRegAsPredicate(0, 3) &&
+				!cta->getRegAsPredicate(0, 4);
+
+			ins.comparisonOperator = PTXInstruction::Eq;
+			cta->setRegAsU16(0, 1, 0x0001); // minimum half subnormal
+			cta->setRegAsU16(0, 2, 0x0000);
+			cta->eval_SetP(cta->getActiveContext(), ins);
+			const bool preserved = !cta->getRegAsPredicate(0, 3) &&
+				cta->getRegAsPredicate(0, 4);
+
+			ins.modifier = PTXInstruction::ftz;
+			cta->eval_SetP(cta->getActiveContext(), ins);
+			const bool flushed = cta->getRegAsPredicate(0, 3) &&
+				!cta->getRegAsPredicate(0, 4);
+
+			if (!normal || !preserved || !flushed) {
+				status << "[f16 widening/FTZ test] failed\n";
+				result = false;
 			}
 		}
 
@@ -4443,6 +5070,7 @@ public:
 			result = (result && test_Mov());
 
 			// cvt instruction
+			result = (result && test_Cvt());
 	
 			// arithmetic instructions
 			result = (result && test_Abs());
@@ -4470,6 +5098,9 @@ public:
 			result = (result && test_Cos());
 			result = (result && test_Sin());
 			result = (result && test_Ex2());
+			result = (result && test_F16Fma());
+			result = (result && test_Bf16Fma());
+			result = (result && test_Mma());
 			result = (result && test_Lg2());
 			result = (result && test_Sqrt());
 			result = (result && test_Rsqrt());
@@ -4540,4 +5171,3 @@ int main(int argc, char **argv) {
 
 	return test.passed();
 }
-

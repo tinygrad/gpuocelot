@@ -166,6 +166,8 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return OPCODE_MADC; }
 "mad24"                         { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_MAD24; }
+"mma"                           { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_MMA; }
 "max"                           { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_MAX; }
 "mov"                           { sstrcpy( yylval->text, yytext, 1024 ); \
@@ -333,6 +335,10 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return TOKEN_SM30; }
 "sm_35"                         { yylval->value = TOKEN_SM35; 
                                     return TOKEN_SM35; }
+"sm_50"                         { yylval->value = TOKEN_SM50; 
+                                    return TOKEN_SM50; }
+"sm_86"                         { yylval->value = TOKEN_SM86;
+                                    return TOKEN_SM86; }
 "map_f64_to_f32"                { yylval->value = TOKEN_MAP_F64_TO_F32; 
                                     return TOKEN_MAP_F64_TO_F32; }
 "texmode_independent"           { yylval->value = TOKEN_TEXMODE_INDEPENDENT; 
@@ -355,6 +361,8 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
 ".f16"			            	{ yylval->value = TOKEN_F16; return TOKEN_F16; }
 ".f64"			            	{ yylval->value = TOKEN_F64; return TOKEN_F64; }
 ".f32"			            	{ yylval->value = TOKEN_F32; return TOKEN_F32; }
+".bf16"			            	{ yylval->value = TOKEN_BF16; return TOKEN_BF16; }
+".tf32"			            	{ yylval->value = TOKEN_TF32; return TOKEN_TF32; }
 ".pred"		                    { yylval->value = TOKEN_PRED; \
                                     return TOKEN_PRED; }
 
@@ -494,6 +502,14 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return TOKEN_RED; }
 ".sync"                          { yylval->value = TOKEN_SYNC; \
                                     return TOKEN_SYNC; }
+".aligned"                       { yylval->value = TOKEN_ALIGNED; \
+                                    return TOKEN_ALIGNED; }
+".m16n8k8"                       { yylval->value = TOKEN_M16N8K8; \
+                                    return TOKEN_M16N8K8; }
+".m16n8k16"                      { yylval->value = TOKEN_M16N8K16; \
+                                    return TOKEN_M16N8K16; }
+".row"                           { yylval->value = TOKEN_ROW; return TOKEN_ROW; }
+".col"                           { yylval->value = TOKEN_COL; return TOKEN_COL; }
 ".popc"                         { yylval->value = TOKEN_POPC; \
                                     return TOKEN_POPC; }
 
@@ -648,4 +664,3 @@ void sstrcpy( char* destination, const char* source, unsigned int max )
 #endif
 
 /******************************************************************************/
-

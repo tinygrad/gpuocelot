@@ -382,6 +382,7 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case Lg2:        return "lg2";        break;
 		case Mad24:      return "mad24";      break;
 		case Mad:        return "mad";        break;
+		case Mma:        return "mma";        break;
 		case MadC:       return "madc";        break;
 		case Max:        return "max";        break;
 		case Membar:     return "membar";     break;
@@ -458,6 +459,7 @@ ir::PTXInstruction::PTXInstruction( Opcode op, const PTXOperand& _d,
 	reconvergeInstruction = 0;
 	branchTargetInstruction = 0;
 	vec = PTXOperand::v1;
+	mmaShape = MmaShape_Invalid;
 	pg.condition = PTXOperand::PT;
 	pg.type = PTXOperand::pred;
 	barrierOperation = BarSync;
@@ -504,7 +506,7 @@ std::string ir::PTXInstruction::valid() const {
 		}
 		case Add: {
 			if ( !( type != PTXOperand::s8 && type != PTXOperand::u8 && 
-				type != PTXOperand::b8 && type != PTXOperand::f16 
+				type != PTXOperand::b8
 				&& type != PTXOperand::pred ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
@@ -921,7 +923,7 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case Ex2: {
-			if( !( type == PTXOperand::f32 ) ) {
+			if( !( type == PTXOperand::f32 || type == PTXOperand::f16 ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
@@ -945,7 +947,8 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case Fma: {
-			if (!(type == ir::PTXOperand::f32 || type == ir::PTXOperand::f64)) {
+			if (!(type == ir::PTXOperand::f16 || type == ir::PTXOperand::f32
+				|| type == ir::PTXOperand::f64 || type == ir::PTXOperand::bf16)) {
 				return "invalid instruction type " + PTXOperand::toString( type );
 			}
 			if( !PTXOperand::valid( type, d.type )  ) {
@@ -1094,6 +1097,84 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			break;
 		}
+		case Mma: {
+			const bool m16n8k8 = mmaShape == MmaM16N8K8;
+			const bool tf32Input = a.type == PTXOperand::tf32;
+			const bool halfAccumulator = type == PTXOperand::f16;
+			if (mmaShape == MmaShape_Invalid) {
+				return "mma has no shape";
+			}
+			if (!halfAccumulator && type != PTXOperand::f32) {
+				return "mma requires f16 or f32 accumulators";
+			}
+			if (a.type != PTXOperand::f16 && a.type != PTXOperand::bf16 &&
+				a.type != PTXOperand::tf32) {
+				return "mma A type must be f16, bf16, or tf32";
+			}
+			if (tf32Input && (!m16n8k8 || type != PTXOperand::f32 ||
+				b.type != PTXOperand::tf32)) {
+				return "tf32 mma requires m16n8k8 with f32 accumulators";
+			}
+			if (halfAccumulator && a.type != PTXOperand::f16) {
+				return "f16 mma accumulators require f16 inputs";
+			}
+			if (b.type != a.type) {
+				return "mma A and B types must match";
+			}
+			if (d.type != type || c.type != type) {
+				return halfAccumulator ? "mma C and D types must be f16"
+					: "mma C and D types must be f32";
+			}
+			const PTXOperand::Vec accumulatorVec = halfAccumulator
+				? PTXOperand::v2 : PTXOperand::v4;
+			const unsigned int accumulatorRegisters = halfAccumulator ? 2 : 4;
+			const bool compactInputFragment = m16n8k8 && !tf32Input;
+			const PTXOperand::Vec inputAVec = compactInputFragment
+				? PTXOperand::v2 : PTXOperand::v4;
+			const PTXOperand::Vec inputBVec = compactInputFragment
+				? PTXOperand::v1 : PTXOperand::v2;
+			if (d.vec != accumulatorVec || c.vec != accumulatorVec ||
+				a.vec != inputAVec || b.vec != inputBVec) {
+				return m16n8k8 ? "mma.m16n8k8 has invalid fragment sizes"
+					: "mma.m16n8k16 has invalid fragment sizes";
+			}
+			if (d.array.size() != accumulatorRegisters ||
+				c.array.size() != accumulatorRegisters ||
+				a.array.size() != (compactInputFragment ? 2u : 4u) ||
+				b.array.size() != (compactInputFragment ? 1u : 2u)) {
+				return m16n8k8 ? "mma.m16n8k8 has invalid fragment register counts"
+					: "mma.m16n8k16 has invalid fragment register counts";
+			}
+			for (PTXOperand::Array::const_iterator element = a.array.begin();
+				element != a.array.end(); ++element) {
+				if (element->type != PTXOperand::b32) {
+					return "mma A fragment registers must be 32-bit packed values";
+				}
+			}
+			for (PTXOperand::Array::const_iterator element = b.array.begin();
+				element != b.array.end(); ++element) {
+				if (element->type != PTXOperand::b32) {
+					return "mma B fragment registers must be 32-bit packed values";
+				}
+			}
+			for (PTXOperand::Array::const_iterator element = c.array.begin();
+				element != c.array.end(); ++element) {
+				if (halfAccumulator ? element->type != PTXOperand::b32
+					: !PTXOperand::relaxedValid(PTXOperand::f32, element->type)) {
+					return halfAccumulator ? "mma C fragment registers must be b32"
+						: "mma C fragment registers must be f32 or b32";
+				}
+			}
+			for (PTXOperand::Array::const_iterator element = d.array.begin();
+				element != d.array.end(); ++element) {
+				if (halfAccumulator ? element->type != PTXOperand::b32
+					: !PTXOperand::relaxedValid(PTXOperand::f32, element->type)) {
+					return halfAccumulator ? "mma D fragment registers must be b32"
+						: "mma D fragment registers must be f32 or b32";
+				}
+			}
+			break;
+		}
 		case MadC: {
 			if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ) ) {
 				return "invalid instruction type " 
@@ -1122,7 +1203,7 @@ std::string ir::PTXInstruction::valid() const {
 		}
 		case Max: {
 			if( !( type != PTXOperand::s8 && type != PTXOperand::u8 && 
-				type != PTXOperand::b8 && type != PTXOperand::f16 
+				type != PTXOperand::b8
 				&& type != PTXOperand::pred ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
@@ -1178,14 +1259,16 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case Mov: {
-			if ( ( a.type == PTXOperand::f16 ) &&
+			if ( type != PTXOperand::b16 &&
+				a.type == PTXOperand::f16 &&
+				a.array.empty() &&
 				a.addressMode != PTXOperand::Address &&
 				a.addressMode != PTXOperand::Immediate ) {
-				return "invalid type for operand A " 
+				return "invalid type for operand A "
 					+ PTXOperand::toString( a.type );
 			}
 			if ( !( d.type != PTXOperand::s8 && d.type != PTXOperand::u8 
-				&& d.type != PTXOperand::b8 && d.type != PTXOperand::f16 ) ) {
+				&& d.type != PTXOperand::b8 ) ) {
 				return "invalid type for operand D " 
 					+ PTXOperand::toString( d.type );
 			}
@@ -1222,7 +1305,7 @@ std::string ir::PTXInstruction::valid() const {
 		}
 		case Mul: {
 			if( type == PTXOperand::s8 || type == PTXOperand::u8 
-				|| type == PTXOperand::b8 || type == PTXOperand::f16 
+				|| type == PTXOperand::b8
 				|| type == PTXOperand::pred ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
@@ -1264,7 +1347,8 @@ std::string ir::PTXInstruction::valid() const {
 		case Neg: {
 			if( type != PTXOperand::s16 && type != PTXOperand::s32 && 
 				type != PTXOperand::s64 && type != PTXOperand::f32 && 
-				type != PTXOperand::f64 ) {
+				type != PTXOperand::f64 && type != PTXOperand::f16 &&
+				type != PTXOperand::bf16 ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
@@ -1576,14 +1660,15 @@ std::string ir::PTXInstruction::valid() const {
 				&& type != PTXOperand::u32 && type != PTXOperand::u64
 				&& type != PTXOperand::b16 && type != PTXOperand::b32 
 				&& type != PTXOperand::b64 && type != PTXOperand::f32
-				&& type != PTXOperand::f64 ) {
+				&& type != PTXOperand::f64 && type != PTXOperand::f16 ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
-			if( d.type != PTXOperand::s32 && d.type != PTXOperand::f32 
-				&& d.type != PTXOperand::u32 ) {
+			if( d.type != PTXOperand::s32 && d.type != PTXOperand::f32
+				&& d.type != PTXOperand::u32 && d.type != PTXOperand::b32
+				&& d.type != PTXOperand::b16 && d.type != PTXOperand::f16 ) {
 				return "operand D type " + PTXOperand::toString( d.type ) 
-					+ " invalid (must be u32, s32, or f32)";
+					+ " invalid (must be b16, f16, b32, u32, s32, or f32)";
 			}
 			if( c.type != PTXOperand::pred && 
 				c.addressMode != PTXOperand::Invalid ) {
@@ -1615,7 +1700,7 @@ std::string ir::PTXInstruction::valid() const {
 				&& type != PTXOperand::u32 && type != PTXOperand::u64
 				&& type != PTXOperand::b16 && type != PTXOperand::b32 
 				&& type != PTXOperand::b64 && type != PTXOperand::f32
-				&& type != PTXOperand::f64 ) {
+				&& type != PTXOperand::f64 && type != PTXOperand::f16 ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
@@ -1862,7 +1947,7 @@ std::string ir::PTXInstruction::valid() const {
 		}
 		case Sub: {
 			if ( !( type != PTXOperand::s8 && type != PTXOperand::u8 && 
-				type != PTXOperand::b8 && type != PTXOperand::f16 
+				type != PTXOperand::b8
 				&& type != PTXOperand::pred ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
@@ -2361,6 +2446,20 @@ std::string ir::PTXInstruction::toString() const {
 			result += modifierString( modifier, carry );
 			result += PTXOperand::toString( type ) + " " + d.toString() + ", " 
 				+ a.toString() + ", " + b.toString() + ", " + c.toString();
+			return result;
+		}
+		case Mma: {
+			const bool m16n8k8 = mmaShape == MmaM16N8K8;
+			std::string result = guard() +
+				"mma.sync.aligned.m" +
+				(m16n8k8 ? "16n8k8" : "16n8k16") +
+				".row.col." +
+				PTXOperand::toString(type) + "." +
+				PTXOperand::toString(a.type) + "." +
+				PTXOperand::toString(b.type) + "." +
+				PTXOperand::toString(c.type) + " " +
+				d.toString() + ", " + a.toString() + ", " +
+				b.toString() + ", " + c.toString();
 			return result;
 		}
 		case MadC: {

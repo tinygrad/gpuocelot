@@ -152,6 +152,56 @@ namespace parser
 				operand.type = instruction.type;
 			}
 		}
+		//https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-bfi
+		//https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-bfe
+		if( instruction.opcode == ir::PTXInstruction::Bfi
+			|| instruction.opcode == ir::PTXInstruction::Bfe )
+		{
+			if ( instruction.b.addressMode == ir::PTXOperand::AddressMode::Immediate)
+				instruction.b.type = ir::PTXOperand::u32;
+			if ( instruction.c.addressMode == ir::PTXOperand::AddressMode::Immediate)
+				instruction.c.type = ir::PTXOperand::u32;
+		}
+	}
+
+	void PTXParser::State::_setMovVectorImmediateTypes()
+	{
+		ir::PTXInstruction& instruction = statement.instruction;
+		ir::PTXOperand& source = instruction.a;
+
+		if( instruction.opcode != ir::PTXInstruction::Mov ||
+			source.array.empty() ) return;
+
+		unsigned int totalBytes = ir::PTXOperand::bytes( instruction.type );
+		if( totalBytes % source.array.size() != 0 )
+		{
+			throw_exception( "Invalid mov vector element size.",
+				InvalidInstruction );
+		}
+
+		unsigned int elementBytes = totalBytes / source.array.size();
+		if( source.type == ir::PTXOperand::TypeSpecifier_invalid )
+		{
+			switch( elementBytes )
+			{
+				case 1: source.type = ir::PTXOperand::b8;  break;
+				case 2: source.type = ir::PTXOperand::b16; break;
+				case 4: source.type = ir::PTXOperand::b32; break;
+				case 8: source.type = ir::PTXOperand::b64; break;
+				default:
+					throw_exception( "Invalid mov vector element size.",
+						InvalidInstruction );
+			}
+		}
+
+		for( ir::PTXOperand::Array::iterator element = source.array.begin();
+			element != source.array.end(); ++element )
+		{
+			if( element->addressMode == ir::PTXOperand::Immediate )
+			{
+				element->type = source.type;
+			}
+		}
 	}
 	
 	static std::string strip(const std::string& name)
@@ -606,6 +656,8 @@ namespace parser
 		else if( token == TOKEN_SM21 ) statement.targets.push_back( "sm_21" );
 		else if( token == TOKEN_SM30 ) statement.targets.push_back( "sm_30" );
 		else if( token == TOKEN_SM35 ) statement.targets.push_back( "sm_35" );
+		else if( token == TOKEN_SM50 ) statement.targets.push_back( "sm_50" );
+		else if( token == TOKEN_SM86 ) statement.targets.push_back( "sm_86" );
 		else if( token == TOKEN_MAP_F64_TO_F32 )
 		{
 			statement.targets.push_back( "map_f64_to_f32" );
@@ -1523,7 +1575,34 @@ namespace parser
 		operandVector.push_back( OperandWrapper( operand, mode->space ) );	
 	}
 
-	
+	void PTXParser::State::vectorOperand( unsigned int elements )
+	{
+		assert( elements == 2 || elements == 4 );
+		assert( operandVector.size() >= elements );
+
+		OperandVector::iterator begin = operandVector.end() - elements;
+
+		ir::PTXOperand vector;
+		vector.addressMode = ir::PTXOperand::Register;
+		vector.type = ir::PTXOperand::TypeSpecifier_invalid;
+		vector.vec = elements == 2 ? ir::PTXOperand::v2 : ir::PTXOperand::v4;
+
+		for( OperandVector::iterator element = begin;
+			element != operandVector.end(); ++element )
+		{
+			if( vector.type == ir::PTXOperand::TypeSpecifier_invalid &&
+				element->operand.addressMode != ir::PTXOperand::Immediate )
+			{
+				vector.type = element->operand.type;
+			}
+
+			vector.array.push_back( element->operand );
+		}
+
+		operandVector.erase( begin, operandVector.end() );
+		operandVector.push_back( vector );
+	}
+
 	void PTXParser::State::addressableOperand( const std::string& name, 
 		long long int value, YYLTYPE& location, bool invert )
 	{
@@ -1843,11 +1922,41 @@ namespace parser
 		}
 
 		_setImmediateTypes();
+		_setMovVectorImmediateTypes();
 	}
 	
 	void PTXParser::State::instruction( const std::string& opcode )
 	{
 		instruction( opcode, TOKEN_B64 );
+	}
+
+	void PTXParser::State::mma( int shapeToken, int accumulatorToken,
+		int aToken, int bToken, int cToken )
+	{
+		assert( operandVector.size() == 5 );
+		ir::PTXOperand::DataType accumulatorType = tokenToDataType( accumulatorToken );
+		ir::PTXOperand::DataType aType = tokenToDataType( aToken );
+		ir::PTXOperand::DataType bType = tokenToDataType( bToken );
+		ir::PTXOperand::DataType cType = tokenToDataType( cToken );
+
+		statement.directive = ir::PTXStatement::Instr;
+		statement.instruction.opcode = ir::PTXInstruction::Mma;
+		statement.instruction.mmaShape = shapeToken == TOKEN_M16N8K8
+			? ir::PTXInstruction::MmaM16N8K8
+			: ir::PTXInstruction::MmaM16N8K16;
+		statement.instruction.type = accumulatorType;
+		statement.instruction.pg = operandVector[0].operand;
+		statement.instruction.d = operandVector[1].operand;
+		statement.instruction.a = operandVector[2].operand;
+		statement.instruction.b = operandVector[3].operand;
+		statement.instruction.c = operandVector[4].operand;
+
+		statement.instruction.d.type = accumulatorType;
+		statement.instruction.c.type = cType;
+		statement.instruction.a.type = aType;
+		statement.instruction.b.type = bType;
+
+		_setImmediateTypes();
 	}
 
 	void PTXParser::State::tex( int dataType )
@@ -2455,6 +2564,8 @@ namespace parser
 			case TOKEN_PRED: return ir::PTXOperand::pred; break;
 			case TOKEN_F16:  return ir::PTXOperand::f16; break;
 			case TOKEN_F32:  return ir::PTXOperand::f32; break;
+			case TOKEN_BF16: return ir::PTXOperand::bf16; break;
+			case TOKEN_TF32: return ir::PTXOperand::tf32; break;
 			case TOKEN_F64:  return ir::PTXOperand::f64; break;
 			default:
 			{
@@ -2533,6 +2644,7 @@ namespace parser
 		if( string == "mad24" ) return ir::PTXInstruction::Mad24;
 		if( string == "mad" ) return ir::PTXInstruction::Mad;
 		if( string == "madc" ) return ir::PTXInstruction::MadC;
+		if( string == "mma" ) return ir::PTXInstruction::Mma;
 		if( string == "max" ) return ir::PTXInstruction::Max;
 		if( string == "membar" ) return ir::PTXInstruction::Membar;
 		if( string == "min" ) return ir::PTXInstruction::Min;
@@ -3000,4 +3112,3 @@ namespace parser
 }
 
 #endif
-

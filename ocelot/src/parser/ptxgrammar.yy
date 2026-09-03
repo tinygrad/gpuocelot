@@ -66,6 +66,7 @@
 %token<text> OPCODE_POPC OPCODE_PRMT OPCODE_CLZ OPCODE_BFIND OPCODE_BREV 
 %token<text> OPCODE_BFI OPCODE_BFE OPCODE_TESTP OPCODE_TLD4 OPCODE_BAR
 %token<text> OPCODE_PREFETCH OPCODE_PREFETCHU OPCODE_SHFL OPCODE_SHF
+%token<text> OPCODE_MMA
 
 %token<value> PREPROCESSOR_INCLUDE PREPROCESSOR_DEFINE PREPROCESSOR_IF 
 %token<value> PREPROCESSOR_IFDEF PREPROCESSOR_ELSE PREPROCESSOR_ENDIF 
@@ -77,7 +78,7 @@
 
 %token<value> TOKEN_MAXNREG TOKEN_MAXNTID TOKEN_MAXNCTAPERSM TOKEN_MINNCTAPERSM 
 %token<value> TOKEN_SM11 TOKEN_SM12 TOKEN_SM13 TOKEN_SM20 TOKEN_MAP_F64_TO_F32
-%token<value> TOKEN_SM21 TOKEN_SM10 TOKEN_SM30 TOKEN_SM35
+%token<value> TOKEN_SM21 TOKEN_SM10 TOKEN_SM30 TOKEN_SM35 TOKEN_SM50 TOKEN_SM86
 %token<value> TOKEN_TEXMODE_INDEPENDENT TOKEN_TEXMODE_UNIFIED
 
 %token<value> TOKEN_CONST TOKEN_GLOBAL TOKEN_LOCAL TOKEN_PARAM TOKEN_PRAGMA TOKEN_PTR
@@ -86,7 +87,7 @@
 
 %token<value> TOKEN_U32 TOKEN_S32 TOKEN_S8 TOKEN_S16 TOKEN_S64 TOKEN_U8 
 %token<value> TOKEN_U16 TOKEN_U64 TOKEN_B8 TOKEN_B16 TOKEN_B32 TOKEN_B64 
-%token<value> TOKEN_F16 TOKEN_F64 TOKEN_F32 TOKEN_PRED
+%token<value> TOKEN_F16 TOKEN_F64 TOKEN_F32 TOKEN_BF16 TOKEN_TF32 TOKEN_PRED
 
 %token<value> TOKEN_EQ TOKEN_NE TOKEN_LT TOKEN_LE TOKEN_GT TOKEN_GE
 %token<value> TOKEN_LS TOKEN_HS TOKEN_EQU TOKEN_NEU TOKEN_LTU TOKEN_LEU
@@ -127,7 +128,8 @@
 
 %token<value> TOKEN_TRAP TOKEN_CLAMP TOKEN_ZERO TOKEN_WRAP
 
-%token<value> TOKEN_ARRIVE TOKEN_RED TOKEN_POPC TOKEN_SYNC
+%token<value> TOKEN_ARRIVE TOKEN_RED TOKEN_POPC TOKEN_SYNC TOKEN_ALIGNED
+%token<value> TOKEN_M16N8K8 TOKEN_M16N8K16 TOKEN_ROW TOKEN_COL
 
 %token<value> TOKEN_BALLOT
 
@@ -135,6 +137,8 @@
 
 %token<value> TOKEN_FINITE TOKEN_INFINITE TOKEN_NUMBER TOKEN_NOT_A_NUMBER
 %token<value> TOKEN_NORMAL TOKEN_SUBNORMAL
+
+%type<value> mmaShape mmaAccumulatorTypeId mmaInputTypeId
 
 %token<value> TOKEN_DECIMAL_CONSTANT
 
@@ -260,7 +264,7 @@ singleInitializer : singleList |  '{' singleList '}' | '{' singleListSingle '}'
 	| singleListSingle;
 
 shaderModel : TOKEN_SM10 | TOKEN_SM11 | TOKEN_SM12 | TOKEN_SM13 | TOKEN_SM20
-	| TOKEN_SM21 | TOKEN_SM30 | TOKEN_SM35;
+	| TOKEN_SM21 | TOKEN_SM30 | TOKEN_SM35 | TOKEN_SM50 | TOKEN_SM86;
 	
 floatingPointOption : TOKEN_MAP_F64_TO_F32;
 textureOption: TOKEN_TEXMODE_INDEPENDENT | TOKEN_TEXMODE_UNIFIED;
@@ -302,7 +306,8 @@ pointerDataTypeId: TOKEN_U64 | TOKEN_U32;
 
 dataTypeId : TOKEN_U8 | TOKEN_U16 | TOKEN_U32 | TOKEN_U64 | TOKEN_S8 
 	| TOKEN_S16 | TOKEN_S32 | TOKEN_S64 | TOKEN_B8 | TOKEN_B16 | TOKEN_B32 
-	| TOKEN_B64 | TOKEN_F16 | TOKEN_F32 | TOKEN_F64 | TOKEN_PRED;
+	| TOKEN_B64 | TOKEN_F16 | TOKEN_F32 | TOKEN_F64
+	| TOKEN_BF16 | TOKEN_PRED;
 
 dataType : dataTypeId
 {
@@ -685,6 +690,19 @@ opcode : OPCODE_COS | OPCODE_SQRT | OPCODE_ADD | OPCODE_RSQRT | OPCODE_ADDC
 	| OPCODE_BFI | OPCODE_TESTP | OPCODE_TLD4
 	| OPCODE_PREFETCH | OPCODE_PREFETCHU;
 
+mma : OPCODE_MMA TOKEN_SYNC TOKEN_ALIGNED mmaShape TOKEN_ROW TOKEN_COL
+	mmaAccumulatorTypeId mmaInputTypeId mmaInputTypeId mmaAccumulatorTypeId
+	arrayOperand ',' arrayOperand ',' arrayOperand ',' arrayOperand ';'
+{
+	state.mma( $<value>4, $<value>7, $<value>8, $<value>9, $<value>10 );
+};
+
+mmaShape : TOKEN_M16N8K8 | TOKEN_M16N8K16;
+
+mmaAccumulatorTypeId : TOKEN_F16 | TOKEN_F32;
+
+mmaInputTypeId : TOKEN_F16 | TOKEN_BF16 | TOKEN_TF32;
+
 uninitializableDeclaration : uninitializable addressableVariablePrefix 
 	identifier arrayDimensions ';'
 {
@@ -853,7 +871,7 @@ optionalFloatRounding : floatRounding | /* empty string */;
 instruction : ftzInstruction2 | ftzInstruction3 | approxInstruction2 
 	| basicInstruction3 | bfe | bfi | bfind | brev | branch | addOrSub
 	| addCOrSubC | atom | bar | brkpt | clz | cvt | cvta | isspacep | div | exit
-	| ld | ldu | mad | mad24 | madc | membar | mov | mul24 | mul | notInstruction
+	| ld | ldu | mad | mad24 | madc | mma | membar | mov | mul24 | mul | notInstruction
 	| pmevent | popc | prefetch | prefetchu | prmt | rcpSqrtInstruction | red
 	| ret | sad | selp | set | setp | slct | st | suld | suq | sured | sust
 	| testp | tex | tld4 | trap | txq | vote | shfl | shf;
@@ -1266,7 +1284,17 @@ movIndexedOperand : identifier '[' TOKEN_DECIMAL_CONSTANT ']'
 	state.indexedOperand( $<text>1, @1, $<value>3 );
 };
 
-movSourceOperand : arrayOperand | offsetAddressableOperand | movIndexedOperand;
+movVectorOperand : '{' operand ',' operand '}'
+{
+	state.vectorOperand(2);
+};
+
+movVectorOperand : '{' operand ',' operand ',' operand ',' operand '}'
+{
+	state.vectorOperand(4);
+};
+
+movSourceOperand : operand | offsetAddressableOperand | movIndexedOperand | movVectorOperand;
 
 mov : OPCODE_MOV dataType arrayOperand ',' movSourceOperand ';'
 {

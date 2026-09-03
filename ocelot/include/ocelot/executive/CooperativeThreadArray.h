@@ -475,6 +475,7 @@ namespace executive {
 		void eval_Ex2(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Exit(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Fma(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Mma(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Isspacep(CTAContext &context,
 			const ir::PTXInstruction &instr);
 		void eval_Ld(CTAContext &context, const ir::PTXInstruction &instr);
@@ -562,4 +563,3 @@ namespace executive {
 }
 
 #endif
-

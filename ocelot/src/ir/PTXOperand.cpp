@@ -50,6 +50,8 @@ std::string ir::PTXOperand::toString( DataType type ) {
 		case b64:  return "b64";  break;
 		case f16:  return "f16";  break;
 		case f32:  return "f32";  break;
+		case bf16: return "bf16"; break;
+		case tf32: return "tf32"; break;
 		case f64:  return "f64";  break;
 		case pred: return "pred"; break;
 		default: break;
@@ -150,6 +152,7 @@ bool ir::PTXOperand::isFloat( DataType type ) {
 	switch( type ) {
 		case f16: /* fall through */
 		case f32: /* fall through */
+		case bf16:/* fall through */
 		case f64: result = true;
 		default: break;
 	}
@@ -194,10 +197,12 @@ unsigned int ir::PTXOperand::bytes( DataType type ) {
 		case u16:  /* fall through */
 		case f16:  /* fall through */
 		case b16:  /* fall through */
+		case bf16:  /* fall through */
 		case s16:  return 2; break;
 		case u32:  /* fall through */
 		case b32:  /* fall through */
 		case f32:  /* fall through */
+		case tf32: /* fall through */
 		case s32:  return 4; break;
 		case f64:  /* fall through */
 		case u64:  /* fall through */
@@ -235,6 +240,7 @@ bool ir::PTXOperand::valid( DataType destination, DataType source ) {
 				case s16: /* fall through */
 				case u16: /* fall through */
 				case f16: /* fall through */
+				case bf16: /* fall through */
 				case b16: return true; break;
 				default: break;
 			}
@@ -343,6 +349,10 @@ bool ir::PTXOperand::valid( DataType destination, DataType source ) {
 				case f16: return true; break;
 				default: break;
 			}
+			break;
+		}
+		case bf16: {
+			return source == b16;
 			break;
 		}
 		case pred: {
@@ -552,6 +562,12 @@ bool ir::PTXOperand::relaxedValid( DataType instructionType,
 				default: break;
 			}
 			break;
+		}
+		case bf16: {
+			switch( operand ) {
+				case b16: return true; break;
+				default: break;
+			}
 		}
 		case pred: {
 			return operand == pred;
@@ -864,5 +880,3 @@ bool ir::PTXOperand::isRegister() const {
 bool ir::PTXOperand::isVector() const {
 	return isRegister() && vec != v1;
 }
-
-
