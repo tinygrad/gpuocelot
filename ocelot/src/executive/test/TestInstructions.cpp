@@ -5253,6 +5253,55 @@ public:
 		return true;
 	}
 
+	bool test_MmaNamedDestination() {
+		// A named D vector must not become part of the following A fragment.
+		for (const char* shape : {"m8n8k16", "m16n8k16", "m16n8k32"}) {
+			const bool small = std::string(shape) == "m8n8k16";
+			const bool wide = std::string(shape) == "m16n8k32";
+			const unsigned aCount = small ? 1 : wide ? 4 : 2;
+			const unsigned bCount = wide ? 2 : 1;
+			const unsigned dCount = small ? 2 : 4;
+			std::stringstream source;
+			source << ".version 8.0\n.target sm_86\n.entry named_mma() { .reg .v"
+				<< dCount << " .b32 vd; .reg .b32 a<4>; .reg .b32 b<2>; .reg .b32 c<4>; "
+				<< "mma.sync.aligned." << shape << ".row.col.s32.s8.u8.s32 vd, "
+				<< (small ? "{a0}" : wide ? "{a0,a1,a2,a3}" : "{a0,a1}")
+				<< (wide ? ", {b0,b1}, " : ", {b0}, ")
+				<< (small ? "{c0,c1}" : "{c0,c1,c2,c3}") << "; ret; }";
+			Module parsed;
+			try { parsed.load(source); }
+			catch (const std::exception& error) {
+				status << "named MMA destination corrupted next fragment: " << error.what() << "\n";
+				return false;
+			}
+			EmulatedKernel localKernel(parsed.getKernel("named_mma"), nullptr);
+			localKernel.setKernelShape(32, 1, 1);
+			CooperativeThreadArray localCTA(&localKernel, Dim3(), false);
+			for (const auto& ins : localKernel.instructions) {
+				if (ins.opcode != PTXInstruction::Mma) continue;
+				if (ins.a.array.size() != aCount || ins.b.array.size() != bCount ||
+					ins.c.array.size() != dCount || ins.d.array.size() != dCount) return false;
+				for (int lane = 0; lane < 32; ++lane) {
+					for (const auto& a : ins.a.array)
+						localCTA.setRegAsB32(lane, a.reg, 0x01010101);
+					for (const auto& b : ins.b.array)
+						localCTA.setRegAsB32(lane, b.reg, 0x02020202);
+					for (unsigned i = 0; i < dCount; ++i)
+						localCTA.setRegAsB32(lane, ins.c.array[i].reg, lane * 10 + i);
+				}
+				localCTA.eval_Mma(localCTA.getActiveContext(), ins);
+				for (int lane = 0; lane < 32; ++lane) for (unsigned i = 0; i < dCount; ++i) {
+					const PTXU32 expected = (wide ? 64u : 32u) + lane * 10 + i;
+					if (localCTA.getRegAsB32(lane, ins.d.array[i].reg) != expected) {
+						status << "named MMA destination result mismatch: " << shape << "\n";
+						return false;
+					}
+				}
+			}
+		}
+		return true;
+	}
+
 	bool test_MmaFloatShapes() {
 		for (const char* shape : {"m8n8k128", "m16n8k128", "m16n8k256"}) for (const char* op : {"xor", "and"}) {
 			const bool small = std::string(shape) == "m8n8k128", k256 = std::string(shape) == "m16n8k256";
@@ -10242,6 +10291,7 @@ public:
 			result = (result && test_F16Fma());
 			result = (result && test_Bf16Fma());
 			result = (result && test_MmaWarpParticipation());
+			result = (result && test_MmaNamedDestination());
 			result = (result && test_MmaFloatShapes());
 			result = (result && test_Mma());
 			result = (result && test_MmaInt8());

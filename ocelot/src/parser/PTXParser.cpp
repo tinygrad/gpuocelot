@@ -1654,6 +1654,7 @@ namespace parser
 	void PTXParser::State::arrayOperand( YYLTYPE& location )
 	{
 		assert( !identifiers.empty() );
+		operand.array.clear();
 		
 		report("  Rule: arrayOperand()");
 
