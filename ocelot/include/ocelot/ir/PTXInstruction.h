@@ -474,6 +474,8 @@ namespace ir {
 		MmaShape mmaShape;
 		bool mmaAColumnMajor;
 		bool mmaBColumnMajor;
+		bool mmaSparse;
+		PTXOperand mmaSelector;
 
 		/*! Flag containing one or more floating-point modifiers */
 		unsigned int modifier;
@@ -624,6 +626,7 @@ namespace ir {
 
 		/*! Lookup table and predicate input for lop3 */
 		PTXOperand immLut;
+		/*! Predicate input for lop3; metadata register for sparse MMA. */
 		PTXOperand q;
 
 		/*  Runtime annotations 

@@ -5207,11 +5207,13 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 				}
 			}
 			else if ((instr.mmaShape == ir::PTXInstruction::MmaM16N8K32 && !subByteInput) ||
-				instr.mmaShape == ir::PTXInstruction::MmaM16N8K64) {
+				instr.mmaShape == ir::PTXInstruction::MmaM16N8K64 ||
+				(instr.mmaSparse && instr.mmaShape == ir::PTXInstruction::MmaM16N8K128)) {
 				const int elementsPerRegister = subByteInput ? 8 : 4;
-				const int kCount = elementsPerRegister * 8;
-				ir::PTXS32 A[16][64] = {};
-				ir::PTXS32 B[64][8] = {};
+				const int kCount = instr.mmaSparse ? (instr.mmaShape == ir::PTXInstruction::MmaM16N8K128 ? 128 :
+					instr.mmaShape == ir::PTXInstruction::MmaM16N8K64 ? 64 : 32) : elementsPerRegister * 8;
+				ir::PTXS32 A[16][128] = {};
+				ir::PTXS32 B[128][8] = {};
 				ir::PTXS32 C[16][8] = {};
 
 				for (int lane = 0; lane < 32; ++lane) {
@@ -5219,17 +5221,29 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 					int groupID = lane >> 2;
 					int threadInGroup = lane & 3;
 
-					for (int i = 0; i < 4 * elementsPerRegister; ++i) {
+					for (int i = 0; i < instr.a.array.size() * elementsPerRegister; ++i) {
 						int row = ((i / elementsPerRegister) & 1) ? groupID + 8 : groupID;
 						int col = threadInGroup * elementsPerRegister + i % elementsPerRegister +
 							(i >= 2 * elementsPerRegister ? kCount / 2 : 0);
+						if (instr.mmaSparse) {
+							const int rowHalf = (i / elementsPerRegister) & 1, kHalf = i / (2 * elementsPerRegister);
+							const int metadataLane = kCount == (subByteInput ? 128 : 64) ?
+								rowHalf + 2 * kHalf : 2 * instr.mmaSelector.imm_uint + rowHalf;
+							const ir::PTXU32 metadata = operandAsB32(warpStart + groupID * 4 + metadataLane, instr.q);
+							// A 4-bit input index selects two consecutive values.
+							const int valuesPerIndex = subByteInput ? 2 : 1;
+							const int bit = threadInGroup * 8 + ((i % elementsPerRegister) / valuesPerIndex) * 2;
+							const int chunk = (i % elementsPerRegister) / (2 * valuesPerIndex);
+							col = threadInGroup * elementsPerRegister * 2 + chunk * 4 * valuesPerIndex +
+								kHalf * (kCount / 2) + ((metadata >> bit) & 3) * valuesPerIndex + i % valuesPerIndex;
+						}
 						ir::PTXU32 reg = operandAsU32(threadID, instr.a.array[i / elementsPerRegister]);
 						A[row][col] = signExtend(reg, i % elementsPerRegister, instr.a.type);
 					}
 
-					for (int i = 0; i < 2 * elementsPerRegister; ++i) {
+					for (int i = 0; i < instr.b.array.size() * elementsPerRegister; ++i) {
 						int row = threadInGroup * elementsPerRegister + i % elementsPerRegister +
-							(i >= elementsPerRegister ? kCount / 2 : 0);
+							(i / elementsPerRegister) * (instr.mmaSparse ? elementsPerRegister * 4 : kCount / 2);
 						int col = groupID;
 						ir::PTXU32 reg = operandAsU32(threadID, instr.b.array[i / elementsPerRegister]);
 						B[row][col] = signExtend(reg, i % elementsPerRegister, instr.b.type);
@@ -5385,8 +5399,10 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 
 	const bool halfAccumulator = instr.type == ir::PTXOperand::f16;
 	const bool tf32Input = inputType == ir::PTXOperand::tf32;
+	const bool sparseTf32K16 = instr.mmaSparse && tf32Input && instr.mmaShape == ir::PTXInstruction::MmaM16N8K16;
 	const bool m16n8k8 = instr.mmaShape == ir::PTXInstruction::MmaM16N8K8;
 	const bool m16n8k4 = instr.mmaShape == ir::PTXInstruction::MmaM16N8K4;
+	const bool sparseK32 = instr.mmaSparse && instr.mmaShape == ir::PTXInstruction::MmaM16N8K32;
 	for (int warpStart = 0; warpStart < completeThreads; warpStart += 32) {
 		int participants = 0;
 		for (int lane = 0; lane < 32; ++lane) {
@@ -5400,8 +5416,8 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 				context.PC, instr);
 		}
 
-		ir::PTXF32 A[16][16] = {};
-		ir::PTXF32 B[16][8] = {};
+		ir::PTXF32 A[16][32] = {};
+		ir::PTXF32 B[32][8] = {};
 		ir::PTXF32 C[16][8] = {};
 
 		for (int lane = 0; lane < 32; ++lane) {
@@ -5410,15 +5426,23 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 			int threadInGroup = lane & 3;
 
 			if (tf32Input) {
-				for (int i = 0; i < (m16n8k4 ? 2 : 4); ++i) {
+				for (int i = 0; i < (m16n8k4 || (instr.mmaSparse && !sparseTf32K16) ? 2 : 4); ++i) {
 					int row = (i & 1) ? groupID + 8 : groupID;
 					int col = threadInGroup + (i >= 2 ? 4 : 0);
+					if (instr.mmaSparse) {
+						const int metadataLane = sparseTf32K16 ? 2 * instr.mmaSelector.imm_uint + i / 2 : instr.mmaSelector.imm_uint;
+						const int metadataThread = warpStart + groupID * 4 + metadataLane;
+						const ir::PTXU32 metadata = operandAsB32(metadataThread, instr.q);
+						const int bit = (i & 1) * 16 + threadInGroup * 4;
+						// Legal indices 0x4 and 0xe select the first or second TF32 element.
+						col = threadInGroup * 2 + (i / 2) * 8 + ((metadata >> (bit + 3)) & 1);
+					}
 					A[row][col] = tf32FromF32(operandAsF32(threadID,
 						instr.a.array[i]));
 				}
 
-				for (int i = 0; i < (m16n8k4 ? 1 : 2); ++i) {
-					int row = threadInGroup + (i >= 1 ? 4 : 0);
+				for (int i = 0; i < (sparseTf32K16 ? 4 : m16n8k4 ? 1 : 2); ++i) {
+					int row = threadInGroup + i * 4;
 					int col = groupID;
 					B[row][col] = tf32FromF32(operandAsF32(threadID,
 						instr.b.array[i]));
@@ -5438,16 +5462,28 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 						instr.b.array[0], i, inputType);
 				}
 			}
-			else if (instr.mmaShape == ir::PTXInstruction::MmaM16N8K16) {
-				for (int i = 0; i < 8; ++i) {
+			else if (instr.mmaShape == ir::PTXInstruction::MmaM16N8K16 || sparseK32) {
+				if (instr.mmaSparse) {
+					for (int i = 0; i < (sparseK32 ? 8 : 4); ++i) {
+						const int row = groupID + ((i / 2) & 1) * 8;
+						// The selected pair splits K into two 16-column halves.
+						const int metadataLane = sparseK32 ? 2 * instr.mmaSelector.imm_uint + i / 4 : instr.mmaSelector.imm_uint;
+						const int metadataThread = warpStart + groupID * 4 + metadataLane;
+						const ir::PTXU32 metadata = operandAsB32(metadataThread, instr.q);
+						const int bit = ((i / 2) & 1) * 16 + threadInGroup * 4 + (i & 1) * 2;
+						const int col = threadInGroup * 4 + (i / 4) * 16 + ((metadata >> bit) & 3);
+						A[row][col] = mmaHalf(*this, threadID, instr.a.array[i / 2], i & 1, inputType);
+					}
+				}
+				else for (int i = 0; i < 8; ++i) {
 					int row = (i < 2 || (i >= 4 && i < 6)) ? groupID : groupID + 8;
 					int col = threadInGroup * 2 + (i & 1) + (i >= 4 ? 8 : 0);
 					A[row][col] = mmaHalf(*this, threadID,
 						instr.a.array[i / 2], i & 1, inputType);
 				}
 
-				for (int i = 0; i < 4; ++i) {
-					int row = threadInGroup * 2 + (i & 1) + (i >= 2 ? 8 : 0);
+				for (int i = 0; i < (sparseK32 ? 8 : 4); ++i) {
+					int row = threadInGroup * 2 + (i & 1) + (i / 2) * 8;
 					int col = groupID;
 					B[row][col] = mmaHalf(*this, threadID,
 						instr.b.array[i / 2], i & 1, inputType);
@@ -5468,7 +5504,7 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 		for (int row = 0; row < 16; ++row) {
 			for (int col = 0; col < 8; ++col) {
 				D[row][col] = C[row][col];
-				for (int k = 0; k < (m16n8k4 ? 4 : m16n8k8 ? 8 : 16); ++k) {
+				for (int k = 0; k < (sparseK32 ? 32 : m16n8k4 ? 4 : m16n8k8 ? 8 : 16); ++k) {
 					D[row][col] = std::fma(A[row][k], B[k][col], D[row][col]);
 					if (halfAccumulator) {
 						D[row][col] = f16ToF32(toF16(D[row][col], instr.modifier));

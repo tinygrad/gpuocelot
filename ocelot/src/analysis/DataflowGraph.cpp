@@ -117,6 +117,11 @@ DataflowGraph::Instruction DataflowGraph::convert( ir::PTXInstruction& i )
 		sources[ 4 ] = &ir::PTXInstruction::pq;
 	}
 
+	if (i.opcode == ir::PTXInstruction::Mma && i.mmaSparse) {
+		limit = 5;
+		sources[4] = &ir::PTXInstruction::q;
+	}
+
 	for( unsigned int j = 0; j < limit; ++j )
 	{
 		if( !( i.*sources[ j ] ).array.empty() )

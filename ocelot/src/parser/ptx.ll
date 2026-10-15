@@ -543,6 +543,7 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return TOKEN_RED; }
 ".sync"                          { yylval->value = TOKEN_SYNC; \
                                     return TOKEN_SYNC; }
+".sp"                            { yylval->value = TOKEN_SP; return TOKEN_SP; }
 ".aligned"                       { yylval->value = TOKEN_ALIGNED; \
                                     return TOKEN_ALIGNED; }
 ".m8n8k4"                        { yylval->value = TOKEN_M8N8K4; return TOKEN_M8N8K4; }

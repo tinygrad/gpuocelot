@@ -5213,10 +5213,23 @@ public:
 			"m8n8k4.row.col.f64.f64.f64.f64 {%r0,%r1},{%r4},{%r5},{%r2,%r3}",
 			"m8n8k16.row.col.s32.s8.s8.s32 {%r0,%r1},{%r4},{%r5},{%r2,%r3}",
 			"m8n8k4.row.col.f16.f16.f16.f16 {%r0,%r1,%r2,%r3},{%r8,%r9},{%r10,%r11},{%r4,%r5,%r6,%r7}",
-			"m16n8k8.row.col.f32.f16.f16.f32 {%r0,%r1,%r2,%r3},{%r8,%r9},{%r10},{%r4,%r5,%r6,%r7}"}) {
+			"m16n8k8.row.col.f32.f16.f16.f32 {%r0,%r1,%r2,%r3},{%r8,%r9},{%r10},{%r4,%r5,%r6,%r7}",
+			"sp.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%r0,%r1},{%r8,%r9},{%r10,%r11},{%r4,%r5},%r12,0",
+			"sp.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%r0,%r1,%r2,%r3},{%r8,%r9},{%r10,%r11},{%r4,%r5,%r6,%r7},%r12,1",
+			"sp.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%r0,%r1,%r2,%r3},{%r8,%r9},{%r10,%r11},{%r4,%r5,%r6,%r7},%r12,3",
+			"sp.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%r0,%r1,%r2,%r3},{%r8,%r9},{%r10,%r11},{%r4,%r5,%r6,%r7},%r12,2",
+			"sp.sync.aligned.m16n8k32.row.col.f16.f16.f16.f16 {%r0,%r1},{%r8,%r9,%r10,%r11},{%r16,%r17,%r18,%r19},{%r4,%r5},%r12,0",
+			"sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 {%r0,%r1,%r2,%r3},{%r8,%r9,%r10,%r11},{%r16,%r17,%r18,%r19},{%r4,%r5,%r6,%r7},%r12,1",
+			"sp.sync.aligned.m16n8k32.row.col.f32.bf16.bf16.f32 {%r0,%r1,%r2,%r3},{%r8,%r9,%r10,%r11},{%r16,%r17,%r18,%r19},{%r4,%r5,%r6,%r7},%r12,1",
+			"sp.sync.aligned.m16n8k16.row.col.f32.tf32.tf32.f32 {%r0,%r1,%r2,%r3},{%r8,%r9,%r10,%r11},{%r16,%r17,%r18,%r19},{%r4,%r5,%r6,%r7},%r12,1",
+			"sp.sync.aligned.m16n8k32.row.col.s32.s8.u8.s32 {%r0,%r1,%r2,%r3},{%r8,%r9},{%r16,%r17},{%r4,%r5,%r6,%r7},%r12,1",
+			"sp.sync.aligned.m16n8k64.row.col.s32.u8.s8.s32 {%r0,%r1,%r2,%r3},{%r8,%r9,%r10,%r11},{%r16,%r17,%r18,%r19},{%r4,%r5,%r6,%r7},%r12,0",
+			"sp.sync.aligned.m16n8k64.row.col.s32.s4.u4.s32 {%r0,%r1,%r2,%r3},{%r8,%r9},{%r16,%r17},{%r4,%r5,%r6,%r7},%r12,1",
+			"sp.sync.aligned.m16n8k128.row.col.s32.u4.s4.s32 {%r0,%r1,%r2,%r3},{%r8,%r9,%r10,%r11},{%r16,%r17,%r18,%r19},{%r4,%r5,%r6,%r7},%r12,0"}) {
 			const bool fp64 = std::string(form).find("f64") != std::string::npos;
+			const bool sparse = std::string(form).find("sp.") == 0;
 			std::stringstream source(std::string(".version 8.0\n.target sm_86\n.entry warp_mma() { .reg .pred %p; .reg .") +
-				(fp64 ? "b64" : "b32") + " %r<12>; @%p mma.sync.aligned." + form + "; ret; }");
+				(fp64 ? "b64" : "b32") + " %r<20>; @%p mma." + (sparse ? "" : "sync.aligned.") + form + "; ret; }");
 			Module parsed; parsed.load(source);
 			EmulatedKernel localKernel(parsed.getKernel("warp_mma"), nullptr);
 			for (int size : {33, 65, 1, 31}) {
@@ -5231,6 +5244,7 @@ public:
 						for (int thread = 0; thread < size; ++thread) {
 							for (unsigned regID = 0; regID < localKernel.registerCount(); ++regID) localCTA.setRegAsB64(thread, regID, 0);
 							for (const auto& dest : ins.d.array) localCTA.setRegAsB64(thread, dest.reg, 0xdeadbeef);
+							if (sparse) localCTA.setRegAsB32(thread, ins.q.reg, 0x44444444u);
 							const bool predicate = scenario == 2 || scenario == 4 ||
 								(scenario != 0 && thread < completeThreads && (scenario != 3 || thread != 0));
 							localCTA.setRegAsPredicate(thread, ins.pg.reg, predicate);
@@ -5247,6 +5261,386 @@ public:
 							if (localCTA.getRegAsB64(thread, dest.reg) != expected) { status << "mma inactive lane changed or active result incorrect\n"; return false; }
 						}
 					}
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_SparseMmaParser() {
+		const std::string mnemonic = "mma.sp.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32";
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry sparse_parser() { .reg .b32 r<12>; ";
+		const std::string fragments = " {r0,r1,r2,r3}, {r4,r5}, {r6,r7}, {r8,r9,r10,r11}, e, ";
+		for (const char* metadataType : {"b32", "u32", "s32"}) for (unsigned selector = 0; selector < 4; ++selector) {
+			std::stringstream source(prefix + ".reg ." + metadataType + " e; mov.b32 e, 0; " +
+				mnemonic + fragments + (selector == 3 ? "0x3" : std::to_string(selector)) + "; ret; }");
+			Module parsed;
+			try {
+				parsed.load(source);
+				std::stringstream printed; parsed.write(printed);
+				Module roundtrip; roundtrip.load(printed);
+				if (printed.str().find(mnemonic) == std::string::npos) return false;
+				EmulatedKernel localKernel(parsed.getKernel("sparse_parser"), nullptr);
+				unsigned metadataRegister = 0;
+				bool foundMma = false;
+				for (const auto& ins : localKernel.instructions) {
+					if (ins.opcode == PTXInstruction::Mov) metadataRegister = ins.d.reg;
+					if (ins.opcode == PTXInstruction::Mma) foundMma = true;
+					if (ins.opcode == PTXInstruction::Mma && (!ins.mmaSparse ||
+						ins.q.reg != metadataRegister || PTXOperand::toString(ins.q.type) != metadataType ||
+						ins.mmaSelector.imm_uint != selector || !ins.valid().empty())) return false;
+				}
+				if (!foundMma) return false;
+			} catch (const std::exception& error) {
+				status << "sparse MMA parse/round-trip failed: " << error.what() << "\n";
+				return false;
+			}
+		}
+		const std::string valid = prefix + ".reg .b32 e; " + mnemonic + fragments + "0; ret; }";
+		for (const auto& replacement : {
+			std::make_pair(".b32 e", ".b64 e"), std::make_pair(".b32 e", ".pred e"),
+			std::make_pair(".b32 e", ".f32 e"), std::make_pair(".b32 e", ".v2 .b32 e"),
+			std::make_pair("e, 0;", "missing, 0;"), std::make_pair("e, 0;", "0, 0;"),
+			std::make_pair("e, 0;", "e, e;"), std::make_pair("e, 0;", "e, 4;"),
+			std::make_pair("e, 0;", "e, 0f00000000;"),
+			std::make_pair("e, 0;", "e, -1;"), std::make_pair("{r4,r5}", "{r4}"),
+			std::make_pair("{r6,r7}", "{r6}"), std::make_pair("{r0,r1,r2,r3}", "{r0,r1}"),
+			std::make_pair("{r8,r9,r10,r11}", "{r8,r9}"), std::make_pair("row.col", "row.row"),
+			std::make_pair(".sp.sync", ".sp::ordered_metadata.sync"),
+			std::make_pair("m16n8k8", "m16n8k16"), std::make_pair("tf32.tf32", "bf16.bf16"),
+			std::make_pair(".col.f32", ".col.satfinite.f32")}) {
+			std::string bad = valid;
+			bad.replace(bad.find(replacement.first), std::string(replacement.first).size(), replacement.second);
+			std::stringstream source(bad);
+			bool rejected = false;
+			try { Module parsed; parsed.load(source); }
+			catch (const std::exception&) { rejected = true; }
+			if (!rejected) { status << "invalid sparse MMA accepted: " << bad << "\n"; return false; }
+		}
+		return true;
+	}
+
+	bool test_SparseHalfMmaParser() {
+		for (bool wide : {false, true})
+		for (const char* types : {"f16.f16.f16.f16", "f32.f16.f16.f32", "f32.bf16.bf16.f32"}) {
+			const bool half = std::string(types).find("f16.") == 0;
+			const std::string accum = half ? "{r0,r1}" : "{r0,r1,r2,r3}";
+			const std::string a = wide ? "{a0,a1,a2,a3}" : "{a0,a1}", b = wide ? "{b0,b1,b2,b3}" : "{b0,b1}";
+			const std::string shape = wide ? "m16n8k32" : "m16n8k16";
+			for (const char* container : {"b32", "f16x2"}) for (unsigned selector = 0; selector < (wide ? 2u : 4u); ++selector) {
+				const std::string mnemonic = "mma.sp.sync.aligned." + shape + ".row.col." + std::string(types);
+				const std::string valid = ".version 8.0\n.target sm_86\n.entry sparse_half() { .reg .b32 r<4>; .reg .b32 e; .reg ." +
+					std::string(container) + " a<4>; .reg ." + container + " b<4>; " + mnemonic + " " + accum +
+					", " + a + ", " + b + ", " + accum + ", e, " + std::to_string(selector) + "; ret; }";
+				try {
+					std::stringstream source(valid); Module parsed; parsed.load(source);
+					std::stringstream printed; parsed.write(printed); Module roundtrip; roundtrip.load(printed);
+					if (printed.str().find(mnemonic) == std::string::npos) return false;
+					EmulatedKernel localKernel(parsed.getKernel("sparse_half"), nullptr);
+					for (const auto& ins : localKernel.instructions) if (ins.opcode == PTXInstruction::Mma) {
+						if (!ins.mmaSparse || ins.mmaShape != (wide ? PTXInstruction::MmaM16N8K32 : PTXInstruction::MmaM16N8K16) ||
+							ins.mmaSelector.imm_uint != selector || !ins.valid().empty()) return false;
+					}
+				} catch (const std::exception& error) {
+					status << "sparse half MMA round-trip failed: " << error.what() << "\n"; return false;
+				}
+				for (const auto& replacement : std::vector<std::pair<std::string, std::string>>{
+					std::make_pair(a, "{a0}"), std::make_pair(b, "{b0}"),
+					std::make_pair(shape, "m16n8k64"), std::make_pair("row.col", "col.col"),
+					std::make_pair(", e, " + std::to_string(selector) + ";", wide ? ", e, 2;" : ", e, 4;"),
+					std::make_pair(".col.", ".col.satfinite."), std::make_pair(".b32 r", ".b64 r"),
+					std::make_pair(" e;", " e_unused;"), std::make_pair(", e, ", ", 0, "),
+					std::make_pair("; ret;", ", e; ret;"),
+					std::make_pair(std::string(types) + " ", std::string(types).substr(0, std::string(types).rfind('.') + 1) + (half ? "f32 " : "f16 ")),
+					std::make_pair(".col." + std::string(types), ".col.f16.bf16.bf16.f16"),
+					std::make_pair(".col." + std::string(types), ".col.f32.f16.bf16.f32")}) {
+					std::string bad = valid;
+					bad.replace(bad.find(replacement.first), std::string(replacement.first).size(), replacement.second);
+					std::stringstream source(bad); bool rejected = false;
+					try { Module parsed; parsed.load(source); } catch (const std::exception&) { rejected = true; }
+					if (!rejected) { status << "invalid sparse half MMA accepted: " << bad << "\n"; return false; }
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_SparseTf32Mma(bool wide = false) {
+		const int kSize = wide ? 16 : 8;
+		const std::string fragments = wide ? "{r4,r5,r12,r13}, {r6,r7,r14,r15}" : "{r4,r5}, {r6,r7}";
+		std::stringstream source(".version 8.0\n.target sm_86\n.entry sparse_tf32_run() { .reg .b32 r<16>; .reg .b32 e; "
+			"mma.sp.sync.aligned.m16n8k" + std::to_string(kSize) + ".row.col.f32.tf32.tf32.f32 {r0,r1,r2,r3}, " + fragments + ", {r0,r1,r2,r3}, e, 0; ret; }");
+		Module parsed; parsed.load(source); EmulatedKernel localKernel(parsed.getKernel("sparse_tf32_run"), nullptr);
+		std::stringstream printed; parsed.write(printed);
+		Module roundtrip; roundtrip.load(printed);
+		localKernel.setKernelShape(64, 1, 1); CooperativeThreadArray localCTA(&localKernel, Dim3(), false);
+		for (auto original : localKernel.instructions) if (original.opcode == PTXInstruction::Mma)
+		for (unsigned selector = 0; selector < (wide ? 2u : 4u); ++selector) for (bool aliasSources : {false, true}) {
+			PTXInstruction ins = original; ins.mmaSelector = PTXOperand(selector, PTXOperand::u32); localCTA.reset();
+			for (int invalid = 0; invalid < 5; ++invalid) {
+				PTXInstruction bad = ins;
+				if (invalid == 0) bad.mmaSelector = PTXOperand(wide ? 2u : 4u, PTXOperand::u32);
+				if (invalid == 1) bad.a.array.pop_back();
+				if (invalid == 2) bad.b.array.pop_back();
+				if (invalid == 3) bad.c.array[0].type = PTXOperand::b64;
+				if (invalid == 4) bad.modifier = PTXInstruction::satfinite;
+				if (bad.valid().empty()) return false;
+			}
+			if (aliasSources) {
+				ins.d.array[0] = ins.a.array[0]; ins.d.array[1] = ins.a.array[1];
+				ins.d.array[2] = ins.b.array[0]; ins.d.array[3] = ins.q;
+			}
+			auto position = [selector](int row, int chunk, int warp) { return (row + row / 8 + chunk + chunk / 4 + warp + selector) % 2; };
+			auto aValue = [&](int row, int k, int warp) {
+				return k % 2 == position(row, k / 2, warp) ? ((row * 5 + k * 3 + warp * 7) % 13 - 6) * 0.25f : 0.0f;
+			};
+			auto bValue = [](int k, int col, int warp) { return ((k * 7 + col * 3 + warp * 5) % 11 - 5) * 0.5f; };
+			for (int thread = 0; thread < 64; ++thread) {
+				const int lane = thread % 32, warp = thread / 32, group = lane / 4, t = lane % 4;
+				PTXU32 metadata = 0;
+				for (int rowHalf = 0; rowHalf < 2; ++rowHalf) for (int chunk = 0; chunk < 4; ++chunk) {
+					const PTXU32 index = position(group + rowHalf * 8, chunk + (wide ? (t & 1) * 4 : 0), warp) ? 0xe : 0x4;
+					metadata |= index << (rowHalf * 16 + chunk * 4);
+				}
+				localCTA.setRegAsB32(thread, ins.q.reg, (wide ? t / 2 : t) == int(selector) ? metadata : 0xeeeeeeeeu);
+				for (int i = 0; i < (wide ? 4 : 2); ++i) {
+					const int row = group + (i & 1) * 8, chunk = t + (i / 2) * 4;
+					const int k = chunk * 2 + position(row, chunk, warp);
+					localCTA.setRegAsF32(thread, ins.a.array[i].reg, aValue(row, k, warp));
+					localCTA.setRegAsF32(thread, ins.b.array[i].reg, bValue(t + i * 4, group, warp));
+				}
+				for (int i = 0; i < 4; ++i) localCTA.setRegAsF32(thread, ins.c.array[i].reg,
+					group + (i / 2) * 8 + (t * 2 + (i & 1)) * 0.125f - 8 + warp);
+			}
+			try { localCTA.eval_Mma(localCTA.getActiveContext(), ins); }
+			catch (const RuntimeException& error) { status << "sparse TF32 execution failed: " << error.what() << "\n"; return false; }
+			for (int thread = 0; thread < 64; ++thread) for (int i = 0; i < 4; ++i) {
+				const int lane = thread % 32, warp = thread / 32, row = lane / 4 + (i / 2) * 8, col = (lane % 4) * 2 + (i & 1);
+				float expected = row + col * 0.125f - 8 + warp;
+				for (int k = 0; k < kSize; ++k) expected += aValue(row, k, warp) * bValue(k, col, warp);
+				if (localCTA.getRegAsF32(thread, ins.d.array[i].reg) != expected) {
+					status << "sparse TF32 mismatch selector " << selector << " thread " << thread << " row " << row << " col " << col << "\n"; return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_SparseVectorFragments() {
+		std::stringstream inverted(".version 8.0\n.target sm_86\n.entry inverted() { .reg .b32 d; .reg .pred p,q; "
+			"selp.b32 d, %tid.x, %ntid.y, !p; setp.eq.and.u32 p, %tid.x, %ntid.y, !q; ret; }");
+		Module predicates; predicates.load(inverted); std::stringstream predicateText; predicates.write(predicateText);
+		Module predicateRoundtrip; predicateRoundtrip.load(predicateText);
+		for (const char* form : {
+			"m16n8k16.row.col.f16.f16.f16.f16", "m16n8k16.row.col.f32.bf16.bf16.f32",
+			"m16n8k32.row.col.f16.f16.f16.f16", "m16n8k32.row.col.f32.bf16.bf16.f32",
+			"m16n8k8.row.col.f32.tf32.tf32.f32", "m16n8k16.row.col.f32.tf32.tf32.f32",
+			"m16n8k32.row.col.s32.s8.u8.s32", "m16n8k64.row.col.s32.u8.s8.s32",
+			"m16n8k64.row.col.s32.s4.u4.s32", "m16n8k128.row.col.s32.u4.s4.s32"}) {
+			const std::string op(form); const bool integer = op.find("s32") != std::string::npos;
+			const bool half = op.find(".col.f16") != std::string::npos, bf16 = op.find("bf16") != std::string::npos;
+			const bool tf32 = op.find("tf32") != std::string::npos, nibble = op.find("u4") != std::string::npos;
+			const int k = std::stoi(op.substr(op.find('k') + 1));
+			const int abCount = integer ? (k == (nibble ? 128 : 64) ? 4 : 2) : tf32 ? (k == 16 ? 4 : 2) : k == 32 ? 4 : 2;
+			const std::string prefix = ".version 8.0\n.target sm_86\n.entry vector_fragments() { .reg .v" + std::to_string(abCount) +
+				" .b32 va; .reg .v" + std::to_string(abCount) + " .b32 vb; .reg .v" + std::to_string(half ? 2 : 4) +
+				" .b32 vc; .reg .v" + std::to_string(half ? 2 : 4) + " .b32 vd; .reg .b32 e; ";
+			std::stringstream source(prefix + "mma.sp.sync.aligned." + op + " vd, va, vb, vc, e, 0; ret; }");
+			Module parsed; parsed.load(source); std::stringstream printed; parsed.write(printed);
+			Module roundtrip; roundtrip.load(printed); EmulatedKernel localKernel(roundtrip.getKernel("vector_fragments"), nullptr);
+			localKernel.setKernelShape(32, 1, 1); CooperativeThreadArray localCTA(&localKernel, Dim3(), false);
+			const PTXU32 one = integer ? (nibble ? 0x11111111u : 0x01010101u) : tf32 ? 0x3f800000u : bf16 ? 0x3f803f80u : 0x3c003c00u;
+			for (const auto& ins : localKernel.instructions) if (ins.opcode == PTXInstruction::Mma) {
+				for (int lane = 0; lane < 32; ++lane) {
+					for (const auto& c : ins.c.array) localCTA.setRegAsB32(lane, c.reg, 0);
+					for (const auto* fragment : {&ins.a, &ins.b}) for (const auto& element : fragment->array) localCTA.setRegAsB32(lane, element.reg, one);
+					localCTA.setRegAsB32(lane, ins.q.reg, 0x44444444u);
+				}
+				localCTA.eval_Mma(localCTA.getActiveContext(), ins);
+				const PTXU32 halfBits = hydrazine::bit_cast<PTXU16>(PTXF16(k / 2));
+				const PTXU32 expected = integer ? k / 2 : half ? halfBits | (halfBits << 16) : hydrazine::bit_cast<PTXU32>(float(k / 2));
+				for (int lane = 0; lane < 32; ++lane) for (const auto& d : ins.d.array) if (localCTA.getRegAsB32(lane, d.reg) != expected) return false;
+			}
+			std::string bad = printed.str();
+			if (abCount == 2) bad.replace(bad.find("va.x"), 4, "va.z");
+			else bad.replace(bad.find(".v4 .b32 va"), 11, ".v2 .b32 va");
+			std::stringstream invalid(bad); bool rejected = false;
+			try { Module module; module.load(invalid); } catch (const std::exception&) { rejected = true; }
+			if (!rejected) return false;
+		}
+		return true;
+	}
+
+	bool test_SparseIntegerMmaParser(bool subByte = false) {
+		for (bool wide : {false, true}) for (auto signedA : {false, true}) for (auto signedB : {false, true})
+		for (bool saturate : {false, true}) for (unsigned selector = 0; selector < (wide ? 1u : 2u); ++selector)
+		for (auto metadataType : {"b32", "s32", "u32"}) {
+			const std::string aType = subByte ? (signedA ? "s4" : "u4") : (signedA ? "s8" : "u8");
+			const std::string bType = subByte ? (signedB ? "s4" : "u4") : (signedB ? "s8" : "u8");
+			const std::string kSize = subByte ? (wide ? "128" : "64") : (wide ? "64" : "32");
+			const std::string a = wide ? "{r4,r5,r12,r13}" : "{r4,r5}", b = wide ? "{r6,r7,r14,r15}" : "{r6,r7}";
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry sparse_int_parser() { .reg .b32 r<16>; .reg ." + std::string(metadataType) + " e; mov.b32 e, 0; "
+				"mma.sp.sync.aligned.m16n8k" + kSize + ".row.col" + (saturate ? ".satfinite" : "") + ".s32." + aType + "." + bType + ".s32 {r0,r1,r2,r3}, " + a + ", " + b + ", {r0,r1,r2,r3}, e, " + std::to_string(selector) + "; ret; }");
+			Module parsed; parsed.load(source); std::stringstream printed; parsed.write(printed);
+			Module roundtrip; roundtrip.load(printed); EmulatedKernel localKernel(parsed.getKernel("sparse_int_parser"), nullptr);
+			unsigned metadataRegister = 0;
+			for (const auto& ins : localKernel.instructions) {
+				if (ins.opcode == PTXInstruction::Mov) metadataRegister = ins.d.reg;
+				if (ins.opcode != PTXInstruction::Mma) continue;
+				if (!ins.mmaSparse || ins.q.reg != metadataRegister || ins.mmaSelector.imm_uint != selector ||
+					bool(ins.modifier & PTXInstruction::satfinite) != saturate || !ins.valid().empty()) return false;
+				for (int malformed = 0; malformed < 9; ++malformed) {
+					PTXInstruction bad = ins;
+					if (malformed == 0) bad.q.type = PTXOperand::b64;
+					if (malformed == 1) bad.mmaSelector = PTXOperand(wide ? 1u : 2u, PTXOperand::u32);
+					if (malformed == 2) bad.a.array.pop_back();
+					if (malformed == 3) bad.b.array.pop_back();
+					if (malformed == 4) bad.c.array[0].type = PTXOperand::b64;
+					if (malformed == 5) bad.modifier |= PTXInstruction::ftz;
+					if (malformed == 6) bad.b.type = PTXOperand::bf16;
+					if (malformed == 7) bad.mmaShape = PTXInstruction::MmaM16N8K16;
+					if (malformed == 8) bad.a.array[0].vec = PTXOperand::v2;
+					if (bad.valid().empty()) return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_SparseIntegerMma(bool wide, bool subByte = false) {
+		const int positions[12][2] = {{0,1},{0,2},{0,3},{1,2},{1,3},{2,3},
+			{1,0},{2,0},{3,0},{2,1},{3,1},{3,2}};
+		const int bits = subByte ? 4 : 8, elements = 32 / bits, chunkSize = subByte ? 8 : 4;
+		const unsigned mask = (1u << bits) - 1;
+		const int kSize = (wide ? 64 : 32) * (subByte ? 2 : 1);
+		for (bool signedA : {false, true}) for (bool signedB : {false, true}) {
+			const std::string a = wide ? "{r4,r5,r12,r13}" : "{r4,r5}", b = wide ? "{r6,r7,r14,r15}" : "{r6,r7}";
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry sparse_int_run() { .reg .b32 r<16>; .reg .b32 e; mma.sp.sync.aligned.m16n8k" +
+				std::to_string(kSize) + ".row.col.s32." + (signedA ? "s" : "u") + std::to_string(bits) + "." + (signedB ? "s" : "u") + std::to_string(bits) + ".s32 {r0,r1,r2,r3}, " + a + ", " + b + ", {r0,r1,r2,r3}, e, 0; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel localKernel(parsed.getKernel("sparse_int_run"), nullptr);
+			localKernel.setKernelShape(64, 1, 1); CooperativeThreadArray localCTA(&localKernel, Dim3(), false);
+			for (auto original : localKernel.instructions) if (original.opcode == PTXInstruction::Mma)
+			for (unsigned selector = 0; selector < (wide ? 1u : 2u); ++selector) for (bool saturate : {false, true})
+			for (PTXS32 base : {0, (std::numeric_limits<PTXS32>::max)() - 64, (std::numeric_limits<PTXS32>::min)() + 64})
+			for (bool aliasSources : {false, true}) {
+				PTXInstruction ins = original;
+				if (aliasSources) {
+					ins.d.array[0] = ins.a.array[0]; ins.d.array[1] = ins.a.array[1];
+					ins.d.array[2] = ins.b.array[0]; ins.d.array[3] = ins.q;
+				}
+				ins.mmaSelector = PTXOperand(selector, PTXOperand::u32); ins.modifier = saturate ? PTXInstruction::satfinite : 0; localCTA.reset();
+				auto pair = [&](int row, int chunk, int warp) -> const int* { return positions[(row + chunk + warp) % 12]; };
+				auto aValue = [&](int row, int k, int warp) {
+					const int* p = pair(row, k / chunkSize, warp);
+					const int position = (k % chunkSize) / (subByte ? 2 : 1);
+					if (position != p[0] && position != p[1]) return 0;
+					if (subByte) return signedA ? (row & 1 ? -1 : 1) * (1 + (row * 7 + k * 3 + warp * 11) % 7) : 8 + (row * 7 + k * 3 + warp * 11) % 8;
+					return signedA ? (row & 1 ? -1 : 1) * (20 + (row * 7 + k * 3 + warp * 11) % 100) : 128 + (row * 7 + k * 3 + warp * 11) % 120;
+				};
+				auto bValue = [&](int k, int col, int warp) {
+					if (subByte) return signedB ? (col & 1 ? -1 : 1) * (1 + (k * 11 + col * 5 + warp * 13) % 7) : 8 + (k * 11 + col * 5 + warp * 13) % 8;
+					return signedB ? (col & 1 ? -1 : 1) * (10 + (k * 11 + col * 5 + warp * 13) % 110) : 128 + (k * 11 + col * 5 + warp * 13) % 120;
+				};
+				for (int thread = 0; thread < 64; ++thread) {
+					const int lane = thread % 32, warp = thread / 32, group = lane / 4, t = lane % 4;
+					PTXU32 metadata = 0;
+					for (int chunk = 0; chunk < 8; ++chunk) for (int j = 0; j < 2; ++j)
+						metadata |= PTXU32(pair(group + (t & 1) * 8, chunk + (wide ? (t / 2) * 8 : 0), warp)[j]) << (chunk * 4 + j * 2);
+					localCTA.setRegAsB32(thread, ins.q.reg, wide || t / 2 == int(selector) ? metadata : 0xffffffffu);
+					for (unsigned r = 0; r < ins.a.array.size(); ++r) {
+						PTXU32 aReg = 0, bReg = 0; const int row = group + (r & 1) * 8;
+						for (int j = 0; j < elements; ++j) {
+							const int chunk = t * 2 + (r / 2) * 8 + j / (subByte ? 4 : 2);
+							const int index = pair(row, chunk, warp)[(j / (subByte ? 2 : 1)) & 1];
+							const int k = chunk * chunkSize + index * (subByte ? 2 : 1) + (subByte ? j & 1 : 0);
+							aReg |= (PTXU32(aValue(row, k, warp)) & mask) << (j * bits);
+							bReg |= (PTXU32(bValue(t * elements + r * elements * 4 + j, group, warp)) & mask) << (j * bits);
+						}
+						localCTA.setRegAsB32(thread, ins.a.array[r].reg, aReg); localCTA.setRegAsB32(thread, ins.b.array[r].reg, bReg);
+					}
+					for (int i = 0; i < 4; ++i) localCTA.setRegAsS32(thread, ins.c.array[i].reg,
+						base + (group + (i / 2) * 8 + t * 2 + (i & 1)) % 13 - 6);
+				}
+				try { localCTA.eval_Mma(localCTA.getActiveContext(), ins); }
+				catch (const RuntimeException& error) { status << "sparse integer execution failed: " << error.what() << "\n"; return false; }
+				for (int thread = 0; thread < 64; ++thread) for (int i = 0; i < 4; ++i) {
+					const int warp = thread / 32, row = (thread % 32) / 4 + (i / 2) * 8, col = (thread % 4) * 2 + (i & 1);
+					int64_t expected = int64_t(base) + (row + col) % 13 - 6;
+					for (int k = 0; k < kSize; ++k) expected += int64_t(aValue(row, k, warp)) * bValue(k, col, warp);
+					if (saturate) expected = std::max<int64_t>((std::numeric_limits<PTXS32>::min)(), std::min<int64_t>((std::numeric_limits<PTXS32>::max)(), expected));
+					if (localCTA.getRegAsB32(thread, ins.d.array[i].reg) != PTXU32(expected)) { status << "sparse integer mismatch K=" << kSize << " bits=" << bits << " thread " << thread << " register " << i << "\n"; return false; }
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_SparseHalfMma(bool wide = false) {
+		const int positions[6][2] = {{0,1}, {0,2}, {0,3}, {1,2}, {1,3}, {2,3}};
+		const int kSize = wide ? 32 : 16;
+		for (const char* types : {"f16.f16.f16.f16", "f32.f16.f16.f32", "f32.bf16.bf16.f32"}) {
+			const bool half = std::string(types).find("f16.") == 0, bf16 = std::string(types).find("bf16") != std::string::npos;
+			const std::string accum = half ? "{c0,c1}" : "{c0,c1,c2,c3}";
+			const std::string fragments = wide ? ", {a0,a1,a2,a3}, {b0,b1,b2,b3}, " : ", {a0,a1}, {b0,b1}, ";
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry sparse_half_run() { .reg .b32 a<4>; .reg .b32 b<4>; .reg .b32 c<4>; .reg .b32 e; "
+				"mma.sp.sync.aligned.m16n8k" + std::to_string(kSize) + ".row.col." + types + " " + accum + fragments + accum + ", e, 0; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel localKernel(parsed.getKernel("sparse_half_run"), nullptr);
+			localKernel.setKernelShape(64, 1, 1); CooperativeThreadArray localCTA(&localKernel, Dim3(), false);
+			auto encode = [](float value, bool bfloat) -> PTXU16 {
+				return bfloat ? hydrazine::bit_cast<PTXU32>(value) >> 16 : hydrazine::bit_cast<PTXU16>(PTXF16(value));
+			};
+			for (auto original : localKernel.instructions) if (original.opcode == PTXInstruction::Mma)
+			for (unsigned selector = 0; selector < (wide ? 2u : 4u); ++selector) for (bool aliasSources : {false, true}) {
+				PTXInstruction ins = original;
+				if (aliasSources) {
+					ins.d.array[0] = ins.a.array[0]; ins.d.array[1] = ins.a.array[1];
+					if (!half) { ins.d.array[2] = ins.b.array[0]; ins.d.array[3] = ins.q; }
+				}
+				ins.mmaSelector = PTXOperand(selector, PTXOperand::u32); localCTA.reset();
+				float A[2][16][32] = {}, B[2][32][8];
+				PTXU32 metadata[2][16] = {};
+				for (int warp = 0; warp < 2; ++warp) for (int row = 0; row < 16; ++row) for (int chunk = 0; chunk < kSize / 4; ++chunk) {
+					const auto& pair = positions[(row * 5 + chunk + selector + warp) % 6];
+					for (int j = 0; j < 2; ++j) {
+						const int k = chunk * 4 + pair[j];
+						A[warp][row][k] = ((row * 5 + k * 3 + warp * 7) % 13 - 6) * 0.25f;
+						metadata[warp][row % 8 + (chunk / 4) * 8] |= PTXU32(pair[j]) << ((row / 8) * 16 + (chunk % 4) * 4 + j * 2);
+					}
+				}
+				for (int warp = 0; warp < 2; ++warp) for (int k = 0; k < kSize; ++k) for (int col = 0; col < 8; ++col)
+					B[warp][k][col] = ((k * 7 + col * 3 + warp * 5) % 11 - 5) * 0.5f;
+				for (int thread = 0; thread < 64; ++thread) {
+					const int lane = thread % 32, warp = thread / 32, group = lane / 4, t = lane % 4;
+					const int metadataIndex = group + (wide ? (t & 1) * 8 : 0);
+					const bool suppliesMetadata = (wide ? t / 2 : t) == int(selector);
+					localCTA.setRegAsB32(thread, ins.q.reg, suppliesMetadata ? metadata[warp][metadataIndex] : 0xffffffffu);
+					for (int regIndex = 0; regIndex < (wide ? 4 : 2); ++regIndex) {
+						const int row = group + (regIndex & 1) * 8, chunk = t + (regIndex / 2) * 4;
+						const auto& pair = positions[(row * 5 + chunk + selector + warp) % 6];
+						PTXU32 a = 0, b = 0;
+						for (int j = 0; j < 2; ++j) {
+							a |= PTXU32(encode(A[warp][row][chunk * 4 + pair[j]], bf16)) << (16 * j);
+							b |= PTXU32(encode(B[warp][t * 2 + j + regIndex * 8][group], bf16)) << (16 * j);
+						}
+						localCTA.setRegAsB32(thread, ins.a.array[regIndex].reg, a);
+						localCTA.setRegAsB32(thread, ins.b.array[regIndex].reg, b);
+					}
+					for (int i = 0; i < 4; ++i) {
+						const float c = (group + (i / 2) * 8) + (t * 2 + (i & 1)) * 0.125f - 8 + warp;
+						if (!half) localCTA.setRegAsF32(thread, ins.c.array[i].reg, c);
+						else if (!(i & 1)) localCTA.setRegAsB32(thread, ins.c.array[i / 2].reg, encode(c, false) | PTXU32(encode(c + 0.125f, false)) << 16);
+					}
+				}
+				try { localCTA.eval_Mma(localCTA.getActiveContext(), ins); }
+				catch (const RuntimeException& error) { status << "sparse half MMA execution failed: " << error.what() << "\n"; return false; }
+				for (int thread = 0; thread < 64; ++thread) for (int i = 0; i < 4; ++i) {
+					const int lane = thread % 32, warp = thread / 32;
+					const int row = lane / 4 + (i / 2) * 8, col = (lane % 4) * 2 + (i & 1);
+					float expected = row + col * 0.125f - 8 + warp;
+					for (int k = 0; k < kSize; ++k) expected += A[warp][row][k] * B[warp][k][col];
+					const bool correct = half ? PTXU16(localCTA.getRegAsB32(thread, ins.d.array[i / 2].reg) >> (16 * (i & 1))) == encode(expected, false)
+						: localCTA.getRegAsF32(thread, ins.d.array[i].reg) == expected;
+					if (!correct) { status << "sparse half MMA mismatch " << types << " selector " << selector << " row " << row << " col " << col << "\n"; return false; }
 				}
 			}
 		}
@@ -5508,6 +5902,42 @@ public:
 			PTXOperand::v4, 0, 4);
 		ins.b = vector(PTXOperand::f16, PTXOperand::b32,
 			PTXOperand::v2, 4, 2);
+		PTXInstruction sparse = ins;
+		sparse.mmaSparse = true;
+		sparse.mmaShape = PTXInstruction::MmaM16N8K8;
+		sparse.a = vector(PTXOperand::tf32, PTXOperand::b32, PTXOperand::v2, 10, 2);
+		sparse.b.type = PTXOperand::tf32;
+		sparse.q = reg("metadata", PTXOperand::b32, 12);
+		for (unsigned int selector = 0; selector < 4; ++selector) {
+			sparse.mmaSelector = PTXOperand(selector, PTXOperand::u32);
+			if (!sparse.valid().empty() || sparse.toString().find("mma.sp.sync.aligned.") != 0) {
+				status << "legal sparse TF32 IR rejected: " << sparse.valid() << "\n";
+				return false;
+			}
+		}
+		for (auto type : {PTXOperand::b32, PTXOperand::s32, PTXOperand::u32}) {
+			sparse.q.type = type;
+			if (!sparse.valid().empty()) return false;
+		}
+		for (int malformed = 0; malformed < 12; ++malformed) {
+			PTXInstruction bad = sparse;
+			if (malformed == 0) bad.q.type = PTXOperand::b64;
+			if (malformed == 1) bad.q.type = PTXOperand::pred;
+			if (malformed == 2) bad.mmaSelector = reg("selector", PTXOperand::u32, 13);
+			if (malformed == 3) bad.mmaSelector = PTXOperand(4u, PTXOperand::u32);
+			if (malformed == 4) bad.a.array.pop_back();
+			if (malformed == 5) bad.b.array.pop_back();
+			if (malformed == 6) bad.c.array[0].type = PTXOperand::b64;
+			if (malformed == 7) bad.a.type = PTXOperand::f16;
+			if (malformed == 8) bad.q.addressMode = PTXOperand::Invalid;
+			if (malformed == 9) bad.q.vec = PTXOperand::v2;
+			if (malformed == 10) bad.c.array.pop_back();
+			if (malformed == 11) bad.d.array.pop_back();
+			if (bad.valid().empty()) {
+				status << "invalid sparse TF32 IR accepted: " << malformed << "\n";
+				return false;
+			}
+		}
 		for (auto& operand : ins.a.array) operand.type = PTXOperand::f16x2;
 		for (auto& operand : ins.b.array) operand.type = PTXOperand::f16x2;
 		if (!ins.valid().empty()) {
@@ -10291,6 +10721,17 @@ public:
 			result = (result && test_F16Fma());
 			result = (result && test_Bf16Fma());
 			result = (result && test_MmaWarpParticipation());
+			result = (result && test_SparseMmaParser());
+			result = (result && test_SparseHalfMmaParser());
+			result = (result && test_SparseHalfMma());
+			result = (result && test_SparseHalfMma(true));
+			result = (result && test_SparseTf32Mma());
+			result = (result && test_SparseTf32Mma(true));
+			result = (result && test_SparseIntegerMmaParser());
+			result = (result && test_SparseIntegerMmaParser(true));
+			result = (result && test_SparseIntegerMma(false) && test_SparseIntegerMma(true));
+			result = (result && test_SparseIntegerMma(false, true) && test_SparseIntegerMma(true, true));
+			result = (result && test_SparseVectorFragments());
 			result = (result && test_MmaNamedDestination());
 			result = (result && test_MmaFloatShapes());
 			result = (result && test_Mma());

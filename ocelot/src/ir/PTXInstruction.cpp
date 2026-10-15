@@ -504,6 +504,7 @@ ir::PTXInstruction::PTXInstruction( Opcode op, const PTXOperand& _d,
 	mmaShape = MmaShape_Invalid;
 	mmaAColumnMajor = false;
 	mmaBColumnMajor = true;
+	mmaSparse = false;
 	pg.condition = PTXOperand::PT;
 	pg.type = PTXOperand::pred;
 	barrierOperation = BarSync;
@@ -1450,6 +1451,36 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case Mma: {
+			if (mmaSparse) {
+				const bool sparseTf32 = (mmaShape == MmaM16N8K8 || mmaShape == MmaM16N8K16) && a.type == PTXOperand::tf32;
+				const bool sparseInt8 = (mmaShape == MmaM16N8K32 || mmaShape == MmaM16N8K64) &&
+					(a.type == PTXOperand::s8 || a.type == PTXOperand::u8);
+				const bool sparseInt4 = (mmaShape == MmaM16N8K64 || mmaShape == MmaM16N8K128) &&
+					(a.type == PTXOperand::s4 || a.type == PTXOperand::u4);
+				const bool sparseHalf = (mmaShape == MmaM16N8K16 || mmaShape == MmaM16N8K32) &&
+					(a.type == PTXOperand::f16 || a.type == PTXOperand::bf16);
+				if (!sparseTf32 && !sparseHalf && !sparseInt8 && !sparseInt4) {
+					return "unsupported sparse mma shape/type combination";
+				}
+				if (q.addressMode != PTXOperand::Register || q.vec != PTXOperand::v1 ||
+					!q.array.empty() || (q.type != PTXOperand::b32 &&
+					q.type != PTXOperand::u32 && q.type != PTXOperand::s32)) {
+					return "sparse mma metadata must be a scalar 32-bit integer register";
+				}
+				const unsigned maxSelector = (sparseInt8 && mmaShape == MmaM16N8K64) ||
+					(sparseInt4 && mmaShape == MmaM16N8K128) ? 0u :
+					mmaShape == MmaM16N8K32 || sparseInt4 || (mmaShape == MmaM16N8K16 && sparseTf32) ? 1u : 3u;
+				if (mmaSelector.addressMode != PTXOperand::Immediate ||
+					!PTXOperand::isInt(mmaSelector.type) ||
+					mmaSelector.imm_uint > maxSelector) {
+					return "sparse mma selector must be a legal integer constant for its shape";
+				}
+				for (const auto* operand : {&c, &d}) {
+					for (const auto& element : operand->array) {
+						if (element.bytes() != 4) return "sparse mma C/D registers must be 32-bit";
+					}
+				}
+			}
 			for (const PTXOperand* operand : {&a, &b, &c, &d}) {
 				if (operand->addressMode != PTXOperand::Register) {
 					return "mma fragments must be register operands";
@@ -1521,11 +1552,12 @@ std::string ir::PTXInstruction::valid() const {
 			if (a.type == PTXOperand::s4 || a.type == PTXOperand::u4) {
 				const bool small = mmaShape == MmaM8N8K32;
 				const bool k64 = mmaShape == MmaM16N8K64;
-				if ((!small && !k64 && mmaShape != MmaM16N8K32) || (b.type != PTXOperand::s4 && b.type != PTXOperand::u4) ||
+				const bool sparseK128 = mmaSparse && mmaShape == MmaM16N8K128;
+				if ((!small && !k64 && !sparseK128 && mmaShape != MmaM16N8K32) || (b.type != PTXOperand::s4 && b.type != PTXOperand::u4) ||
 					type != PTXOperand::s32 || c.type != type || d.type != type || (modifier & ~satfinite))
 					return "unsupported sub-byte mma shape/type/modifier combination";
-				const unsigned aCount = small ? 1u : k64 ? 4u : 2u;
-				const unsigned bCount = k64 ? 2u : 1u;
+				const unsigned aCount = mmaSparse ? (sparseK128 ? 4u : 2u) : small ? 1u : k64 ? 4u : 2u;
+				const unsigned bCount = mmaSparse ? aCount : k64 ? 2u : 1u;
 				const unsigned cdCount = small ? 2u : 4u;
 				for (const PTXOperand* operand : {&a, &b, &c, &d}) {
 					const bool input = operand == &a || operand == &b;
@@ -1544,8 +1576,8 @@ std::string ir::PTXInstruction::valid() const {
 					return "integer mma accepts only satfinite";
 				}
 				if (mmaShape != MmaM16N8K16 && mmaShape != MmaM8N8K16 &&
-					mmaShape != MmaM16N8K32) {
-					return "integer mma requires m8n8k16, m16n8k16, or m16n8k32";
+					mmaShape != MmaM16N8K32 && !(mmaSparse && mmaShape == MmaM16N8K64)) {
+					return "integer mma requires a supported shape";
 				}
 				if (type != PTXOperand::s32) {
 					return "integer mma requires s32 accumulators";
@@ -1556,19 +1588,13 @@ std::string ir::PTXInstruction::valid() const {
 				if (d.type != PTXOperand::s32 || c.type != PTXOperand::s32) {
 					return "integer mma C and D types must be s32";
 				}
-				const PTXOperand::Vec aVec = mmaShape == MmaM16N8K32
-					? PTXOperand::v4 : mmaShape == MmaM8N8K16
-					? PTXOperand::v1 : PTXOperand::v2;
-				const PTXOperand::Vec bVec = mmaShape == MmaM8N8K16
-					? PTXOperand::v1 : mmaShape == MmaM16N8K32
-					? PTXOperand::v2 : PTXOperand::v1;
-				const PTXOperand::Vec cdVec = mmaShape == MmaM8N8K16
-					? PTXOperand::v2 : PTXOperand::v4;
-				const unsigned int aCount = mmaShape == MmaM16N8K32
+				const unsigned int aCount = mmaSparse ? (mmaShape == MmaM16N8K64 ? 4u : 2u) : mmaShape == MmaM16N8K32
 					? 4u : mmaShape == MmaM8N8K16 ? 1u : 2u;
-				const unsigned int bCount = mmaShape == MmaM8N8K16
+				const unsigned int bCount = mmaSparse ? aCount : mmaShape == MmaM8N8K16
 					? 1u : mmaShape == MmaM16N8K32 ? 2u : 1u;
 				const unsigned int cdCount = mmaShape == MmaM8N8K16 ? 2u : 4u;
+				const auto aVec = static_cast<PTXOperand::Vec>(aCount), bVec = static_cast<PTXOperand::Vec>(bCount);
+				const auto cdVec = static_cast<PTXOperand::Vec>(cdCount);
 				if (d.vec != cdVec || c.vec != cdVec ||
 					a.vec != aVec || b.vec != bVec) {
 					return "integer mma has invalid fragment sizes";
@@ -1610,10 +1636,12 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			const bool m16n8k8 = mmaShape == MmaM16N8K8;
 			const bool m16n8k4 = mmaShape == MmaM16N8K4;
+			const bool sparseK32 = mmaSparse && mmaShape == MmaM16N8K32;
 			const bool tf32Input = a.type == PTXOperand::tf32;
+			const bool sparseTf32K16 = mmaSparse && tf32Input && mmaShape == MmaM16N8K16;
 			const bool halfAccumulator = type == PTXOperand::f16;
 			if ((m16n8k4 && !tf32Input) ||
-				(!m16n8k4 && !m16n8k8 && mmaShape != MmaM16N8K16)) {
+				(!m16n8k4 && !m16n8k8 && mmaShape != MmaM16N8K16 && !sparseK32)) {
 				return "unsupported floating-point mma shape/type combination";
 			}
 			if (!halfAccumulator && type != PTXOperand::f32) {
@@ -1623,9 +1651,9 @@ std::string ir::PTXInstruction::valid() const {
 				a.type != PTXOperand::tf32) {
 				return "mma A type must be f16, bf16, or tf32";
 			}
-			if (tf32Input && ((!m16n8k8 && !m16n8k4) || type != PTXOperand::f32 ||
+			if (tf32Input && ((!m16n8k8 && !m16n8k4 && !sparseTf32K16) || type != PTXOperand::f32 ||
 				b.type != PTXOperand::tf32)) {
-				return "tf32 mma requires m16n8k4 or m16n8k8 with f32 accumulators";
+				return "tf32 mma requires a supported shape with f32 accumulators";
 			}
 			if (halfAccumulator && a.type != PTXOperand::f16) {
 				return "f16 mma accumulators require f16 inputs";
@@ -1641,9 +1669,10 @@ std::string ir::PTXInstruction::valid() const {
 				? PTXOperand::v2 : PTXOperand::v4;
 			const unsigned int accumulatorRegisters = halfAccumulator ? 2 : 4;
 			const bool compactInputFragment = m16n8k4 || (m16n8k8 && !tf32Input);
-			const PTXOperand::Vec inputAVec = compactInputFragment
+			const bool compactA = compactInputFragment || (mmaSparse && !sparseK32 && !sparseTf32K16);
+			const PTXOperand::Vec inputAVec = compactA
 				? PTXOperand::v2 : PTXOperand::v4;
-			const PTXOperand::Vec inputBVec = compactInputFragment
+			const PTXOperand::Vec inputBVec = (sparseK32 || sparseTf32K16) ? PTXOperand::v4 : compactInputFragment
 				? PTXOperand::v1 : PTXOperand::v2;
 			if (d.vec != accumulatorVec || c.vec != accumulatorVec ||
 				a.vec != inputAVec || b.vec != inputBVec) {
@@ -1651,8 +1680,8 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			if (d.array.size() != accumulatorRegisters ||
 				c.array.size() != accumulatorRegisters ||
-				a.array.size() != (compactInputFragment ? 2u : 4u) ||
-				b.array.size() != (compactInputFragment ? 1u : 2u)) {
+				a.array.size() != (compactA ? 2u : 4u) ||
+				b.array.size() != (sparseK32 || sparseTf32K16 ? 4u : compactInputFragment ? 1u : 2u)) {
 				return "mma has invalid fragment register counts";
 			}
 			for (PTXOperand::Array::const_iterator element = a.array.begin();
@@ -3081,7 +3110,7 @@ std::string ir::PTXInstruction::toString() const {
 			default:          shapeName = "16n8k16"; break;
 			}
 			std::string result = guard() +
-				"mma.sync.aligned.m" +
+				(mmaSparse ? "mma.sp.sync.aligned.m" : "mma.sync.aligned.m") +
 				shapeName +
 				(mmaAColumnMajor ? ".col" : ".row") +
 				(mmaBColumnMajor ? ".col." : ".row.") +
@@ -3094,6 +3123,7 @@ std::string ir::PTXInstruction::toString() const {
 				(type == PTXOperand::f64 && modifier ? "." + toString((Modifier)modifier) : "") + " " +
 				d.toString() + ", " + a.toString() + ", " +
 				b.toString() + ", " + c.toString();
+			if (mmaSparse) result += ", " + q.toString() + ", " + mmaSelector.toString();
 			return result;
 		}
 		case MadC: {

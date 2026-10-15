@@ -135,7 +135,7 @@
 
 %token<value> TOKEN_TRAP TOKEN_CLAMP TOKEN_ZERO TOKEN_WRAP
 
-%token<value> TOKEN_ARRIVE TOKEN_RED TOKEN_POPC TOKEN_SYNC TOKEN_ALIGNED
+%token<value> TOKEN_ARRIVE TOKEN_RED TOKEN_POPC TOKEN_SYNC TOKEN_ALIGNED TOKEN_SP
 %token<value> TOKEN_M8N8K4 TOKEN_M16N8K4 TOKEN_M16N8K8 TOKEN_M16N8K16 TOKEN_M8N8K16 TOKEN_M16N8K32 TOKEN_ROW TOKEN_COL
 
 %token<value> TOKEN_BALLOT
@@ -146,6 +146,7 @@
 %token<value> TOKEN_NORMAL TOKEN_SUBNORMAL
 
 %type<value> mmaLayout mmaShape mmaAccumulatorTypeId mmaInputTypeId mmaIntTypeId
+%type<value> mmaOperandList
 
 %token<value> TOKEN_DECIMAL_CONSTANT
 
@@ -697,6 +698,31 @@ opcode : OPCODE_COS | OPCODE_SQRT | OPCODE_ADD | OPCODE_RSQRT | OPCODE_ADDC
 	| OPCODE_BFI | OPCODE_BMSK | OPCODE_FNS | OPCODE_TANH | OPCODE_TESTP | OPCODE_TLD4
 	| OPCODE_PREFETCH | OPCODE_PREFETCHU;
 
+mma : OPCODE_MMA TOKEN_SP TOKEN_SYNC TOKEN_ALIGNED TOKEN_M16N8K8 TOKEN_ROW TOKEN_COL
+	TOKEN_F32 TOKEN_TF32 TOKEN_TF32 TOKEN_F32
+	arrayOperand ',' arrayOperand ',' arrayOperand ',' arrayOperand ',' operand ',' operand ';'
+{
+	state.mma(TOKEN_M16N8K8, TOKEN_F32, TOKEN_TF32, TOKEN_TF32, TOKEN_F32,
+		false, true, true);
+};
+
+mma : OPCODE_MMA TOKEN_SP TOKEN_SYNC TOKEN_ALIGNED sparseMmaShape TOKEN_ROW TOKEN_COL
+	mmaAccumulatorTypeId mmaInputTypeId mmaInputTypeId mmaAccumulatorTypeId
+	arrayOperand ',' arrayOperand ',' arrayOperand ',' arrayOperand ',' operand ',' operand ';'
+{
+	state.mma($<value>5, $<value>8, $<value>9, $<value>10, $<value>11,
+		false, true, true);
+};
+sparseMmaShape : TOKEN_M16N8K16 | TOKEN_M16N8K32 | TOKEN_M16N8K64 | TOKEN_M16N8K128;
+
+mma : OPCODE_MMA TOKEN_SP TOKEN_SYNC TOKEN_ALIGNED sparseMmaShape TOKEN_ROW TOKEN_COL
+	optionalSatfinite TOKEN_S32 sparseIntegerType sparseIntegerType TOKEN_S32
+	arrayOperand ',' arrayOperand ',' arrayOperand ',' arrayOperand ',' operand ',' operand ';'
+{
+	state.mma($<value>5, TOKEN_S32, $<value>10, $<value>11, TOKEN_S32, false, true, true);
+};
+sparseIntegerType : TOKEN_S8 | TOKEN_U8 | TOKEN_S4 | TOKEN_U4;
+
 mma : OPCODE_MMA TOKEN_SYNC TOKEN_ALIGNED mmaShape mmaLayout mmaLayout
 	mmaAccumulatorTypeId mmaInputTypeId mmaInputTypeId mmaAccumulatorTypeId
 	arrayOperand ',' arrayOperand ',' arrayOperand ',' arrayOperand ';'
@@ -818,7 +844,7 @@ optionalVectorIndex : vectorIndex
 
 optionalVectorIndex : /* empty string */
 {
-
+	state.operand.vIndex = ir::PTXOperand::iAll;
 };
 
 nonLabelOperand : identifier optionalVectorIndex
@@ -828,6 +854,7 @@ nonLabelOperand : identifier optionalVectorIndex
 
 nonLabelOperand : '!' identifier
 {
+	state.operand.vIndex = ir::PTXOperand::iAll;
 	state.nonLabelOperand( $<text>2, @1, true );
 };
 
@@ -874,9 +901,11 @@ memoryOperand : constantOperand | addressableOperand | offsetAddressableOperand;
 branchOperand : labelOperand;
 
 arrayOperand : operand;
-arrayOperand : '{' identifierList '}'
+mmaOperandList : nonLabelOperand { $$ = 1; }
+ | mmaOperandList ',' nonLabelOperand { $$ = $1 + 1; };
+arrayOperand : '{' mmaOperandList '}'
 {
-	state.arrayOperand( @1 );
+	state.arrayOperand( $2, @1 );
 };
 
 guard : TOKEN_PREDICATE_IDENTIFIER

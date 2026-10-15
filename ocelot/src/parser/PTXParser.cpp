@@ -1460,6 +1460,15 @@ namespace parser
 				<< string << " not declared in this scope.", NoDeclaration );
 		}
 
+		if( mode->operand.addressMode == ir::PTXOperand::Register
+			&& operand.vIndex != ir::PTXOperand::iAll
+			&& (mode->operand.vec == ir::PTXOperand::v1
+				|| static_cast<unsigned int>(operand.vIndex) > mode->operand.array.size()) )
+		{
+			throw_exception( toString(location, *this)
+				<< "Invalid vector component for " << string, InvalidArray );
+		}
+
 		if( mode->operand.addressMode == ir::PTXOperand::Address )
 		{
 			statement.instruction.addressSpace = mode->space;
@@ -1587,7 +1596,7 @@ namespace parser
 
 	void PTXParser::State::vectorOperand( unsigned int elements )
 	{
-		assert( elements == 2 || elements == 4 );
+		assert( elements == 1 || elements == 2 || elements == 4 || elements == 8 );
 		assert( operandVector.size() >= elements );
 
 		OperandVector::iterator begin = operandVector.end() - elements;
@@ -1595,7 +1604,7 @@ namespace parser
 		ir::PTXOperand vector;
 		vector.addressMode = ir::PTXOperand::Register;
 		vector.type = ir::PTXOperand::TypeSpecifier_invalid;
-		vector.vec = elements == 2 ? ir::PTXOperand::v2 : ir::PTXOperand::v4;
+		vector.vec = static_cast<ir::PTXOperand::Vec>(elements);
 
 		for( OperandVector::iterator element = begin;
 			element != operandVector.end(); ++element )
@@ -1649,6 +1658,16 @@ namespace parser
 		operand.type = mode->operand.type;
 	
 		operandVector.push_back( OperandWrapper( operand, mode->space ) );
+	}
+
+	void PTXParser::State::arrayOperand( unsigned int elements, YYLTYPE& location )
+	{
+		if( elements != 1 && elements != 2 && elements != 4 && elements != 8 )
+		{
+			throw_exception( toString(location, *this)
+				<< "Invalid fragment length " << elements, InvalidArray );
+		}
+		vectorOperand(elements);
 	}
 
 	void PTXParser::State::arrayOperand( YYLTYPE& location )
@@ -2021,9 +2040,10 @@ namespace parser
 	}
 
 	void PTXParser::State::mma( int shapeToken, int accumulatorToken,
-		int aToken, int bToken, int cToken, bool aColumnMajor, bool bColumnMajor )
+		int aToken, int bToken, int cToken, bool aColumnMajor, bool bColumnMajor,
+		bool sparse )
 	{
-		assert( operandVector.size() == 5 );
+		assert( operandVector.size() == (sparse ? 7u : 5u) );
 		ir::PTXOperand::DataType accumulatorType = tokenToDataType( accumulatorToken );
 		ir::PTXOperand::DataType aType = tokenToDataType( aToken );
 		ir::PTXOperand::DataType bType = tokenToDataType( bToken );
@@ -2054,6 +2074,7 @@ namespace parser
 			: ir::PTXInstruction::MmaM16N8K16;
 		statement.instruction.mmaAColumnMajor = aColumnMajor;
 		statement.instruction.mmaBColumnMajor = bColumnMajor;
+		statement.instruction.mmaSparse = sparse;
 		statement.instruction.type = accumulatorType;
 		statement.instruction.pg = operandVector[0].operand;
 		statement.instruction.d = operandVector[1].operand;
@@ -2065,6 +2086,10 @@ namespace parser
 		statement.instruction.c.type = cType;
 		statement.instruction.a.type = aType;
 		statement.instruction.b.type = bType;
+		if (sparse) {
+			statement.instruction.q = operandVector[5].operand;
+			statement.instruction.mmaSelector = operandVector[6].operand;
+		}
 
 		_setImmediateTypes();
 	}
