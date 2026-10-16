@@ -5267,6 +5267,176 @@ public:
 		return true;
 	}
 
+	bool test_LdmatrixParser() {
+		for (int count : {1, 2, 4}) for (bool transpose : {false, true})
+		for (const char* space : {"", ".shared", ".shared::cta"}) for (const char* width : {"32", "64"}) {
+			std::string fragment = "{r0";
+			for (int i = 1; i < count; ++i) fragment += ",r" + std::to_string(i);
+			fragment += "}";
+			const std::string text = ".version 8.0\n.target sm_86\n.entry matrix_parser() { .reg .b32 r<4>; .reg .b" + std::string(width) +
+				" addr; mov.b" + width + " addr, 0; ldmatrix.sync.aligned.m8n8.x" + std::to_string(count) +
+				(transpose ? ".trans" : "") + space + ".b16 " + fragment + ", [addr+16]; ret; }";
+			std::stringstream source(text), printed; Module parsed; parsed.load(source); parsed.write(printed);
+			Module roundtrip; roundtrip.load(printed); EmulatedKernel kernel(roundtrip.getKernel("matrix_parser"), nullptr);
+			int addressRegister = -1;
+			for (const auto& ins : kernel.instructions) {
+				if (ins.opcode == PTXInstruction::Mov) addressRegister = ins.d.reg;
+				if (ins.opcode != PTXInstruction::Ldmatrix) continue;
+				if (int(ins.vec) != count || ins.matrixTranspose != transpose ||
+					int(ins.a.reg) != addressRegister || ins.a.offset != 16 || !ins.valid().empty()) return false;
+			}
+			for (const auto& change : {std::make_pair(std::string(".b16 "), std::string(".b8 ")),
+				std::make_pair(std::string(".sync"), std::string("")),
+				std::make_pair(std::string(".aligned"), std::string("")),
+				std::make_pair(std::string(".b32 r"), std::string(".b64 r"))}) {
+				std::string bad = text; bad.replace(bad.find(change.first), change.first.size(), change.second);
+				std::stringstream input(bad); bool rejected = false;
+				try { Module invalid; invalid.load(input); } catch (const std::exception&) { rejected = true; }
+				if (!rejected) return false;
+			}
+		}
+		for (const char* address : {"16", "smem+16"}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry matrix_symbol() { .shared .align 16 .b8 smem[256]; .reg .b32 r; "
+				"ldmatrix.sync.aligned.m8n8.x1.b16 {r}, [" + std::string(address) + "]; ret; }");
+			Module parsed; parsed.load(source); std::stringstream printed; parsed.write(printed);
+			Module roundtrip; roundtrip.load(printed); EmulatedKernel kernel(roundtrip.getKernel("matrix_symbol"), nullptr);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Ldmatrix &&
+				(!ins.valid().empty() || (address[0] == 's' && ins.addressSpace != PTXInstruction::Shared))) return false;
+		}
+		return true;
+	}
+
+	bool test_LdmatrixAddress() {
+		for (const char* address : {"addr.x", "addr.y+16", "addr.x-2147483648", "addr.x - 2147483648", "addr.x+2147483647", "4294967295", "0"}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry matrix_address() { .reg .v2 .b64 addr; .reg .b32 d; "
+				"ldmatrix.sync.aligned.m8n8.x1.shared.b16 {d}, [" + std::string(address) + "]; ret; }");
+			Module parsed; parsed.load(source); std::stringstream printed; parsed.write(printed);
+			Module roundtrip; roundtrip.load(printed);
+		}
+		for (const char* address : {"addr", "addr.z", "addr.x+2147483648", "addr.x-2147483649",
+			"addr.x+4294967296", "4294967296", "-1", "0f3f800000", "addr.x 16"}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry matrix_address() { .reg .v2 .b64 addr; .reg .b32 d; "
+				"ldmatrix.sync.aligned.m8n8.x1.shared.b16 {d}, [" + std::string(address) + "]; ret; }");
+			bool rejected = false;
+			try { Module invalid; invalid.load(source); } catch (const std::exception&) { rejected = true; }
+			if (!rejected) return false;
+		}
+		return true;
+	}
+
+	bool test_Ldmatrix() {
+		for (int count : {1, 2, 4}) for (bool transpose : {false, true}) for (bool generic : {false, true})
+		for (bool address32 : {false, true}) for (bool alias : {false, true}) {
+			if (alias && !address32) continue;
+			std::string fragment = "{r0";
+			for (int i = 1; i < count; ++i) fragment += ",r" + std::to_string(i);
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry matrix_load() { .shared .align 16 .b16 storage[520]; "
+				".reg .b32 r<4>; .reg .b" + std::string(address32 ? "32" : "64") + " addr; ldmatrix.sync.aligned.m8n8.x" + std::to_string(count) +
+				(transpose ? ".trans" : "") + (generic ? "" : ".shared") + ".b16 " + fragment + "}, [addr+16]; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("matrix_load"), nullptr);
+			kernel.setKernelShape(64, 1, 1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			auto* memory = static_cast<PTXU16*>(local.functionCallStack.sharedMemoryPointer());
+			auto value = [](int warp, int matrix, int row, int col) { return PTXU32(0x8001 + warp * 0x4000 + matrix * 0x800 + row * 32 + col); };
+			for (int warp = 0; warp < 2; ++warp) for (int m = 0; m < 4; ++m)
+			for (int row = 0; row < 8; ++row) for (int col = 0; col < 8; ++col)
+				memory[8 + (warp * 4 + m) * 64 + ((row * 3 + 5) % 8) * 8 + col] = value(warp, m, row, col);
+			for (auto ins : kernel.instructions) if (ins.opcode == PTXInstruction::Ldmatrix) {
+				if (alias) ins.d.array[0].reg = ins.a.reg;
+				for (int thread = 0; thread < 64; ++thread) {
+					const int lane = thread % 32, warp = thread / 32;
+					PTXU64 address = (warp * 4 + lane / 8) * 128 + ((lane % 8 * 3 + 5) % 8) * 16;
+					if (generic) address += reinterpret_cast<PTXU64>(memory);
+					if (lane >= count * 8) address = ~PTXU64(0);
+					if (address32) local.setRegAsU32(thread, ins.a.reg, PTXU32(address));
+					else local.setRegAsU64(thread, ins.a.reg, address);
+				}
+				try { local.eval_Ldmatrix(local.getActiveContext(), ins); }
+				catch (const RuntimeException& error) { status << error.what() << "\n"; return false; }
+				for (int thread = 0; thread < 64; ++thread) for (int m = 0; m < count; ++m) {
+					const int lane = thread % 32, row = lane / 4, col = (lane % 4) * 2;
+					PTXU32 expected = 0;
+					for (int j = 0; j < 2; ++j) expected |= value(thread / 32, m, transpose ? col + j : row, transpose ? row : col + j) << (16 * j);
+					if (local.getRegAsB32(thread, ins.d.array[m].reg) != expected) {
+						status << "ldmatrix mismatch x" << count << " trans " << transpose << " thread " << thread << " register " << m << "\n"; return false;
+					}
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_LdmatrixControls() {
+		std::stringstream source(".version 8.0\n.target sm_86\n.entry matrix_controls() { .shared .align 16 .b16 storage[512]; "
+			".reg .b32 r<4>; .reg .b64 addr; .reg .pred p; @p ldmatrix.sync.aligned.m8n8.x4.shared.b16 {r0,r1,r2,r3}, [addr]; ret; }");
+		Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("matrix_controls"), nullptr);
+		for (int size : {1, 31, 32, 33, 64, 65}) {
+			kernel.setKernelShape(size, 1, 1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			auto* memory = static_cast<PTXU16*>(local.functionCallStack.sharedMemoryPointer());
+			std::fill(memory, memory + 512, 0);
+			for (auto original : kernel.instructions) if (original.opcode == PTXInstruction::Ldmatrix)
+			// Active/partial CTA, predicated/inactive tails, divergence, inactive warp,
+			// bounds, generic-window and IR errors, all-off, misalignment, inverted guard.
+			for (int scenario = 0; scenario < 11; ++scenario) {
+				const int complete = size / 32 * 32;
+				if (complete == 0 && ((scenario >= 3 && scenario <= 7) || scenario == 9)) continue;
+				auto ins = original; local.reset(); auto& context = local.getActiveContext();
+				if (scenario == 6) ins.addressSpace = PTXInstruction::Generic;
+				if (scenario == 7) ins.d.array[0].type = PTXOperand::b64;
+				if (scenario == 10) ins.pg.condition = PTXOperand::InvPred;
+				for (int thread = 0; thread < size; ++thread) {
+					for (const auto& d : ins.d.array) local.setRegAsB32(thread, d.reg, 0xdeadbeef);
+					bool predicate = scenario == 0 || scenario == 2 || thread < complete;
+					if ((scenario == 3 && thread == 0) || (scenario == 4 && thread < 32) || scenario == 8) predicate = false;
+					local.setRegAsPredicate(thread, ins.pg.reg, scenario == 10 ? !predicate : predicate);
+					if (scenario == 2 && thread >= complete) context.active.reset(thread);
+					PTXU64 address = (thread % 32) * 16;
+					if (scenario == 6) address += reinterpret_cast<PTXU64>(memory);
+					if (scenario == 5 && thread == 0) address = 1024;
+					if (scenario == 9 && thread == 0) address = 1;
+					if ((scenario == 6 && thread == 0) || scenario == 8) address = ~PTXU64(0);
+					local.setRegAsU64(thread, ins.a.reg, address);
+				}
+				bool rejected = false;
+				try { local.eval_Ldmatrix(context, ins); } catch (const RuntimeException&) { rejected = true; }
+				const bool shouldReject = (scenario == 0 && size % 32) || scenario == 3 || scenario == 5 || scenario == 6 || scenario == 7 || scenario == 9;
+				if (rejected != shouldReject) { status << "ldmatrix control mismatch CTA " << size << " scenario " << scenario << "\n"; return false; }
+				for (int thread = 0; thread < size; ++thread) for (const auto& d : ins.d.array) {
+					const PTXU32 expected = !rejected && context.predicated(thread, ins) ? 0 : 0xdeadbeef;
+					if (local.getRegAsB32(thread, d.reg) != expected) return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_LdmatrixIR() {
+		for (auto count : {PTXOperand::v1, PTXOperand::v2, PTXOperand::v4}) {
+			PTXInstruction ins(PTXInstruction::Ldmatrix); ins.type = PTXOperand::b16;
+			ins.addressSpace = PTXInstruction::Shared; ins.vec = count;
+			ins.a = PTXOperand(PTXOperand::Indirect, PTXOperand::u64, 0);
+			ins.d = PTXOperand(PTXOperand::Register, PTXOperand::b32, 1, 0, count);
+			for (int i = 0; i < int(count); ++i) ins.d.array.emplace_back(PTXOperand::Register, PTXOperand::b32, i + 1);
+			if (!ins.valid().empty() || !ins.isLoad() || !ins.isMemoryInstruction()) return false;
+			for (auto addressType : {PTXOperand::b32, PTXOperand::b64, PTXOperand::s32,
+				PTXOperand::s64, PTXOperand::u32, PTXOperand::u64}) {
+				ins.a.type = addressType;
+				if (!ins.valid().empty()) return false;
+			}
+			auto symbol = ins; symbol.a.addressMode = PTXOperand::Address; symbol.a.type = PTXOperand::b8;
+			if (!symbol.valid().empty()) return false;
+			for (int fault = 0; fault < 5; ++fault) {
+				auto bad = ins;
+				if (fault == 0) bad.d.array.pop_back();
+				if (fault == 1) bad.d.array[0].type = PTXOperand::b64;
+				if (fault == 2) bad.addressSpace = PTXInstruction::Global;
+				if (fault == 3) bad.type = PTXOperand::b8;
+				if (fault == 4) bad.a.vec = PTXOperand::v2;
+				if (bad.valid().empty()) return false;
+			}
+		}
+		return true;
+	}
+
 	bool test_SparseMmaParser() {
 		const std::string mnemonic = "mma.sp.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32";
 		const std::string prefix = ".version 8.0\n.target sm_86\n.entry sparse_parser() { .reg .b32 r<12>; ";
@@ -10721,6 +10891,11 @@ public:
 			result = (result && test_F16Fma());
 			result = (result && test_Bf16Fma());
 			result = (result && test_MmaWarpParticipation());
+			result = (result && test_LdmatrixIR());
+			result = (result && test_LdmatrixParser());
+			result = (result && test_LdmatrixAddress());
+			result = (result && test_Ldmatrix());
+			result = (result && test_LdmatrixControls());
 			result = (result && test_SparseMmaParser());
 			result = (result && test_SparseHalfMmaParser());
 			result = (result && test_SparseHalfMma());

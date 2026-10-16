@@ -416,6 +416,7 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case Isspacep:   return "isspacep";   break;
 		case Ld:         return "ld";         break;
 		case Ldu:        return "ldu";        break;
+		case Ldmatrix:   return "ldmatrix";   break;
 		case Lg2:        return "lg2";        break;
 		case Lop3:       return "lop3";       break;
 		case Mad24:      return "mad24";      break;
@@ -505,6 +506,7 @@ ir::PTXInstruction::PTXInstruction( Opcode op, const PTXOperand& _d,
 	mmaAColumnMajor = false;
 	mmaBColumnMajor = true;
 	mmaSparse = false;
+	matrixTranspose = false;
 	pg.condition = PTXOperand::PT;
 	pg.type = PTXOperand::pred;
 	barrierOperation = BarSync;
@@ -1293,6 +1295,24 @@ std::string ir::PTXInstruction::valid() const {
 				&& (a.type == PTXOperand::u32 || a.type == PTXOperand::u64))) {
 				return "invalid address mode for operands";
 			}
+			break;
+		}
+		case Ldmatrix: {
+			if (type != PTXOperand::b16 || modifier ||
+				(addressSpace != Shared && addressSpace != Generic)) return "invalid ldmatrix type/modifier/space";
+			if ((vec != PTXOperand::v1 && vec != PTXOperand::v2 && vec != PTXOperand::v4) ||
+				d.addressMode != PTXOperand::Register || d.vec != vec || d.array.size() != unsigned(vec))
+				return "ldmatrix requires one 32-bit destination register per matrix";
+			for (const auto& element : d.array) {
+				if (element.addressMode != PTXOperand::Register || element.bytes() != 4 ||
+					element.vec != PTXOperand::v1 || !element.array.empty()) return "invalid ldmatrix destination leaf";
+			}
+			if ((a.addressMode != PTXOperand::Indirect && a.addressMode != PTXOperand::Register &&
+				a.addressMode != PTXOperand::Address && a.addressMode != PTXOperand::Immediate) ||
+				a.vec != PTXOperand::v1 || !a.array.empty() ||
+				(a.addressMode != PTXOperand::Address && ((!PTXOperand::isInt(a.type) &&
+				a.type != PTXOperand::b32 && a.type != PTXOperand::b64) ||
+				(a.bytes() != 4 && a.bytes() != 8)))) return "ldmatrix requires a scalar 32/64-bit address";
 			break;
 		}
 		case Ldu: // fall through
@@ -3055,6 +3075,11 @@ std::string ir::PTXInstruction::toString() const {
 				+ a.toString() + "]";
 			return result;
 		}
+		case Ldmatrix: {
+			return guard() + "ldmatrix.sync.aligned.m8n8.x" + std::to_string(unsigned(vec)) +
+				(matrixTranspose ? ".trans" : "") + (addressSpace == Shared ? ".shared" : "") +
+				".b16 " + d.toString() + ", [" + a.toString() + "]";
+		}
 		case Ldu: {
 			std::string result = guard() + "ldu.";
 			if( volatility == Volatile ) {
@@ -3476,7 +3501,7 @@ bool ir::PTXInstruction::isCall() const {
 }
 
 bool ir::PTXInstruction::isLoad() const {
-	return opcode == Ld || opcode == Ldu;
+	return opcode == Ld || opcode == Ldu || opcode == Ldmatrix;
 }
 
 bool ir::PTXInstruction::isStore() const {
@@ -3485,7 +3510,7 @@ bool ir::PTXInstruction::isStore() const {
 
 bool ir::PTXInstruction::mayHaveAddressableOperand() const {
 	return opcode == Mov || opcode == Ld || opcode == St || opcode == Cvta
-		|| opcode == Atom || opcode == Ldu;
+		|| opcode == Atom || opcode == Ldu || opcode == Ldmatrix;
 }
 
 bool ir::PTXInstruction::mayHaveRelaxedTypeDestination() const {
@@ -3502,7 +3527,7 @@ bool ir::PTXInstruction::hasSideEffects() const {
 }
 
 bool ir::PTXInstruction::canObserveSideEffects() const {
-	if (opcode == Atom) return true;
+	if (opcode == Atom || opcode == Ldmatrix) return true;
 
 	if (opcode == Ld) {
 		if (volatility == Volatile) {
@@ -3523,7 +3548,7 @@ bool ir::PTXInstruction::isMemoryInstruction() const {
 	return opcode == St || opcode == Atom
 		|| opcode == Ldu
 		|| opcode == Tex || opcode == Tld4
-		|| opcode == Prefetch || opcode == Sust || opcode == Ld;
+		|| opcode == Prefetch || opcode == Sust || opcode == Ld || opcode == Ldmatrix;
 }
 
 bool ir::PTXInstruction::isExit() const {

@@ -67,6 +67,9 @@
 %token<text> OPCODE_BFI OPCODE_BFE OPCODE_BMSK OPCODE_FNS OPCODE_TANH OPCODE_TESTP OPCODE_TLD4 OPCODE_BAR
 %token<text> OPCODE_PREFETCH OPCODE_PREFETCHU OPCODE_SHFL OPCODE_SHF
 %token<text> OPCODE_MMA
+%token<text> OPCODE_LDMATRIX
+%token<value> TOKEN_M8N8 TOKEN_X1 TOKEN_X2 TOKEN_X4 TOKEN_TRANS
+%type<value> matrixCount
 %token<text> OPCODE_FENCE
 
 %token<value> PREPROCESSOR_INCLUDE PREPROCESSOR_DEFINE PREPROCESSOR_IF 
@@ -941,7 +944,7 @@ optionalFloatRounding : floatRounding | /* empty string */;
 instruction : ftzInstruction2 | ftzInstruction3 | approxInstruction2 
 	| basicInstruction3 | bfe | bfi | bfind | bmsk | brev | branch | addOrSub
 	| addCOrSubC | atom | bar | brkpt | clz | cvt | cvta | isspacep | div | dp2a | dp4a | exit
-	| fence | fns | ld | ldu | lop3 | mad | mad24 | madc | mma | membar | mov | mul24 | mul | notInstruction
+	| fence | fns | ld | ldu | ldmatrix | lop3 | mad | mad24 | madc | mma | membar | mov | mul24 | mul | notInstruction
 	| pmevent | popc | prefetch | prefetchu | prmt | rcpSqrtInstruction | red
 	| ret | sad | selp | set | setp | slct | st | suld | suq | sured | sust | szext
 	| testp | tex | tld4 | trap | txq | vote | shfl | shf;
@@ -1409,6 +1412,28 @@ ld : OPCODE_LD ldModifier dataType arrayOperand ',' '[' memoryOperand ']' ';'
 {
 	state.instruction( $<text>1, $<value>3 );
 };
+
+matrixCount : TOKEN_X1 | TOKEN_X2 | TOKEN_X4;
+matrixTranspose : TOKEN_TRANS { state.statement.instruction.matrixTranspose = true; }
+	| /* empty */ { state.statement.instruction.matrixTranspose = false; };
+matrixSpace : TOKEN_SHARED { state.addressSpace(TOKEN_SHARED); }
+	| TOKEN_SHARED_CTA { state.addressSpace(TOKEN_SHARED); }
+	| /* empty */ { state.statement.instruction.addressSpace = ir::PTXInstruction::Generic; };
+ldmatrix : OPCODE_LDMATRIX TOKEN_SYNC TOKEN_ALIGNED TOKEN_M8N8 matrixCount
+	matrixTranspose matrixSpace TOKEN_B16 arrayOperand ',' '[' matrixAddress ']' ';'
+{
+	state.instruction($<text>1, TOKEN_B16);
+	auto& instruction = state.statement.instruction;
+	instruction.vec = static_cast<ir::PTXOperand::Vec>($5);
+	if (instruction.a.addressMode == ir::PTXOperand::Immediate) instruction.a.type = ir::PTXOperand::u64;
+};
+
+matrixAddress : identifier optionalVectorIndex { state.matrixAddress($<text>1, 0, @1); }
+	| identifier optionalVectorIndex TOKEN_DECIMAL_CONSTANT { state.matrixNegativeOffset($<text>1, $<value>3, @1); }
+	| identifier optionalVectorIndex '+' TOKEN_DECIMAL_CONSTANT { state.matrixAddress($<text>1, $<value>4, @1); }
+	| identifier optionalVectorIndex '-' TOKEN_DECIMAL_CONSTANT { state.matrixAddress($<text>1, $<value>4, @1, true); }
+	| TOKEN_DECIMAL_CONSTANT { state.matrixImmediate($<value>1, @1); }
+	| TOKEN_UNSIGNED_DECIMAL_CONSTANT { state.matrixImmediate($<uvalue>1, @1); };
 
 ldu : OPCODE_LDU ldModifier dataType arrayOperand ',' '[' memoryOperand ']' ';'
 {

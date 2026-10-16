@@ -64,6 +64,7 @@ namespace ir {
 			Isspacep,
 			Ld,
 			Ldu,
+			Ldmatrix,
 			Lg2,
 			Lop3,
 			Mad24,
@@ -475,6 +476,8 @@ namespace ir {
 		bool mmaAColumnMajor;
 		bool mmaBColumnMajor;
 		bool mmaSparse;
+		/*! ldmatrix transpose; vec stores its .x1/.x2/.x4 matrix count. */
+		bool matrixTranspose;
 		PTXOperand mmaSelector;
 
 		/*! Flag containing one or more floating-point modifiers */

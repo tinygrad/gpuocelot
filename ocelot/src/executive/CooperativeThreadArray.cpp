@@ -769,6 +769,8 @@ void executive::CooperativeThreadArray::execute(int PC) {
 				eval_Lg2(context, instr); break;
 			case ir::PTXInstruction::Lop3:
 				eval_Lop3(context, instr); break;
+			case ir::PTXInstruction::Ldmatrix:
+				eval_Ldmatrix(context, instr); break;
 			case ir::PTXInstruction::Ldu:
 				eval_Ldu(context, instr); break;
 			case ir::PTXInstruction::Mad24:
@@ -6093,6 +6095,56 @@ void executive::CooperativeThreadArray::eval_Ld(CTAContext &context,
 /*!
 
 */
+void executive::CooperativeThreadArray::eval_Ldmatrix(CTAContext& context,
+	const ir::PTXInstruction& instr) {
+	trace();
+	const std::string error = instr.valid();
+	if (!error.empty()) throw RuntimeException(error, context.PC, instr);
+	const auto* shared = static_cast<const unsigned char*>(functionCallStack.sharedMemoryPointer());
+	const ir::PTXU64 size = functionCallStack.sharedMemorySize();
+	const int completeThreads = (threadCount / 32) * 32;
+	for (int threadID = completeThreads; threadID < threadCount; ++threadID) {
+		if (context.predicated(threadID, instr)) {
+			throw RuntimeException("ldmatrix requires all warp lanes to participate",
+				context.PC, instr);
+		}
+	}
+	for (int warpStart = 0; warpStart < completeThreads; warpStart += 32) {
+		int participants = 0;
+		for (int lane = 0; lane < 32; ++lane) participants += context.predicated(warpStart + lane, instr);
+		if (!participants) continue;
+		if (participants != 32)
+			throw RuntimeException("ldmatrix requires all warp lanes to participate", context.PC, instr);
+		ir::PTXU16 matrices[4][8][8];
+		// Build the matrix
+		for (int matrix = 0; matrix < int(instr.vec); ++matrix) {
+			for (int row = 0; row < 8; ++row) {
+				const int supplier = warpStart + matrix * 8 + row;
+				const bool address32 = instr.a.bytes() == 4;
+				ir::PTXU64 offset = address32 ? operandAsU32(supplier, instr.a) : operandAsU64(supplier, instr.a);
+				if (instr.addressSpace == ir::PTXInstruction::Generic) {
+					const auto base = (ir::PTXU64)shared;
+					offset = address32 ? ir::PTXU32(offset - ir::PTXU32(base)) : offset - base;
+				}
+				if ((offset & 15) || offset > size || size - offset < 16)
+					throw RuntimeException("ldmatrix row must be aligned and inside shared memory", context.PC, instr);
+				std::memcpy(matrices[matrix][row], shared + offset, 16);
+			}
+		}
+		for (int lane = 0; lane < 32; ++lane) {
+			for (int matrix = 0; matrix < int(instr.vec); ++matrix) {
+				ir::PTXU32 packed = 0;
+				for (int half = 0; half < 2; ++half) {
+					int row = lane / 4, col = lane % 4 * 2 + half;
+					if (instr.matrixTranspose) std::swap(row, col);
+					packed |= ir::PTXU32(matrices[matrix][row][col]) << (16 * half);
+				}
+				setRegAsB32(warpStart + lane, instr.d.array[matrix].reg, packed);
+			}
+		}
+	}
+}
+
 void executive::CooperativeThreadArray::eval_Ldu(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 

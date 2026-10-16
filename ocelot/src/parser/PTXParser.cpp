@@ -1660,6 +1660,37 @@ namespace parser
 		operandVector.push_back( OperandWrapper( operand, mode->space ) );
 	}
 
+	void PTXParser::State::matrixAddress(const std::string& name, long long offset,
+		YYLTYPE& location, bool subtract)
+	{
+		if (offset < -2147483648LL || offset > 2147483648LL)
+			throw_exception(toString(location, *this) << "Address offset exceeds signed 32 bits", InvalidArray);
+		if (subtract) offset = -offset;
+		if (offset > 2147483647LL)
+			throw_exception(toString(location, *this) << "Address offset exceeds signed 32 bits", InvalidArray);
+		nonLabelOperand(name, location, false);
+		auto& address = operandVector.back().operand;
+		if (address.vec != ir::PTXOperand::v1 || !address.array.empty() ||
+			(address.addressMode != ir::PTXOperand::Register && address.addressMode != ir::PTXOperand::Address))
+			throw_exception(toString(location, *this) << "ldmatrix requires a scalar address", InvalidArray);
+		if (address.addressMode == ir::PTXOperand::Register) address.addressMode = ir::PTXOperand::Indirect;
+		address.offset = static_cast<int>(offset);
+	}
+
+	void PTXParser::State::matrixNegativeOffset(const std::string& name, long long offset, YYLTYPE& location)
+	{
+		if (offset >= 0)
+			throw_exception(toString(location, *this) << "Missing address offset operator", InvalidArray);
+		matrixAddress(name, offset, location);
+	}
+
+	void PTXParser::State::matrixImmediate(long long unsigned value, YYLTYPE& location)
+	{
+		if (value > 0xffffffffULL)
+			throw_exception(toString(location, *this) << "Absolute address exceeds unsigned 32 bits", InvalidArray);
+		constantOperand(value);
+	}
+
 	void PTXParser::State::arrayOperand( unsigned int elements, YYLTYPE& location )
 	{
 		if( elements != 1 && elements != 2 && elements != 4 && elements != 8 )
@@ -2794,6 +2825,7 @@ namespace parser
 		if( string == "isspacep" ) return ir::PTXInstruction::Isspacep;
 		if( string == "ld" ) return ir::PTXInstruction::Ld;
 		if( string == "ldu" ) return ir::PTXInstruction::Ldu;
+		if( string == "ldmatrix" ) return ir::PTXInstruction::Ldmatrix;
 		if( string == "lg2" ) return ir::PTXInstruction::Lg2;
 		if( string == "lop3" ) return ir::PTXInstruction::Lop3;
 		if( string == "mad24" ) return ir::PTXInstruction::Mad24;

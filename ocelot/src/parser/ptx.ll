@@ -162,6 +162,12 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return OPCODE_ISSPACEP; }
 "ld"                            { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_LD; }
+"ldmatrix" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_LDMATRIX; }
+".m8n8" { return TOKEN_M8N8; }
+".x1" { yylval->value = 1; return TOKEN_X1; }
+".x2" { yylval->value = 2; return TOKEN_X2; }
+".x4" { yylval->value = 4; return TOKEN_X4; }
+".trans" { return TOKEN_TRANS; }
 "ldu"                            { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_LDU; }
 "lg2"                           { sstrcpy( yylval->text, yytext, 1024 ); \
