@@ -67,7 +67,7 @@
 %token<text> OPCODE_BFI OPCODE_BFE OPCODE_BMSK OPCODE_FNS OPCODE_TANH OPCODE_TESTP OPCODE_TLD4 OPCODE_BAR
 %token<text> OPCODE_PREFETCH OPCODE_PREFETCHU OPCODE_SHFL OPCODE_SHF
 %token<text> OPCODE_MMA
-%token<text> OPCODE_LDMATRIX OPCODE_MOVMATRIX
+%token<text> OPCODE_LDMATRIX OPCODE_MOVMATRIX OPCODE_ACTIVEMASK
 %token<value> TOKEN_M8N8 TOKEN_X1 TOKEN_X2 TOKEN_X4 TOKEN_TRANS
 %type<value> matrixCount
 %token<text> OPCODE_FENCE
@@ -941,7 +941,7 @@ intRounding : intRoundingToken
 
 optionalFloatRounding : floatRounding | /* empty string */;
 
-instruction : ftzInstruction2 | ftzInstruction3 | approxInstruction2 
+instruction : activemask | ftzInstruction2 | ftzInstruction3 | approxInstruction2
 	| basicInstruction3 | bfe | bfi | bfind | bmsk | brev | branch | addOrSub
 	| addCOrSubC | atom | bar | brkpt | clz | cvt | cvta | isspacep | div | dp2a | dp4a | exit
 	| fence | fns | ld | ldu | ldmatrix | lop3 | mad | mad24 | madc | mma | membar | mov | movmatrix | mul24 | mul | notInstruction
@@ -1411,6 +1411,11 @@ stModifier : stOrdering optionalAddressSpace optionalStoreCacheOperation
 ld : OPCODE_LD ldModifier dataType arrayOperand ',' '[' memoryOperand ']' ';'
 {
 	state.instruction( $<text>1, $<value>3 );
+};
+
+activemask : OPCODE_ACTIVEMASK TOKEN_B32 nonLabelOperand ';'
+{
+	state.instruction($<text>1, TOKEN_B32);
 };
 
 movmatrix : OPCODE_MOVMATRIX TOKEN_SYNC TOKEN_ALIGNED TOKEN_M8N8 TOKEN_TRANS TOKEN_B16

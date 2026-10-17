@@ -427,6 +427,7 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case Membar:     return "membar";     break;
 		case Fence:      return "fence";      break;
 		case Min:        return "min";        break;
+		case Activemask: return "activemask";
 		case Movmatrix:  return "movmatrix";
 		case Mov:        return "mov";        break;
 		case Mul24:      return "mul24";      break;
@@ -1844,6 +1845,12 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			break;
 		}
+		case Activemask: {
+			if (type != PTXOperand::b32 || modifier || vec != PTXOperand::v1 ||
+				d.addressMode != PTXOperand::Register || d.bytes() != 4 ||
+				d.vec != PTXOperand::v1 || !d.array.empty()) return "activemask requires a scalar 32-bit register";
+			break;
+		}
 		case Movmatrix: {
 			if (type != PTXOperand::b16 || modifier || !matrixTranspose || vec != PTXOperand::v1)
 				return "invalid movmatrix type/modifier/transpose/count";
@@ -3188,6 +3195,8 @@ std::string ir::PTXInstruction::toString() const {
 				+ PTXOperand::toString( type ) + " "
 				+ d.toString() + ", " + a.toString() + ", " + b.toString();
 		}
+		case Activemask:
+			return guard() + "activemask.b32 " + d.toString();
 		case Movmatrix:
 			return guard() + "movmatrix.sync.aligned.m8n8.trans.b16 " + d.toString() + ", " + a.toString();
 		case Mov: {
@@ -3540,7 +3549,7 @@ bool ir::PTXInstruction::hasSideEffects() const {
 }
 
 bool ir::PTXInstruction::canObserveSideEffects() const {
-	if (opcode == Atom || opcode == Ldmatrix || opcode == Movmatrix) return true;
+	if (opcode == Atom || opcode == Ldmatrix || opcode == Movmatrix || opcode == Activemask) return true;
 
 	if (opcode == Ld) {
 		if (volatility == Volatile) {

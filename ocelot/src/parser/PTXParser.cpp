@@ -2825,6 +2825,7 @@ namespace parser
 		if( string == "isspacep" ) return ir::PTXInstruction::Isspacep;
 		if( string == "ld" ) return ir::PTXInstruction::Ld;
 		if( string == "ldu" ) return ir::PTXInstruction::Ldu;
+		if( string == "activemask" ) return ir::PTXInstruction::Activemask;
 		if( string == "movmatrix" ) return ir::PTXInstruction::Movmatrix;
 		if( string == "ldmatrix" ) return ir::PTXInstruction::Ldmatrix;
 		if( string == "lg2" ) return ir::PTXInstruction::Lg2;

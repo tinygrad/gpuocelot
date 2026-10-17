@@ -35,6 +35,7 @@ namespace ir {
 		/*!	List of opcodes for PTX instructions */
 		enum Opcode {
 			Abs = 0,
+			Activemask,
 			Add,
 			AddC,
 			And,

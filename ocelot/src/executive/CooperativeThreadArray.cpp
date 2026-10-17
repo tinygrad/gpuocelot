@@ -785,6 +785,8 @@ void executive::CooperativeThreadArray::execute(int PC) {
 				eval_Fence(context, instr); break;
 			case ir::PTXInstruction::Min:
 				eval_Min(context, instr); break;
+			case ir::PTXInstruction::Activemask:
+				eval_Activemask(context, instr); break;
 			case ir::PTXInstruction::Movmatrix:
 				eval_Movmatrix(context, instr); break;
 			case ir::PTXInstruction::Mov:
@@ -6813,6 +6815,21 @@ void executive::CooperativeThreadArray::eval_Fence(CTAContext &context, const ir
 /*!
 
 */
+void executive::CooperativeThreadArray::eval_Activemask(CTAContext& context,
+	const ir::PTXInstruction& instr) {
+	trace();
+	const std::string error = instr.valid();
+	if (!error.empty()) throw RuntimeException(error, context.PC, instr);
+	for (int warpStart = 0; warpStart < threadCount; warpStart += 32) {
+		ir::PTXU32 mask = 0;
+		const int lanes = min(32, threadCount - warpStart);
+		for (int lane = 0; lane < lanes; ++lane)
+			if (context.predicated(warpStart + lane, instr)) mask |= ir::PTXU32(1) << lane;
+		for (int lane = 0; lane < lanes; ++lane)
+			if (context.predicated(warpStart + lane, instr)) setRegAsB32(warpStart + lane, instr.d.reg, mask);
+	}
+}
+
 void executive::CooperativeThreadArray::eval_Movmatrix(CTAContext& context,
 	const ir::PTXInstruction& instr) {
 	trace();

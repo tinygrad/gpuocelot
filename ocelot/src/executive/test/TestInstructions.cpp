@@ -5267,6 +5267,53 @@ public:
 		return true;
 	}
 
+	bool test_Activemask() {
+		for (const char* type : {"b32", "u32", "s32", "f32"}) {
+			const std::string text = ".version 8.0\n.target sm_86\n.entry active_mask() { .reg ." + std::string(type) +
+				" r; .reg .pred p; @p activemask.b32 r; ret; }";
+			std::stringstream source(text), printed; Module parsed; parsed.load(source); parsed.write(printed);
+			Module roundtrip; roundtrip.load(printed); EmulatedKernel kernel(roundtrip.getKernel("active_mask"), nullptr);
+			int found = 0;
+			for (auto ins : kernel.instructions) if (ins.opcode == PTXInstruction::Activemask) {
+				++found;
+				if (!ins.canObserveSideEffects() || ins.isMemoryInstruction()) return false;
+				for (int size : {1, 31, 32, 33, 64, 65}) for (int scenario = 0; scenario < 5; ++scenario) {
+					kernel.setKernelShape(size, 1, 1); CooperativeThreadArray local(&kernel, Dim3(), false);
+					auto& context = local.getActiveContext();
+					ins.pg.condition = scenario == 3 ? PTXOperand::InvPred : PTXOperand::Pred;
+					for (int thread = 0; thread < size; ++thread) {
+						const PTXU32 bit = PTXU32(1) << (thread % 32);
+						const PTXU32 active = scenario == 1 ? (thread < 32 ? 0x80000081u : 0x40000202u) : ~PTXU32(0);
+						const PTXU32 predicate = scenario == 4 ? 0 : scenario >= 2 ? 0x55555555u : ~PTXU32(0);
+						context.active[thread] = (active & bit) != 0;
+						local.setRegAsPredicate(thread, ins.pg.reg, scenario == 3 ? !(predicate & bit) : bool(predicate & bit));
+						local.setRegAsB32(thread, ins.d.reg, 0xdeadbeef);
+					}
+					local.eval_Activemask(context, ins);
+					for (int thread = 0; thread < size; ++thread) {
+						const int warp = thread / 32, count = std::min(32, size - warp * 32);
+						PTXU32 mask = ~PTXU32(0) >> (32 - count);
+						if (scenario == 1) mask &= warp == 0 ? 0x80000081u : 0x40000202u;
+						if (scenario >= 2) mask &= scenario == 4 ? 0 : 0x55555555u;
+						const PTXU32 expected = mask & (PTXU32(1) << (thread % 32)) ? mask : 0xdeadbeef;
+						if (local.getRegAsB32(thread, ins.d.reg) != expected) { status << "activemask mismatch CTA " << size << " scenario " << scenario << " thread " << thread << "\n"; return false; }
+					}
+				}
+			}
+			if (found != 1) return false;
+			for (const auto& change : {std::make_pair(std::string("activemask.b32 r"), std::string("activemask.b64 r")),
+				std::make_pair(std::string(type) + " r;", std::string("b64 r;")),
+				std::make_pair(std::string("activemask.b32 r"), std::string("activemask.b32 0")),
+				std::make_pair(std::string("activemask.b32 r"), std::string("activemask.b32 {r}"))}) {
+				std::string bad = text; bad.replace(bad.find(change.first), change.first.size(), change.second);
+				std::stringstream input(bad); bool rejected = false;
+				try { Module invalid; invalid.load(input); } catch (const std::exception&) { rejected = true; }
+				if (!rejected) return false;
+			}
+		}
+		return true;
+	}
+
 	bool test_Movmatrix() {
 		for (bool alias : {false, true}) {
 			std::stringstream source(".version 8.0\n.target sm_86\n.entry matrix_transpose() { .reg .b32 a, d; "
@@ -11014,6 +11061,7 @@ public:
 			result = (result && test_F16Fma());
 			result = (result && test_Bf16Fma());
 			result = (result && test_MmaWarpParticipation());
+			result = (result && test_Activemask());
 			result = (result && test_MovmatrixParser());
 			result = (result && test_Movmatrix());
 			result = (result && test_MovmatrixControls());
