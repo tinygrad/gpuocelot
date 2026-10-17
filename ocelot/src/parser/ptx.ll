@@ -162,6 +162,7 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return OPCODE_ISSPACEP; }
 "ld"                            { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_LD; }
+"movmatrix" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MOVMATRIX; }
 "ldmatrix" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_LDMATRIX; }
 ".m8n8" { return TOKEN_M8N8; }
 ".x1" { yylval->value = 1; return TOKEN_X1; }

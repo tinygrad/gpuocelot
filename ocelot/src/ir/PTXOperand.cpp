@@ -808,7 +808,7 @@ std::string ir::PTXOperand::toString() const {
 			default:
 			{
 				if( !identifier.empty() ) {
-					return identifier;
+					return (condition == InvPred ? "!" : "") + identifier;
 				}
 				else {
 					std::stringstream stream;

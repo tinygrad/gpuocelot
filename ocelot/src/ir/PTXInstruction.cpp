@@ -427,6 +427,7 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case Membar:     return "membar";     break;
 		case Fence:      return "fence";      break;
 		case Min:        return "min";        break;
+		case Movmatrix:  return "movmatrix";
 		case Mov:        return "mov";        break;
 		case Mul24:      return "mul24";      break;
 		case Mul:        return "mul";        break;
@@ -1843,6 +1844,16 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			break;
 		}
+		case Movmatrix: {
+			if (type != PTXOperand::b16 || modifier || !matrixTranspose || vec != PTXOperand::v1)
+				return "invalid movmatrix type/modifier/transpose/count";
+			for (const auto* operand : {&d, &a}) {
+				if (operand->addressMode != PTXOperand::Register || operand->bytes() != 4 ||
+					operand->vec != PTXOperand::v1 || !operand->array.empty())
+					return "movmatrix requires scalar 32-bit register operands";
+			}
+			break;
+		}
 		case Mov: {
 			if ( type != PTXOperand::b16 &&
 				a.type == PTXOperand::f16 &&
@@ -3177,6 +3188,8 @@ std::string ir::PTXInstruction::toString() const {
 				+ PTXOperand::toString( type ) + " "
 				+ d.toString() + ", " + a.toString() + ", " + b.toString();
 		}
+		case Movmatrix:
+			return guard() + "movmatrix.sync.aligned.m8n8.trans.b16 " + d.toString() + ", " + a.toString();
 		case Mov: {
 			return guard() + "mov." + PTXOperand::toString( type ) + " "
 				+ d.toString() + ", " + a.toString();
@@ -3527,7 +3540,7 @@ bool ir::PTXInstruction::hasSideEffects() const {
 }
 
 bool ir::PTXInstruction::canObserveSideEffects() const {
-	if (opcode == Atom || opcode == Ldmatrix) return true;
+	if (opcode == Atom || opcode == Ldmatrix || opcode == Movmatrix) return true;
 
 	if (opcode == Ld) {
 		if (volatility == Volatile) {

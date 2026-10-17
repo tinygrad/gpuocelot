@@ -5267,6 +5267,129 @@ public:
 		return true;
 	}
 
+	bool test_Movmatrix() {
+		for (bool alias : {false, true}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry matrix_transpose() { .reg .b32 a, d; "
+				"movmatrix.sync.aligned.m8n8.trans.b16 d, a; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("matrix_transpose"), nullptr);
+			kernel.setKernelShape(64, 1, 1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (auto ins : kernel.instructions) if (ins.opcode == PTXInstruction::Movmatrix) {
+				if (alias) ins.d.reg = ins.a.reg;
+				PTXU32 original[64] = {}, expected[64] = {};
+				// Construct the transpose oracle by assigning each logical input element to its output slot.
+				for (int warp = 0; warp < 2; ++warp) for (int row = 0; row < 8; ++row) for (int col = 0; col < 8; ++col) {
+					const PTXU32 value = 0x8001 + warp * 1024 + row * 8 + col;
+					original[warp * 32 + row * 4 + col / 2] |= value << (16 * (col % 2));
+					expected[warp * 32 + col * 4 + row / 2] |= value << (16 * (row % 2));
+				}
+				for (int thread = 0; thread < 64; ++thread) local.setRegAsB32(thread, ins.a.reg, original[thread]);
+				for (int pass = 0; pass < 2; ++pass) {
+					local.eval_Movmatrix(local.getActiveContext(), ins);
+					for (int thread = 0; thread < 64; ++thread) {
+						if (local.getRegAsB32(thread, ins.d.reg) != (pass ? original[thread] : expected[thread])) {
+							status << "movmatrix transpose mismatch thread " << thread << " pass " << pass << " alias " << alias << "\n"; return false;
+						}
+					}
+					ins.a = ins.d;
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_MovmatrixControls() {
+		std::stringstream source(".version 8.0\n.target sm_86\n.entry transpose_controls() { .reg .b32 a, d; .reg .pred p; "
+			"@p movmatrix.sync.aligned.m8n8.trans.b16 d, a; ret; }");
+		Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("transpose_controls"), nullptr);
+		for (int size : {1, 31, 32, 33, 64, 65}) {
+			kernel.setKernelShape(size, 1, 1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (auto original : kernel.instructions) if (original.opcode == PTXInstruction::Movmatrix)
+			for (int scenario = 0; scenario < 12; ++scenario) {
+				const int complete = (size / 32) * 32;
+				if (!complete && (scenario == 3 || scenario == 4 || scenario == 8)) continue;
+				auto ins = original; local.reset(); auto& context = local.getActiveContext();
+				if (scenario == 6) ins.pg.condition = PTXOperand::InvPred;
+				if (scenario == 7) ins.d.type = PTXOperand::b64;
+				if (scenario == 9) ins.a.addressMode = PTXOperand::Immediate;
+				if (scenario == 10) ins.type = PTXOperand::b32;
+				if (scenario == 11) ins.matrixTranspose = false;
+				for (int thread = 0; thread < size; ++thread) {
+					local.setRegAsB32(thread, original.a.reg, 0x80018001u + (thread / 32) * 0x10001000u);
+					local.setRegAsB32(thread, original.d.reg, 0xdeadbeef);
+					bool predicate = scenario == 0 || scenario == 2 || thread < complete;
+					if ((scenario == 3 && thread == 0) || (scenario == 4 && thread < 32) || scenario == 5) predicate = false;
+					local.setRegAsPredicate(thread, ins.pg.reg, scenario == 6 ? !predicate : predicate);
+					if ((scenario == 2 && thread >= complete) || (scenario == 8 && thread == 0)) context.active.reset(thread);
+				}
+				bool rejected = false;
+				try { local.eval_Movmatrix(context, ins); } catch (const RuntimeException&) { rejected = true; }
+				const bool shouldReject = (scenario == 0 && size % 32) || scenario == 3 || scenario == 7 || scenario >= 8;
+				if (rejected != shouldReject) {
+					status << "movmatrix control mismatch CTA " << size << " scenario " << scenario << "\n"; return false;
+				}
+				for (int thread = 0; thread < size; ++thread) {
+					const PTXU32 expected = !rejected && context.predicated(thread, ins)
+						? 0x80018001u + (thread / 32) * 0x10001000u : 0xdeadbeef;
+					if (local.getRegAsB32(thread, original.d.reg) != expected) {
+						status << "movmatrix destination mismatch CTA " << size << " scenario " << scenario << " thread " << thread << "\n"; return false;
+					}
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_MovmatrixParser() {
+		for (const char* type : {"b32", "u32", "s32", "f32"}) {
+			const std::string text = ".version 8.0\n.target sm_86\n.entry transpose_parser() { .reg ." + std::string(type) +
+				" a, d; movmatrix.sync.aligned.m8n8.trans.b16 d, a; ret; }";
+			std::stringstream source(text), printed; Module parsed; parsed.load(source); parsed.write(printed);
+			Module roundtrip; roundtrip.load(printed); EmulatedKernel kernel(roundtrip.getKernel("transpose_parser"), nullptr);
+			int found = 0;
+			for (auto ins : kernel.instructions) if (ins.opcode == PTXInstruction::Movmatrix) {
+				++found;
+				if (!ins.valid().empty() || !ins.canObserveSideEffects() || ins.isMemoryInstruction()) return false;
+				ins.pg.type = PTXOperand::pred; ins.pg.condition = PTXOperand::InvPred; ins.pg.identifier = "p";
+				if (ins.guard() != "@!p ") return false;
+				ins.pg.identifier.clear(); ins.pg.reg = 7;
+				if (ins.guard() != "@!%p7 ") return false;
+				ins.modifier = PTXInstruction::ftz; if (ins.valid().empty()) return false;
+			}
+			if (found != 1) return false;
+			for (const auto& change : {std::make_pair(std::string(".sync"), std::string("")),
+				std::make_pair(std::string(".aligned"), std::string("")),
+				std::make_pair(std::string(".trans"), std::string("")),
+				std::make_pair(std::string(".m8n8"), std::string(".m16n16")),
+				std::make_pair(std::string(".b16 d"), std::string(".b32 d")),
+				std::make_pair(std::string(" d, a;"), std::string(" d, 0;")),
+				std::make_pair(std::string(" d, a;"), std::string(" {d}, a;")),
+				std::make_pair(std::string(" d, a;"), std::string(" d, %laneid;")),
+				std::make_pair(std::string(type) + " a", std::string("b64 a"))}) {
+				std::string bad = text; bad.replace(bad.find(change.first), change.first.size(), change.second);
+				std::stringstream input(bad); bool rejected = false;
+				try { Module invalid; invalid.load(input); } catch (const std::exception&) { rejected = true; }
+				if (!rejected) { status << "accepted invalid movmatrix: " << bad << "\n"; return false; }
+			}
+		}
+		for (bool alias : {false, true}) {
+			const std::string destination = alias ? "v.x" : "v.y";
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry transpose_components() { .reg .v2 .b32 v; .reg .pred p; "
+				"mov.b32 v.x, 0; mov.b32 v.y, 0; @!p movmatrix.sync.aligned.m8n8.trans.b16 " + destination + ", v.x; ret; }");
+			Module parsed; parsed.load(source); std::stringstream printed; parsed.write(printed);
+			Module roundtrip; roundtrip.load(printed); EmulatedKernel kernel(roundtrip.getKernel("transpose_components"), nullptr);
+			int components[2] = {-1, -1}, count = 0;
+			for (const auto& ins : kernel.instructions) {
+				if (ins.opcode == PTXInstruction::Mov && count < 2) components[count++] = ins.d.reg;
+				if (ins.opcode == PTXInstruction::Movmatrix && (count != 2 || components[0] == components[1] ||
+					int(ins.a.reg) != components[0] || int(ins.d.reg) != components[alias ? 0 : 1] ||
+					ins.pg.condition != PTXOperand::InvPred)) {
+					status << "movmatrix component assignment mismatch alias " << alias << "\n"; return false;
+				}
+			}
+		}
+		return true;
+	}
+
 	bool test_LdmatrixParser() {
 		for (int count : {1, 2, 4}) for (bool transpose : {false, true})
 		for (const char* space : {"", ".shared", ".shared::cta"}) for (const char* width : {"32", "64"}) {
@@ -10891,6 +11014,9 @@ public:
 			result = (result && test_F16Fma());
 			result = (result && test_Bf16Fma());
 			result = (result && test_MmaWarpParticipation());
+			result = (result && test_MovmatrixParser());
+			result = (result && test_Movmatrix());
+			result = (result && test_MovmatrixControls());
 			result = (result && test_LdmatrixIR());
 			result = (result && test_LdmatrixParser());
 			result = (result && test_LdmatrixAddress());

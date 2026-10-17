@@ -76,6 +76,7 @@ namespace ir {
 			Fence,
 			Min,
 			Mov,
+			Movmatrix,
 			Mul24,
 			Mul,
 			Neg,
@@ -476,7 +477,7 @@ namespace ir {
 		bool mmaAColumnMajor;
 		bool mmaBColumnMajor;
 		bool mmaSparse;
-		/*! ldmatrix transpose; vec stores its .x1/.x2/.x4 matrix count. */
+		/*! Matrix transpose; ldmatrix uses vec for its .x1/.x2/.x4 count. */
 		bool matrixTranspose;
 		PTXOperand mmaSelector;
 

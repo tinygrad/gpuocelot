@@ -785,6 +785,8 @@ void executive::CooperativeThreadArray::execute(int PC) {
 				eval_Fence(context, instr); break;
 			case ir::PTXInstruction::Min:
 				eval_Min(context, instr); break;
+			case ir::PTXInstruction::Movmatrix:
+				eval_Movmatrix(context, instr); break;
 			case ir::PTXInstruction::Mov:
 				eval_Mov(context, instr); break;
 			case ir::PTXInstruction::Mul24:
@@ -6811,6 +6813,45 @@ void executive::CooperativeThreadArray::eval_Fence(CTAContext &context, const ir
 /*!
 
 */
+void executive::CooperativeThreadArray::eval_Movmatrix(CTAContext& context,
+	const ir::PTXInstruction& instr) {
+	trace();
+	const std::string error = instr.valid();
+	if (!error.empty()) throw RuntimeException(error, context.PC, instr);
+	const int completeThreads = (threadCount / 32) * 32;
+	for (int threadID = completeThreads; threadID < threadCount; ++threadID) {
+		if (context.predicated(threadID, instr)) {
+			throw RuntimeException("movmatrix requires all warp lanes to participate",
+				context.PC, instr);
+		}
+	}
+	for (int warpStart = 0; warpStart < completeThreads; warpStart += 32) {
+		int participants = 0;
+		for (int lane = 0; lane < 32; ++lane) participants += context.predicated(warpStart + lane, instr);
+		if (!participants) continue;
+		if (participants != 32)
+			throw RuntimeException("movmatrix requires all warp lanes to participate", context.PC, instr);
+		ir::PTXU16 matrix[8][8];
+		// Gather all source fragments before writing potentially aliased destinations.
+		for (int row = 0; row < 8; ++row) {
+			for (int col = 0; col < 8; col += 2) {
+				const int lane = row * 4 + col / 2;
+				const ir::PTXU32 packed = operandAsB32(warpStart + lane, instr.a);
+				matrix[row][col] = ir::PTXU16(packed);
+				matrix[row][col + 1] = ir::PTXU16(packed >> 16);
+			}
+		}
+		for (int lane = 0; lane < 32; ++lane) {
+			ir::PTXU32 packed = 0;
+			for (int half = 0; half < 2; ++half) {
+				const int row = lane / 4, col = (lane % 4) * 2 + half;
+				packed |= ir::PTXU32(matrix[col][row]) << (16 * half);
+			}
+			setRegAsB32(warpStart + lane, instr.d.reg, packed);
+		}
+	}
+}
+
 void executive::CooperativeThreadArray::eval_Mov(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
