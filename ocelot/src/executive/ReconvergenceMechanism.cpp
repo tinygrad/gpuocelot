@@ -41,13 +41,16 @@ executive::ReconvergenceMechanism::~ReconvergenceMechanism()
 }
 
 
+void executive::ReconvergenceMechanism::eval_WarpSync(CTAContext &context,
+	const ir::PTXInstruction &instr)
+{
+	if (instr.opcode == ir::PTXInstruction::Redux) cta->eval_Redux(context, instr);
+	else cta->eval_Vote(context, instr);
+}
+
 void executive::ReconvergenceMechanism::eval_Vote(CTAContext &context,
 	const ir::PTXInstruction &instr)
 {
-	if (instr.voteSync) {
-		cta->eval_VoteSync(context, instr);
-		return;
-	}
 	int threadCount = cta->threadCount;
 	
 	if (instr.vote == ir::PTXInstruction::Ballot) {
@@ -326,12 +329,8 @@ void executive::ReconvergenceIPDOM::eval_Exit(executive::CTAContext &context,
 	context.executionState = CTAContext::Exit;
 }
 
-void executive::ReconvergenceIPDOM::eval_Vote(CTAContext& context,
+void executive::ReconvergenceIPDOM::eval_WarpSync(CTAContext& context,
 	const ir::PTXInstruction& instr) {
-	if (!instr.voteSync) {
-		ReconvergenceMechanism::eval_Vote(context, instr);
-		return;
-	}
 	CTAContext combined(context);
 	if (!pendingVote.empty()) {
 		const auto& waiting = pendingVote.back();
@@ -361,7 +360,7 @@ void executive::ReconvergenceIPDOM::eval_Vote(CTAContext& context,
 		}
 	}
 	if (ready && pendingVote.empty()) {
-		cta->eval_VoteSync(context, instr);
+		ReconvergenceMechanism::eval_WarpSync(context, instr);
 		return;
 	}
 	if (cta->threadCount > 32 || !sameGroup || arrived != combined.active ||
@@ -370,7 +369,7 @@ void executive::ReconvergenceIPDOM::eval_Vote(CTAContext& context,
 	if (ready) {
 		context.active = combined.active;
 		pendingVote.clear();
-		cta->eval_VoteSync(context, instr);
+		ReconvergenceMechanism::eval_WarpSync(context, instr);
 		return;
 	}
 	pendingVote.assign(1, combined);
@@ -1022,10 +1021,6 @@ void executive::ReconvergenceTFSoftware::eval_Exit(
 void executive::ReconvergenceTFSoftware::eval_Vote(
 	executive::CTAContext &context, const ir::PTXInstruction &instr) {
 	
-	if (instr.voteSync) {
-		ReconvergenceMechanism::eval_Vote(context, instr);
-		return;
-	}
 	if (instr.vote == ir::PTXInstruction::Ballot) {
 		unsigned int warps = (cta->threadCount + warpSize - 1) / warpSize;
 		for(unsigned int warp = 0; warp != warps; ++warp) {

@@ -857,8 +857,13 @@ void executive::CooperativeThreadArray::execute(int PC) {
 				eval_Tex(context, instr); break;
 			case ir::PTXInstruction::Trap:
 				eval_Trap(context, instr); break;
-			case ir::PTXInstruction::Vote:
-				eval_Vote(context, instr); break;
+			case ir::PTXInstruction::Redux:
+			case ir::PTXInstruction::Vote: {
+				const bool warpSync = instr.voteSync || instr.opcode == ir::PTXInstruction::Redux;
+				if (warpSync) eval_WarpSync(context, instr);
+				else reconvergenceMechanism->eval_Vote(context, instr);
+				break;
+			}
 			case ir::PTXInstruction::Xor:
 				eval_Xor(context, instr); break;
 			case ir::PTXInstruction::Reconverge:
@@ -11101,18 +11106,16 @@ void executive::CooperativeThreadArray::eval_Txq(CTAContext &context, const ir::
 /*!
 
 */
-void executive::CooperativeThreadArray::eval_Vote(CTAContext &context,
+void executive::CooperativeThreadArray::eval_WarpSync(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
 
-	if (instr.voteSync) {
-		const std::string error = instr.valid();
-		if (!error.empty()) throw RuntimeException(error, context.PC, instr);
-	}
-	reconvergenceMechanism->eval_Vote(context, instr);
+	const std::string error = instr.valid();
+	if (!error.empty()) throw RuntimeException(error, context.PC, instr);
+	reconvergenceMechanism->eval_WarpSync(context, instr);
 }
 
-void executive::CooperativeThreadArray::eval_VoteSync(CTAContext &context,
+void executive::CooperativeThreadArray::eval_Vote(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	std::vector<ir::PTXU32> results(threadCount);
 	for (int warpStart = 0; warpStart < threadCount; warpStart += 32) {
@@ -11130,7 +11133,8 @@ void executive::CooperativeThreadArray::eval_VoteSync(CTAContext &context,
 		// All predicates and member masks are gathered before aliased destinations are written.
 		for (int lane = 0; lane < lanes; ++lane) {
 			if (!context.predicated(warpStart + lane, instr)) continue;
-			const ir::PTXU32 members = masks[lane] & participants, selected = ballot & members;
+			const ir::PTXU32 members = masks[lane] & participants;
+			const ir::PTXU32 selected = ballot & members;
 			results[warpStart + lane] = instr.vote == ir::PTXInstruction::Ballot ? selected :
 				instr.vote == ir::PTXInstruction::All ? selected == members :
 				instr.vote == ir::PTXInstruction::Any ? selected != 0 : 
@@ -11141,6 +11145,48 @@ void executive::CooperativeThreadArray::eval_VoteSync(CTAContext &context,
 		if (!context.predicated(thread, instr)) continue;
 		if (instr.vote == ir::PTXInstruction::Ballot) setRegAsB32(thread, instr.d.reg, results[thread]);
 		else setRegAsPredicate(thread, instr.d.reg, results[thread]);
+	}
+}
+
+void executive::CooperativeThreadArray::eval_Redux(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	std::vector<ir::PTXU32> results(threadCount);
+	for (int warpStart = 0; warpStart < threadCount; warpStart += 32) {
+		const int lanes = min(32, threadCount - warpStart);
+		ir::PTXU32 masks[32] = {}, values[32] = {}, participants = 0;
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (!context.predicated(warpStart + lane, instr)) continue;
+			participants |= ir::PTXU32(1) << lane;
+			masks[lane] = operandAsU32(warpStart + lane, instr.b);
+			values[lane] = operandAsB32(warpStart + lane, instr.a);
+		}
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (!context.predicated(warpStart + lane, instr)) continue;
+			const ir::PTXU32 members = masks[lane] & participants;
+			ir::PTXU32 result = 0;
+			const ir::PTXU32 sign = instr.type == ir::PTXOperand::s32 ? 0x80000000u : 0;
+			bool first = true;
+			for (int member = 0; member < lanes; ++member) {
+				if (!(members & (ir::PTXU32(1) << member))) continue;
+				const ir::PTXU32 value = values[member];
+				if (first) { result = value; first = false; continue; }
+				switch (instr.reductionOperation) {
+					case ir::PTXInstruction::ReductionAdd: result += value; break;
+					case ir::PTXInstruction::ReductionMin: if ((value ^ sign) < (result ^ sign)) result = value; break;
+					case ir::PTXInstruction::ReductionMax: if ((value ^ sign) > (result ^ sign)) result = value; break;
+					case ir::PTXInstruction::ReductionAnd: result &= value; break;
+					case ir::PTXInstruction::ReductionOr: result |= value; break;
+					case ir::PTXInstruction::ReductionXor: result ^= value; break;
+					default: throw RuntimeException("invalid redux operation", context.PC, instr);
+				}
+			}
+			results[warpStart + lane] = result;
+		}
+	}
+	// Gather all sources and masks before writing potentially aliased destinations.
+	for (int thread = 0; thread < threadCount; ++thread) {
+		if (!context.predicated(thread, instr)) continue;
+		setRegAsB32(thread, instr.d.reg, results[thread]);
 	}
 }
 

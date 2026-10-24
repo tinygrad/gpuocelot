@@ -162,6 +162,7 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return OPCODE_ISSPACEP; }
 "ld"                            { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_LD; }
+"redux" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_REDUX; }
 "activemask" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_ACTIVEMASK; }
 "movmatrix" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MOVMATRIX; }
 "ldmatrix" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_LDMATRIX; }

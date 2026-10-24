@@ -441,6 +441,7 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case Prefetchu:  return "prefetchu";  break;
 		case Prmt:       return "prmt";       break;
 		case Rcp:        return "rcp";        break;
+		case Redux:      return "redux";
 		case Red:        return "red";        break;
 		case Rem:        return "rem";        break;
 		case Ret:        return "ret";        break;
@@ -1846,6 +1847,19 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			break;
 		}
+		case Redux: {
+			const bool bitwise = reductionOperation == ReductionAnd || reductionOperation == ReductionOr || reductionOperation == ReductionXor;
+			const bool arithmetic = reductionOperation == ReductionAdd || reductionOperation == ReductionMin || reductionOperation == ReductionMax;
+			if (modifier || vec != PTXOperand::v1 || !(bitwise ? type == PTXOperand::b32 :
+				arithmetic && (type == PTXOperand::s32 || type == PTXOperand::u32))) return "invalid redux operation/type/modifier";
+			for (const auto* operand : {&d, &a, &b})
+				if (operand->vec != PTXOperand::v1 || !operand->array.empty() || operand->bytes() != 4) return "redux requires scalar 32-bit operands";
+			for (const auto* operand : {&d, &a})
+				if (operand->addressMode != PTXOperand::Register || (!bitwise && !PTXOperand::valid(type, operand->type))) return "redux requires compatible destination/source registers";
+			if ((b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) ||
+				(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32)) return "redux requires a 32-bit integer member mask";
+			break;
+		}
 		case Activemask: {
 			if (type != PTXOperand::b32 || modifier || vec != PTXOperand::v1 ||
 				d.addressMode != PTXOperand::Register || d.bytes() != 4 ||
@@ -3208,6 +3222,9 @@ std::string ir::PTXInstruction::toString() const {
 				+ PTXOperand::toString( type ) + " "
 				+ d.toString() + ", " + a.toString() + ", " + b.toString();
 		}
+		case Redux:
+			return guard() + "redux.sync." + toString(reductionOperation) + "." + PTXOperand::toString(type) +
+				" " + d.toString() + ", " + a.toString() + ", " + b.toString();
 		case Activemask:
 			return guard() + "activemask.b32 " + d.toString();
 		case Movmatrix:
@@ -3562,7 +3579,7 @@ bool ir::PTXInstruction::hasSideEffects() const {
 }
 
 bool ir::PTXInstruction::canObserveSideEffects() const {
-	if (opcode == Vote && voteSync) return true;
+	if (opcode == Redux || (opcode == Vote && voteSync)) return true;
 	if (opcode == Atom || opcode == Ldmatrix || opcode == Movmatrix || opcode == Activemask) return true;
 
 	if (opcode == Ld) {

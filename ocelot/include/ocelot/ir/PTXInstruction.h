@@ -90,6 +90,7 @@ namespace ir {
 			Prmt,
 			Rcp,
 			Red,
+			Redux,
 			Rem,
 			Ret,
 			Rsqrt,

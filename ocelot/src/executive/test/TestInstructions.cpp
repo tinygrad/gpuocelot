@@ -5313,7 +5313,7 @@ public:
 						initial[thread] = ballot ? local.getRegAsB32(thread, ins.d.reg) : local.getRegAsPredicate(thread, ins.d.reg);
 					}
 
-					local.eval_Vote(context, ins);
+					local.eval_WarpSync(context, ins);
 					for (int thread = 0; thread < size; ++thread) {
 						const int lane = thread % 32, warpStart = thread / 32 * 32;
 						const PTXU32 members = scenario == 0 ? ~PTXU32(0) : scenario == 1 ? (lane % 2 ? 0xaaaaaaaau : 0x55555555u) : scenario == 2 ? 0x80000081u : 0x1cu;
@@ -5346,13 +5346,135 @@ public:
 					local.setRegAsPredicate(lane, ins.a.reg, lane == 0 || allTrue);
 					local.setRegAsU32(lane, ins.b.reg, lane == 0 ? 1 : 3);
 				}
-				try { local.eval_Vote(context, ins); }
+				try { local.eval_WarpSync(context, ins); }
 				catch (const RuntimeException& error) { status << "different vote mask threw: " << error.what() << "\n"; return false; }
 				const PTXU32 expected = ballot ? (allTrue ? 3 : 1) :
 					std::string(mode) == "any" ? 1 : allTrue;
 				const PTXU32 actual = ballot ? local.getRegAsB32(1, ins.d.reg) : local.getRegAsPredicate(1, ins.d.reg);
 				if (actual != expected) { status << "different vote mask result mismatch\n"; return false; }
 			}
+		}
+		return true;
+	}
+
+	bool test_ReduxSynchronization() {
+		const struct { const char* form; PTXU32 base, first, last, expected; } cases[] = {
+			{"add.s32", 0xfffffff0u, 0x80000000u, 0x12345678u, 0x12345498u},
+			{"add.u32", 0xfffffff0u, 0x80000000u, 0x12345678u, 0x12345498u},
+			{"min.s32", 0x00000009u, 0xfffffff0u, 0x80000000u, 0x80000000u},
+			{"min.u32", 0x0000007bu, 0x00000007u, 0x00000000u, 0x00000000u},
+			{"max.s32", 0xffffffffu, 0x7ffffff0u, 0x7fffffffu, 0x7fffffffu},
+			{"max.u32", 0x00000001u, 0xfffffff0u, 0xffffffffu, 0xffffffffu},
+			{"and.b32", 0xffffffffu, 0xffff0000u, 0x0000ffffu, 0x0000ffffu},
+			{"or.b32", 0x00000000u, 0x00020000u, 0x00010000u, 0x00010000u},
+			{"xor.b32", 0x00000000u, 0x00020000u, 0x00010000u, 0x00010000u},
+		};
+		for (const auto& test : cases) for (const char* destination : {"result", "a", "m"}) for (int size : {1, 31, 32}) {
+			std::stringstream source;
+			source << ".version 8.0\n.target sm_86\n.entry delayed_redux() { .reg .u64 ptr; .reg .b32 lane,delay,result,a,m,special,round; .reg .pred p; "
+				<< "mov.u32 lane,%tid.x; mov.u32 result,0xdeadbeef; mov.u32 round,2; again: mov.u32 m,0x7fffffff; "
+				<< "setp.eq.u32 p,round,2; selp.u32 special," << test.first << "," << test.last << ",p; "
+				<< "setp.eq.u32 p,lane,16; selp.u32 a,special," << test.base << ",p; setp.ge.u32 p,lane,16; selp.u32 delay,1,0,p; "
+				<< "loop: setp.eq.u32 p,lane,31; @p bra done; setp.ne.u32 p,delay,0; @p bra later; redux.sync." << test.form << " " << destination << ",a,m; "
+				<< "sub.u32 round,round,1; setp.ne.u32 p,round,0; @p bra again; bra done; later: sub.u32 delay,delay,1; bra loop; "
+				<< "done: st.global.u32 [ptr]," << destination << "; ret; }";
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("delayed_redux"), nullptr);
+			kernel.setKernelShape(size,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (int run = 0; run < 2; ++run) {
+				local.reset(); PTXU32 output[32] = {};
+				for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::St)
+					for (int lane = 0; lane < size; ++lane) local.setRegAsU64(lane, ins.d.reg, (PTXU64)&output[lane]);
+				local.execute();
+				for (int lane = 0; lane < size; ++lane) {
+					const PTXU32 untouched = std::string(destination) == "result" ? 0xdeadbeef : std::string(destination) == "a" ? test.base : 0x7fffffff;
+					const PTXU32 expected = lane == 31 ? untouched : size == 1 ? test.base : test.expected;
+					if (output[lane] != expected) { status << "redux synchronization mismatch " << test.form << " " << destination << " CTA " << size << " lane " << lane << "\n"; return false; }
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_ReduxExecution() {
+		const struct { const char* form; PTXU32 expected[4]; } cases[] = {
+			{"add.s32", {0x7ffffff0u, 0x7fffffeeu, 0x80000000u, 0x7dfdfddeu}},
+			{"add.u32", {0x7ffffff0u, 0x7fffffeeu, 0x80000000u, 0x7dfdfddeu}},
+			{"min.s32", {0x80000000u, 0x88888887u, 0x81010101u, 0x89898986u}},
+			{"min.u32", {0x11111110u, 0x1111110fu, 0x10101011u, 0x1010100eu}},
+			{"max.s32", {0x77777776u, 0x7fffffffu, 0x76767677u, 0x7efefefeu}},
+			{"max.u32", {0xfffffffeu, 0xffffffffu, 0xfefefeffu, 0xfefefefeu}},
+			{"and.b32", {0x00000000u, 0x00000001u, 0x00000001u, 0x00000000u}},
+			{"or.b32", {0xfffffffeu, 0xffffffffu, 0xffffffffu, 0xfffffffeu}},
+			{"xor.b32", {0x80000000u, 0x7fffffeeu, 0x80000000u, 0x7fffffeeu}},
+		};
+		for (const auto& test : cases) for (int alias : {0, 1, 2}) for (int scenario : {0, 1, 2}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry reduce() { .reg .b32 d,a,m; .reg .pred p; @!p redux.sync." +
+				std::string(test.form) + " d,a,m; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("reduce"), nullptr);
+			kernel.setKernelShape(64,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (auto ins : kernel.instructions) if (ins.opcode == PTXInstruction::Redux) {
+				if (alias) ins.d.reg = alias == 1 ? ins.a.reg : ins.b.reg;
+				auto& context = local.getActiveContext(); PTXU32 initial[64];
+				for (int thread = 0; thread < 64; ++thread) {
+					const int lane = thread % 32;
+					const PTXU32 value = (lane == 0 ? 0x80000000u : lane == 1 ? 0x7fffffffu : PTXU32(lane) * 0x11111111u) ^ (thread / 32 * 0x01010101u);
+					local.setRegAsB32(thread, ins.d.reg, 0xdeadbeef);
+					local.setRegAsB32(thread, ins.a.reg, value);
+					local.setRegAsB32(thread, ins.b.reg, lane % 2 ? 0xaaaaaaaau : 0x55555555u);
+					local.setRegAsPredicate(thread, ins.pg.reg, scenario == 2);
+					context.active[thread] = scenario != 1 || lane % 2;
+					initial[thread] = local.getRegAsB32(thread, ins.d.reg);
+				}
+				local.eval_WarpSync(context, ins);
+				for (int thread = 0; thread < 64; ++thread) {
+					const PTXU32 expected = scenario != 2 && context.active[thread] ? test.expected[(thread / 32) * 2 + thread % 2] : initial[thread];
+					if (local.getRegAsB32(thread, ins.d.reg) != expected) { status << "redux mismatch " << test.form << " thread " << thread << " alias " << alias << " scenario " << scenario << "\n"; return false; }
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_ReduxParser() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry redux_parse() { .reg .b32 d,a,m; .reg .b64 w; .reg .pred p; .reg .v2 .b32 v; ";
+		for (const char* form : {"add.s32", "add.u32", "min.s32", "min.u32", "max.s32", "max.u32", "and.b32", "or.b32", "xor.b32"})
+		for (const char* mask : {"m", "0xffffffff", "-1", "0"}) for (const char* guard : {"", "@!p "})
+		for (const char* registers : {"d,a,", "v.y,v.x,"}) {
+			const std::string operation = "redux.sync." + std::string(form) + " ";
+			std::stringstream source(prefix + guard + operation + registers + mask + "; ret; }"), printed;
+			Module parsed;
+			try { parsed.load(source); } catch (const std::exception& error) { status << "redux parse failed: " << error.what() << "\n"; return false; }
+			parsed.write(printed); Module roundtrip; roundtrip.load(printed);
+			EmulatedKernel kernel(roundtrip.getKernel("redux_parse"), nullptr);
+			int found = 0;
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Redux) {
+				++found;
+				if (!ins.valid().empty() || !ins.canObserveSideEffects()) return false;
+				auto invalid = ins; invalid.modifier = PTXInstruction::sat;
+				if (invalid.valid().empty()) return false;
+			}
+			if (found != 1) return false;
+			for (const char* operands : {"w,a,m", "d,w,m", "d,a,w", "d,a,0f3f800000", "d,1,m", "v,a,m", "d,v,m", "d,a,v"}) {
+				std::stringstream invalid(prefix + operation + operands + "; ret; }"); bool rejected = false;
+				try { Module bad; bad.load(invalid); } catch (const std::exception&) { rejected = true; }
+				if (!rejected) { status << "accepted malformed redux operands\n"; return false; }
+			}
+		}
+		for (const char* form : {"add.b32", "min.b32", "max.f32", "add.u64", "and.u32", "or.s32", "inc.u32", "dec.u32"}) {
+			std::stringstream invalid(prefix + "redux.sync." + form + " d,a,m; ret; }"); bool rejected = false;
+			try { Module bad; bad.load(invalid); } catch (const std::exception&) { rejected = true; }
+			if (!rejected) { status << "accepted illegal redux operation/type\n"; return false; }
+		}
+		for (const char* instruction : {"redux.add.u32 d,a,m;", "redux.sync.add.u32 d,a;", "redux.sync.add.sat.u32 d,a,m;"}) {
+			std::stringstream invalid(prefix + instruction + " ret; }"); bool rejected = false;
+			try { Module bad; bad.load(invalid); } catch (const std::exception&) { rejected = true; }
+			if (!rejected) return false;
+		}
+		for (const char* operation : {"and", "or", "xor"}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry packed() { .reg .f16x2 d,a; redux.sync." +
+				std::string(operation) + ".b32 d,a,0xffffffff; ret; }");
+			Module parsed;
+			try { parsed.load(source); } catch (const std::exception& error) { status << "packed redux container: " << error.what() << "\n"; return false; }
 		}
 		return true;
 	}
@@ -11195,6 +11317,9 @@ public:
 			result = (result && test_F16Fma());
 			result = (result && test_Bf16Fma());
 			result = (result && test_MmaWarpParticipation());
+			result = (result && test_ReduxParser());
+			result = (result && test_ReduxExecution());
+			result = (result && test_ReduxSynchronization());
 			result = (result && test_VoteSyncParser());
 			result = (result && test_VoteSyncDivergentArrival());
 			result = (result && test_VoteSync());
