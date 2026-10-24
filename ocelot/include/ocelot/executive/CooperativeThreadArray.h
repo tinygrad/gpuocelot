@@ -540,6 +540,7 @@ namespace executive {
 		// Calculate synchronized vote results after the scheduler releases its lanes.
 		void eval_Vote(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Redux(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Match(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_WarpSync(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Xor(CTAContext &context, const ir::PTXInstruction &instr);		
 		void eval_Reconverge(CTAContext &context,

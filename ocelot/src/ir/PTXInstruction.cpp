@@ -391,6 +391,7 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case AddC:       return "addc";       break;
 		case And:        return "and";        break;
 		case Atom:       return "atom";       break;
+		case BarWarp:    return "bar.warp.sync";
 		case Bar:        return "bar";        break;
 		case Bfe:        return "bfe";        break;
 		case Bfi:        return "bfi";        break;
@@ -692,6 +693,13 @@ std::string ir::PTXInstruction::valid() const {
 			if( !( addressSpace == Shared || addressSpace == Global ) ) {
 				return "invalid adress space " + toString( addressSpace );
 			}
+			break;
+		}
+		case BarWarp: {
+			if (modifier || vec != PTXOperand::v1 || type != PTXOperand::u32 ||
+				b.vec != PTXOperand::v1 || !b.array.empty() || b.bytes() != 4 ||
+				(b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) ||
+				(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32)) return "bar.warp.sync requires a scalar 32-bit integer member mask";
 			break;
 		}
 		case Bar: {
@@ -2921,6 +2929,8 @@ std::string ir::PTXInstruction::toString() const {
 			}
 			return result;
 		}
+		case BarWarp:
+			return guard() + "bar.warp.sync " + b.toString();
 		case Bar: {
 			std::string result = guard() + "bar." + toString(barrierOperation);
 			ir::PTXOperand ir::PTXInstruction::* instrMembers [] = { 
@@ -3592,7 +3602,7 @@ bool ir::PTXInstruction::mayHaveRelaxedTypeDestination() const {
 }
 
 bool ir::PTXInstruction::hasSideEffects() const {
-	return opcode == St || opcode == Atom || opcode == Bar
+	return opcode == St || opcode == Atom || opcode == BarWarp || opcode == Bar
 		|| opcode == Bra || opcode == Call || opcode == Exit || opcode == Ldu
 		|| opcode == Membar || opcode == Tex || opcode == Tld4
 		|| opcode == Prefetch || opcode == Sust || opcode == Suq
@@ -3600,7 +3610,7 @@ bool ir::PTXInstruction::hasSideEffects() const {
 }
 
 bool ir::PTXInstruction::canObserveSideEffects() const {
-	if (opcode == Match || opcode == Redux || (opcode == Vote && voteSync)) return true;
+	if (opcode == BarWarp || opcode == Match || opcode == Redux || (opcode == Vote && voteSync)) return true;
 	if (opcode == Atom || opcode == Ldmatrix || opcode == Movmatrix || opcode == Activemask) return true;
 
 	if (opcode == Ld) {

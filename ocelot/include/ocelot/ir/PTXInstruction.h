@@ -41,6 +41,7 @@ namespace ir {
 			And,
 			Atom,
 			Bar,
+			BarWarp,
 			Bfe,
 			Bfi,
 			Bfind,
@@ -91,6 +92,7 @@ namespace ir {
 			Rcp,
 			Red,
 			Redux,
+			Match,
 			Rem,
 			Ret,
 			Rsqrt,
@@ -481,6 +483,7 @@ namespace ir {
 		bool mmaSparse;
 		/*! Matrix transpose; ldmatrix uses vec for its .x1/.x2/.x4 count. */
 		bool matrixTranspose;
+		bool matchAll; // match.all.sync, otherwise match.any.sync.
 		bool voteSync; // Vote uses b as its member mask when synchronized.
 		PTXOperand mmaSelector;
 

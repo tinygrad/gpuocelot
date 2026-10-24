@@ -138,7 +138,7 @@
 
 %token<value> TOKEN_TRAP TOKEN_CLAMP TOKEN_ZERO TOKEN_WRAP
 
-%token<value> TOKEN_ARRIVE TOKEN_RED TOKEN_POPC TOKEN_SYNC TOKEN_ALIGNED TOKEN_SP
+%token<value> TOKEN_ARRIVE TOKEN_RED TOKEN_POPC TOKEN_SYNC TOKEN_WARP TOKEN_ALIGNED TOKEN_SP
 %token<value> TOKEN_M8N8K4 TOKEN_M16N8K4 TOKEN_M16N8K8 TOKEN_M16N8K16 TOKEN_M8N8K16 TOKEN_M16N8K32 TOKEN_ROW TOKEN_COL
 
 %token<value> TOKEN_BALLOT
@@ -1237,6 +1237,18 @@ barrierOperation : TOKEN_ARRIVE { state.barrierOperation( $<value>1, @1 ); }
 optionalBarrierOperator : reductionOperation dataType | /* or nothing */ ;
 
 operandSequence: operand operandSequence | /* empty */ ;
+
+bar : OPCODE_BAR TOKEN_WARP TOKEN_SYNC operand ';'
+{
+	auto mask = state.operandVector.back().operand;
+	state.instruction($<text>1, TOKEN_U32);
+	auto& instr = state.statement.instruction;
+	instr.opcode = ir::PTXInstruction::BarWarp;
+	instr.d = ir::PTXOperand();
+	// All warp synchronization instructions keep the member mask in b.
+	if (mask.addressMode == ir::PTXOperand::Immediate && ir::PTXOperand::isInt(mask.type)) mask.type = ir::PTXOperand::u32;
+	instr.b = mask;
+};
 
 bar : OPCODE_BAR barrierOperation optionalBarrierOperator operandSequence ';'
 {

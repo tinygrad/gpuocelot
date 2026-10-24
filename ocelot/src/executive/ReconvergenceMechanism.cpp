@@ -44,6 +44,8 @@ executive::ReconvergenceMechanism::~ReconvergenceMechanism()
 void executive::ReconvergenceMechanism::eval_WarpSync(CTAContext &context,
 	const ir::PTXInstruction &instr)
 {
+	// Memory operations complete immediately; the warp barrier only needs arrival waiting.
+	if (instr.opcode == ir::PTXInstruction::BarWarp) return;
 	if (instr.opcode == ir::PTXInstruction::Redux) cta->eval_Redux(context, instr);
 	else if (instr.opcode == ir::PTXInstruction::Match) cta->eval_Match(context, instr);
 	else cta->eval_Vote(context, instr);

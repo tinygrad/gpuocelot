@@ -5435,6 +5435,55 @@ public:
 		return true;
 	}
 
+	bool test_BarWarpSynchronization() {
+		for (int size : {1, 31, 32, 64}) for (bool delayed : {false, true}) for (bool registerMask : {false, true}) {
+			if (delayed && size > 32) continue;
+			const int supplier = size == 1 ? 0 : 16;
+			const std::string mask = size == 1 ? "1" : "0x7fffffff", operand = registerMask ? "m" : mask;
+			std::stringstream source;
+			source << ".version 8.0\n.target sm_86\n.entry warp_barrier() { .shared .align 4 .u32 data[64]; .reg .u64 ptr; .reg .u32 tid,lane,addr,readaddr,delay,result,round,value,m; .reg .pred p; "
+				<< "mov.u32 tid,%tid.x; and.b32 lane,tid,31; mul.lo.u32 addr,tid,4; sub.u32 readaddr,tid,lane; add.u32 readaddr,readaddr," << supplier << "; mul.lo.u32 readaddr,readaddr,4; "
+				<< "mov.u32 result,0xdeadbeef; mov.u32 round,2; mov.u32 m," << mask << "; again: mul.lo.u32 value,round,100; add.u32 value,value,tid; "
+				<< "setp.ge.u32 p,lane,16; selp.u32 delay," << (delayed ? 1 : 0) << ",0,p; loop: setp.eq.u32 p,lane,31; @p bra done; setp.ne.u32 p,delay,0; @p bra later; "
+				<< "st.shared.u32 [addr],value; bar.warp.sync " << operand << "; ld.shared.u32 result,[readaddr]; bar.warp.sync " << operand << "; "
+				<< "sub.u32 round,round,1; setp.ne.u32 p,round,0; @p bra again; bra done; later: sub.u32 delay,delay,1; bra loop; done: st.global.u32 [ptr],result; ret; }";
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("warp_barrier"), nullptr);
+			kernel.setKernelShape(size,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (int run = 0; run < 2; ++run) {
+				local.reset(); PTXU32 output[64] = {};
+				std::memset(local.functionCallStack.sharedMemoryPointer(), 0, 256);
+				for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::St && ins.addressSpace == PTXInstruction::Global)
+					for (int thread = 0; thread < size; ++thread) local.setRegAsU64(thread, ins.d.reg, (PTXU64)&output[thread]);
+				local.execute();
+				for (int thread = 0; thread < size; ++thread) {
+					const PTXU32 expected = thread % 32 == 31 ? 0xdeadbeef : 100 + thread / 32 * 32 + supplier;
+					if (output[thread] != expected) { status << "warp barrier shared-memory mismatch CTA " << size << " delayed " << delayed << " thread " << thread << "\n"; return false; }
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_BarWarpParser() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry warp_barrier() { .reg .u32 m; .reg .b32 b; .reg .s32 s; .reg .b64 w; .reg .f32 f; .reg .pred p; .reg .v2 .u32 v; ";
+		for (const char* mask : {"m", "b", "s", "0xffffffff", "0", "-1", "v.x"}) for (const char* guard : {"", "@p ", "@!p "}) {
+			std::stringstream source(prefix + guard + "bar.warp.sync " + mask + "; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("warp_barrier"), nullptr); int found = 0;
+			for (const auto& ins : kernel.instructions) if (PTXInstruction::toString(ins.opcode) == "bar.warp.sync") {
+				++found; if (!ins.valid().empty() || !ins.hasSideEffects() || !ins.canObserveSideEffects()) return false;
+				auto invalid = ins; invalid.modifier = PTXInstruction::sat; if (invalid.valid().empty()) return false;
+			}
+			if (found != 1) return false;
+		}
+		for (const char* instruction : {"bar.warp.sync w;", "bar.warp.sync f;", "bar.warp.sync p;", "bar.warp.sync v;", "bar.warp.sync 0f3f800000;", "bar.warp.sync;", "bar.warp.sync m,m;", "bar.warp.sync.u32 m;", "bar.warp.arrive m;", "bar.warp m;"}) {
+			std::stringstream source(prefix + instruction + " ret; }"); bool rejected = false;
+			try { Module bad; bad.load(source); } catch (const std::exception&) { rejected = true; }
+			if (!rejected) { status << "accepted invalid warp barrier\n"; return false; }
+		}
+		return true;
+	}
+
 	bool test_MatchSynchronization() {
 		for (bool all : {false, true}) for (bool wide : {false, true}) for (int size : {1, 31, 32})
 		for (const char* destination : {"result", "a", "m", "_", "sinkp"}) {
@@ -11419,6 +11468,8 @@ public:
 			result = (result && test_F16Fma());
 			result = (result && test_Bf16Fma());
 			result = (result && test_MmaWarpParticipation());
+			result = (result && test_BarWarpParser());
+			result = (result && test_BarWarpSynchronization());
 			result = (result && test_MatchParser());
 			result = (result && test_MatchExecution());
 			result = (result && test_MatchSynchronization());

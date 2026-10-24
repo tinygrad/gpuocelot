@@ -718,6 +718,8 @@ void executive::CooperativeThreadArray::execute(int PC) {
 				eval_Atom(context, instr); break;
 			case ir::PTXInstruction::Bar:
 				eval_Bar(context, instr); break;
+			case ir::PTXInstruction::BarWarp:
+				eval_WarpSync(context, instr); break;
 			case ir::PTXInstruction::Bfi:
 				eval_Bfi(context, instr); break;
 			case ir::PTXInstruction::Bfind:

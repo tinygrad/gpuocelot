@@ -343,6 +343,7 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
 ".weak"                         { yylval->value = TOKEN_WEAK; \
                                     return TOKEN_WEAK; }
 
+".warp"                         { yylval->value = TOKEN_WARP; return TOKEN_WARP; }
 ".cta"                          { yylval->value = TOKEN_CTA; return TOKEN_CTA; }
 ".gl"                           { yylval->value = TOKEN_GL; return TOKEN_GL; }
 ".sys"                          { yylval->value = TOKEN_SYS; return TOKEN_SYS; }
