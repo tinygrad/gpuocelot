@@ -12,6 +12,7 @@
 
 // Hydrazine includes
 #include <hydrazine/debug.h>
+#include <algorithm>
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -43,6 +44,10 @@ executive::ReconvergenceMechanism::~ReconvergenceMechanism()
 void executive::ReconvergenceMechanism::eval_Vote(CTAContext &context,
 	const ir::PTXInstruction &instr)
 {
+	if (instr.voteSync) {
+		cta->eval_VoteSync(context, instr);
+		return;
+	}
 	int threadCount = cta->threadCount;
 	
 	if (instr.vote == ir::PTXInstruction::Ballot) {
@@ -164,6 +169,9 @@ void executive::ReconvergenceIPDOM::initialize() {
 	CTAContext context(cta->kernel, cta);
 	runtimeStack.clear();
 	pcStack.clear();
+	tokenStack.clear();
+	voteYielded = false;
+	pendingVote.clear();
 	runtimeStack.push_back(context);
 	pcStack.push_back(0);
 	tokenStack.push_back(Branch);
@@ -318,10 +326,71 @@ void executive::ReconvergenceIPDOM::eval_Exit(executive::CTAContext &context,
 	context.executionState = CTAContext::Exit;
 }
 
+void executive::ReconvergenceIPDOM::eval_Vote(CTAContext& context,
+	const ir::PTXInstruction& instr) {
+	if (!instr.voteSync) {
+		ReconvergenceMechanism::eval_Vote(context, instr);
+		return;
+	}
+	CTAContext combined(context);
+	if (!pendingVote.empty()) {
+		const auto& waiting = pendingVote.back();
+		if (waiting.PC != context.PC || voteBoundary != pcStack.back() ||
+			(combined.active & waiting.active).any())
+			throw RuntimeException("incompatible vote arrival contexts", context.PC, instr);
+		combined.active |= waiting.active;
+	}
+	const auto arrived = combined.predicateMask(instr);
+	const ir::PTXU32 firstMask = arrived.any() ?
+		cta->operandAsU32(arrived.find_first(), instr.b) : 0;
+	bool ready = true, sameGroup = true;
+	for (int start = 0; start < cta->threadCount; start += 32) {
+		const int lanes = std::min(32, cta->threadCount - start);
+		ir::PTXU32 arrivedMask = 0, existingMask = 0;
+		for (int lane = 0; lane < lanes; ++lane) {
+			const ir::PTXU32 bit = ir::PTXU32(1) << lane;
+			existingMask |= bit;
+			if (arrived[start + lane]) arrivedMask |= bit;
+		}
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (!arrived[start + lane]) continue;
+			const ir::PTXU32 mask = cta->operandAsU32(start + lane, instr.b);
+			sameGroup &= mask == firstMask;
+			const ir::PTXU32 members = mask & existingMask;
+			ready &= (arrivedMask & members) == members;
+		}
+	}
+	if (ready && pendingVote.empty()) {
+		cta->eval_VoteSync(context, instr);
+		return;
+	}
+	if (cta->threadCount > 32 || !sameGroup || arrived != combined.active ||
+		std::find(tokenStack.begin(), tokenStack.end(), Call) != tokenStack.end())
+		throw RuntimeException("divergent vote waiting currently supports one call-free warp", context.PC, instr);
+	if (ready) {
+		context.active = combined.active;
+		pendingVote.clear();
+		cta->eval_VoteSync(context, instr);
+		return;
+	}
+	pendingVote.assign(1, combined);
+	voteBoundary = pcStack.back();
+	runtimeStack.pop_back();
+	pcStack.pop_back();
+	tokenStack.pop_back();
+	voteYielded = true;
+	if (runtimeStack.empty() || (runtimeStack.back().active & combined.active).any())
+		throw RuntimeException("vote.sync has no runnable sibling context", combined.PC, instr);
+}
+
 bool executive::ReconvergenceIPDOM::nextInstruction(
 	executive::CTAContext &context, 
 	const ir::PTXInstruction &instr, const ir::PTXInstruction::Opcode &opcode) {
 
+	if (voteYielded) {
+		voteYielded = false;
+		return context.running();
+	}
 	// advance to next instruction if the current instruction wasn't a branch
 	if (opcode != ir::PTXInstruction::Bra
 		&& opcode != ir::PTXInstruction::Reconverge
@@ -953,6 +1022,10 @@ void executive::ReconvergenceTFSoftware::eval_Exit(
 void executive::ReconvergenceTFSoftware::eval_Vote(
 	executive::CTAContext &context, const ir::PTXInstruction &instr) {
 	
+	if (instr.voteSync) {
+		ReconvergenceMechanism::eval_Vote(context, instr);
+		return;
+	}
 	if (instr.vote == ir::PTXInstruction::Ballot) {
 		unsigned int warps = (cta->threadCount + warpSize - 1) / warpSize;
 		for(unsigned int warp = 0; warp != warps; ++warp) {

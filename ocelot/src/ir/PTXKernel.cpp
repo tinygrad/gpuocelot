@@ -463,7 +463,8 @@ PTXKernel::RegisterMap PTXKernel::assignRegisters( ControlFlowGraph& cfg )
 					continue;
 				}
 				if ((instr.*operands[i]).type == PTXOperand::pred
-					&& (instr.*operands[i]).condition == PTXOperand::PT) {
+					&& ((instr.*operands[i]).condition == PTXOperand::PT
+					|| (instr.*operands[i]).condition == PTXOperand::nPT)) {
 					continue;
 				}
 				if ((instr.*operands[i]).isRegister()

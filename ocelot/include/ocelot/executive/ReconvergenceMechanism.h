@@ -142,6 +142,7 @@ public:
 		const ir::PTXInstruction &instr);
 	void eval_Exit(CTAContext &context,
 		const ir::PTXInstruction &instr);
+	void eval_Vote(CTAContext &context, const ir::PTXInstruction &instr);
 	bool nextInstruction(CTAContext &context,
 		const ir::PTXInstruction &instr, const ir::PTXInstruction::Opcode &);
 
@@ -171,6 +172,9 @@ private:
 	PCStack pcStack;
 	TokenStack tokenStack;
 	unsigned int reconvergeEvents;
+	bool voteYielded = false;
+	RuntimeStack pendingVote;
+	int voteBoundary = 0;
 };
 
 class ReconvergenceBarrier: public ReconvergenceMechanism {

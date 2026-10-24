@@ -5267,6 +5267,140 @@ public:
 		return true;
 	}
 
+	bool test_VoteSyncDivergentArrival() {
+		for (int size : {1, 31, 32}) for (const char* mode : {"all", "any", "uni", "ballot"}) {
+			const bool ballot = std::string(mode) == "ballot";
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry delayed() { .reg .u64 ptr; .reg .u32 lane,delay,result; .reg .pred p,a,d; "
+				"mov.u32 lane,%tid.x; mov.u32 result,0xdeadbeef; setp.ge.u32 p,lane,16; selp.u32 delay,1,0,p; setp.eq.u32 a,lane,16; "
+				"loop: setp.eq.u32 p,lane,31; @p bra done; setp.ne.u32 p,delay,0; @p bra later; vote.sync." + std::string(mode) +
+				(ballot ? ".b32 result" : ".pred d") + ",a,0x7fffffff; " + (ballot ? "" : "selp.u32 result,1,0,d; ") +
+				"bra done; later: sub.u32 delay,delay,1; bra loop; done: st.global.u32 [ptr],result; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("delayed"), nullptr);
+			kernel.setKernelShape(size,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (int run = 0; run < 2; ++run) {
+				local.reset(); PTXU32 output[32] = {};
+				for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::St)
+					for (int lane = 0; lane < size; ++lane) local.setRegAsU64(lane, ins.d.reg, (PTXU64)&output[lane]);
+				local.execute();
+				for (int lane = 0; lane < size; ++lane) {
+					const PTXU32 expected = lane == 31 ? 0xdeadbeef : ballot ? (size > 16 ? 0x10000 : 0) : std::string(mode) == "any" ? size > 16 : std::string(mode) == "uni" && size == 1;
+					if (output[lane] != expected) { status << "divergent vote arrival mismatch " << mode << " lane " << lane << "\n"; return false; }
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_VoteSync() {
+		for (const char* mode : {"all", "any", "uni", "ballot"}) for (bool invert : {false, true}) for (bool alias : {false, true}) {
+			const bool ballot = std::string(mode) == "ballot";
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry vote_execute() { .reg .pred a, d, g; .reg .b32 r, m; @!g vote.sync." +
+				std::string(mode) + (ballot ? ".b32 r, " : ".pred d, ") + (invert ? "!a" : "a") + ", m; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("vote_execute"), nullptr);
+			for (int size : {1, 31, 32, 33, 64, 65}) for (int scenario = 0; scenario < 4; ++scenario) {
+				kernel.setKernelShape(size, 1, 1); CooperativeThreadArray local(&kernel, Dim3(), false);
+				for (auto ins : kernel.instructions) if (ins.opcode == PTXInstruction::Vote) {
+					if (alias) ins.d.reg = ballot ? ins.b.reg : ins.a.reg;
+					auto& context = local.getActiveContext(); std::vector<PTXU32> initial(size);
+					for (int thread = 0; thread < size; ++thread) {
+						const int lane = thread % 32;
+						const PTXU32 truth = thread < 32 ? 0x00000003u : 0x80008000u;
+						const PTXU32 mask = scenario == 0 ? ~PTXU32(0) : scenario == 1 ? (lane % 2 ? 0xaaaaaaaau : 0x55555555u) : scenario == 2 ? 0x80000081u : 0x1cu;
+						local.setRegAsPredicate(thread, ins.a.reg, (truth & (PTXU32(1) << lane)) != 0);
+						local.setRegAsU32(thread, ins.b.reg, mask); local.setRegAsPredicate(thread, ins.pg.reg, false);
+						if (!alias) { if (ballot) local.setRegAsB32(thread, ins.d.reg, 0xdeadbeef); else local.setRegAsPredicate(thread, ins.d.reg, true); }
+						context.active[thread] = scenario != 2 || (mask & (PTXU32(1) << lane));
+						initial[thread] = ballot ? local.getRegAsB32(thread, ins.d.reg) : local.getRegAsPredicate(thread, ins.d.reg);
+					}
+
+					local.eval_Vote(context, ins);
+					for (int thread = 0; thread < size; ++thread) {
+						const int lane = thread % 32, warpStart = thread / 32 * 32;
+						const PTXU32 members = scenario == 0 ? ~PTXU32(0) : scenario == 1 ? (lane % 2 ? 0xaaaaaaaau : 0x55555555u) : scenario == 2 ? 0x80000081u : 0x1cu;
+						PTXU32 bits = 0; int count = 0, ones = 0;
+						for (int member = 0; member < 32 && warpStart + member < size; ++member) if (members & (PTXU32(1) << member)) {
+							++count; const bool value = ((warpStart == 0 ? 0x00000003u : 0x80008000u) & (PTXU32(1) << member)) != 0;
+							if (value != invert) { ++ones; bits |= PTXU32(1) << member; }
+						}
+						const PTXU32 result = ballot ? bits : std::string(mode) == "all" ? ones == count : std::string(mode) == "any" ? ones != 0 : ones == 0 || ones == count;
+						const PTXU32 actual = ballot ? local.getRegAsB32(thread, ins.d.reg) : local.getRegAsPredicate(thread, ins.d.reg);
+						if (actual != (context.active[thread] ? result : initial[thread])) { status << "vote.sync mismatch " << mode << " CTA " << size << " thread " << thread << "\n"; return false; }
+					}
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_VoteSyncDifferentMasks() {
+		for (const char* mode : {"all", "any", "uni", "ballot"}) {
+			const bool ballot = std::string(mode) == "ballot";
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry unchecked() { .reg .pred a,d; .reg .b32 r,m; vote.sync." +
+				std::string(mode) + (ballot ? ".b32 r" : ".pred d") + ", a,m; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("unchecked"), nullptr);
+			kernel.setKernelShape(2,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Vote)
+			for (bool allTrue : {false, true}) {
+				local.reset(); auto& context = local.getActiveContext();
+				for (int lane = 0; lane < 2; ++lane) {
+					local.setRegAsPredicate(lane, ins.a.reg, lane == 0 || allTrue);
+					local.setRegAsU32(lane, ins.b.reg, lane == 0 ? 1 : 3);
+				}
+				try { local.eval_Vote(context, ins); }
+				catch (const RuntimeException& error) { status << "different vote mask threw: " << error.what() << "\n"; return false; }
+				const PTXU32 expected = ballot ? (allTrue ? 3 : 1) :
+					std::string(mode) == "any" ? 1 : allTrue;
+				const PTXU32 actual = ballot ? local.getRegAsB32(1, ins.d.reg) : local.getRegAsPredicate(1, ins.d.reg);
+				if (actual != expected) { status << "different vote mask result mismatch\n"; return false; }
+			}
+		}
+		return true;
+	}
+
+	bool test_VoteSyncParser() {
+		for (const char* mode : {"all", "any", "uni", "ballot"}) for (const char* mask : {"0xffffffff", "m", "-1", "0"})
+		for (bool invert : {false, true}) {
+			const bool ballot = std::string(mode) == "ballot";
+			const std::string prefix = ".version 8.0\n.target sm_86\n.entry vote_parser() { .reg .pred a, d, g; .reg .b32 r, m; .reg .b64 wide; ";
+			const std::string operation = "vote.sync." + std::string(mode) + (ballot ? ".b32 r, " : ".pred d, ");
+			const std::string sourcePredicate = invert ? "!a" : "a";
+			const std::string text = prefix + "mov.b32 m, 0xffffffff; vote.any.pred d, a; @!g " + operation +
+				sourcePredicate + ", " + mask + "; vote.uni.pred d, a; ret; }";
+			std::stringstream source(text), printed; Module parsed; parsed.load(source); parsed.write(printed);
+			Module roundtrip; roundtrip.load(printed); EmulatedKernel kernel(roundtrip.getKernel("vote_parser"), nullptr);
+			int found = 0, legacy = 0, maskRegister = -1;
+			for (const auto& ins : kernel.instructions) {
+				if (ins.opcode == PTXInstruction::Mov) maskRegister = ins.d.reg;
+				if (ins.opcode != PTXInstruction::Vote) continue;
+				if (!ins.voteSync) { ++legacy; continue; }
+				++found;
+				if (!ins.valid().empty() || !ins.canObserveSideEffects() || ins.b.bytes() != 4 ||
+					ins.pg.condition != PTXOperand::InvPred || (ins.a.condition == PTXOperand::InvPred) != invert ||
+					(std::string(mask) == "m" && int(ins.b.reg) != maskRegister)) return false;
+			}
+			if (found != 1 || legacy != 2) return false;
+			for (const std::string& bad : {operation + sourcePredicate + ", wide;", operation + sourcePredicate + ", 0f3f800000;",
+				operation + "%laneid, " + mask + ";", operation + sourcePredicate + ";",
+				std::string("vote.sync.any.pred !d, a, 0xffffffff;"),
+				"vote.sync." + std::string(mode) + (ballot ? ".pred d, " : ".b32 r, ") + sourcePredicate + ", " + mask + ";"}) {
+				std::stringstream input(prefix + bad + " ret; }"); bool rejected = false;
+				try { Module invalid; invalid.load(input); } catch (const std::exception&) { rejected = true; }
+				if (!rejected) { status << "accepted invalid vote.sync: " << bad << "\n"; return false; }
+			}
+		}
+		for (bool invert : {false, true}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry vote_constant() { .reg .pred d; vote.sync.any.pred d, " +
+				std::string(invert ? "!%pt" : "%pt") + ", 0xffffffff; ret; }");
+			Module parsed; parsed.load(source); std::stringstream printed; parsed.write(printed);
+			Module roundtrip; roundtrip.load(printed); EmulatedKernel kernel(roundtrip.getKernel("vote_constant"), nullptr);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Vote &&
+				ins.a.condition != (invert ? PTXOperand::nPT : PTXOperand::PT)) {
+				status << "vote.sync predicate constant lost its value\n"; return false;
+			}
+		}
+		return true;
+	}
+
 	bool test_Activemask() {
 		for (const char* type : {"b32", "u32", "s32", "f32"}) {
 			const std::string text = ".version 8.0\n.target sm_86\n.entry active_mask() { .reg ." + std::string(type) +
@@ -11061,6 +11195,10 @@ public:
 			result = (result && test_F16Fma());
 			result = (result && test_Bf16Fma());
 			result = (result && test_MmaWarpParticipation());
+			result = (result && test_VoteSyncParser());
+			result = (result && test_VoteSyncDivergentArrival());
+			result = (result && test_VoteSync());
+			result = (result && test_VoteSyncDifferentMasks());
 			result = (result && test_Activemask());
 			result = (result && test_MovmatrixParser());
 			result = (result && test_Movmatrix());

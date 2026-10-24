@@ -11105,7 +11105,43 @@ void executive::CooperativeThreadArray::eval_Vote(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
 
+	if (instr.voteSync) {
+		const std::string error = instr.valid();
+		if (!error.empty()) throw RuntimeException(error, context.PC, instr);
+	}
 	reconvergenceMechanism->eval_Vote(context, instr);
+}
+
+void executive::CooperativeThreadArray::eval_VoteSync(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	std::vector<ir::PTXU32> results(threadCount);
+	for (int warpStart = 0; warpStart < threadCount; warpStart += 32) {
+		const int lanes = min(32, threadCount - warpStart);
+		ir::PTXU32 masks[32] = {}, ballot = 0, participants = 0;
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (!context.predicated(warpStart + lane, instr)) continue;
+			const ir::PTXU32 bit = ir::PTXU32(1) << lane;
+			participants |= bit;
+			masks[lane] = operandAsU32(warpStart + lane, instr.b);
+			const bool value = instr.a.condition == ir::PTXOperand::PT ||
+				(instr.a.condition != ir::PTXOperand::nPT && operandAsPredicate(warpStart + lane, instr.a));
+			if (value) ballot |= bit;
+		}
+		// All predicates and member masks are gathered before aliased destinations are written.
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (!context.predicated(warpStart + lane, instr)) continue;
+			const ir::PTXU32 members = masks[lane] & participants, selected = ballot & members;
+			results[warpStart + lane] = instr.vote == ir::PTXInstruction::Ballot ? selected :
+				instr.vote == ir::PTXInstruction::All ? selected == members :
+				instr.vote == ir::PTXInstruction::Any ? selected != 0 : 
+				selected == 0 || selected == members; // uni
+		}
+	}
+	for (int thread = 0; thread < threadCount; ++thread) {
+		if (!context.predicated(thread, instr)) continue;
+		if (instr.vote == ir::PTXInstruction::Ballot) setRegAsB32(thread, instr.d.reg, results[thread]);
+		else setRegAsPredicate(thread, instr.d.reg, results[thread]);
+	}
 }
 
 /*!

@@ -537,6 +537,8 @@ namespace executive {
 		void eval_Tex(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Trap(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Txq(CTAContext &context, const ir::PTXInstruction &instr);
+		// Calculate synchronized vote results after the scheduler releases its lanes.
+		void eval_VoteSync(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Vote(CTAContext &context, const ir::PTXInstruction &instr);		
 		void eval_Xor(CTAContext &context, const ir::PTXInstruction &instr);		
 		void eval_Reconverge(CTAContext &context,

@@ -1526,7 +1526,8 @@ namespace parser
 					<< string << " is not a predicate and can't be inverted.", 
 					NotPredicate );
 			}
-			operand.condition = ir::PTXOperand::InvPred;
+			operand.condition = operand.condition == ir::PTXOperand::PT
+				? ir::PTXOperand::nPT : ir::PTXOperand::InvPred;
 		}
 	
 		operandVector.push_back( OperandWrapper( operand, mode->space ) );		
@@ -1821,11 +1822,13 @@ namespace parser
 		operand = mode->operand;
 		if( invert )
 		{
-			operand.condition = ir::PTXOperand::InvPred;
+			operand.condition = mode->operand.condition == ir::PTXOperand::PT
+				? ir::PTXOperand::nPT : ir::PTXOperand::InvPred;
 		}
 		else
 		{
-			operand.condition = ir::PTXOperand::Pred;
+			operand.condition = mode->operand.condition == ir::PTXOperand::PT
+				? ir::PTXOperand::PT : ir::PTXOperand::Pred;
 		}
 		
 		if( mode->operand.addressMode == ir::PTXOperand::Address )

@@ -1936,6 +1936,15 @@ voteOperation : voteOperationId
 
 voteDataType : TOKEN_PRED | TOKEN_B32;
 
+vote : OPCODE_VOTE TOKEN_SYNC voteOperation voteDataType operand ',' operand ',' operand ';'
+{
+	auto mask = state.operandVector.back().operand;
+	state.instruction($<text>1, $<value>4);
+	if (mask.addressMode == ir::PTXOperand::Immediate && ir::PTXOperand::isInt(mask.type)) mask.type = ir::PTXOperand::u32;
+	state.statement.instruction.b = mask;
+	state.statement.instruction.voteSync = true;
+};
+
 vote : OPCODE_VOTE voteOperation voteDataType operand ',' operand ';'
 {
 	state.instruction( $<text>1, $<value>3 );

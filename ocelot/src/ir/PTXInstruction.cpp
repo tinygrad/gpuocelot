@@ -509,6 +509,7 @@ ir::PTXInstruction::PTXInstruction( Opcode op, const PTXOperand& _d,
 	mmaBColumnMajor = true;
 	mmaSparse = false;
 	matrixTranspose = false;
+	voteSync = false;
 	pg.condition = PTXOperand::PT;
 	pg.type = PTXOperand::pred;
 	barrierOperation = BarSync;
@@ -2781,6 +2782,18 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case Vote: {
+			if (voteSync) {
+				if (vote < All || vote > Ballot || modifier || vec != PTXOperand::v1 ||
+					type != (vote == Ballot ? PTXOperand::b32 : PTXOperand::pred)) return "invalid vote.sync mode/type/modifier";
+				for (const auto* operand : {&d, &a, &b})
+					if (operand->vec != PTXOperand::v1 || !operand->array.empty()) return "vote.sync requires scalar operands";
+				if (d.addressMode != PTXOperand::Register || a.addressMode != PTXOperand::Register ||
+					(vote == Ballot && d.bytes() != 4) || (vote != Ballot && d.condition != PTXOperand::Pred))
+					return "vote.sync requires scalar destination and source registers";
+				if ((b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) ||
+					b.bytes() != 4 || (!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32))
+					return "vote.sync member mask must be a 32-bit integer";
+			}
 			if( vote != Ballot && d.type != PTXOperand::pred ) {
 				return "destination must be a predicate";
 			}
@@ -3486,9 +3499,9 @@ std::string ir::PTXInstruction::toString() const {
 				+ ", [" + a.toString() + "]";
 		}
 		case Vote: {
-			return guard() + "vote." + toString( vote ) + "."
+			return guard() + (voteSync ? "vote.sync." : "vote.") + toString( vote ) + "."
 				+ PTXOperand::toString( type ) + " "
-				+ d.toString() + ", " + a.toString();
+				+ d.toString() + ", " + a.toString() + (voteSync ? ", " + b.toString() : "");
 		}
 		case Xor: {
 			return guard() + "xor." + PTXOperand::toString( type ) + " "
@@ -3549,6 +3562,7 @@ bool ir::PTXInstruction::hasSideEffects() const {
 }
 
 bool ir::PTXInstruction::canObserveSideEffects() const {
+	if (opcode == Vote && voteSync) return true;
 	if (opcode == Atom || opcode == Ldmatrix || opcode == Movmatrix || opcode == Activemask) return true;
 
 	if (opcode == Ld) {

@@ -804,7 +804,7 @@ std::string ir::PTXOperand::toString() const {
 	} else if( type == pred ) {
 		switch( condition ) {
 			case PT: return "%pt"; break;
-			case nPT: return "%pt"; break;
+			case nPT: return "!%pt"; break;
 			default:
 			{
 				if( !identifier.empty() ) {

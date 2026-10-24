@@ -480,6 +480,7 @@ namespace ir {
 		bool mmaSparse;
 		/*! Matrix transpose; ldmatrix uses vec for its .x1/.x2/.x4 count. */
 		bool matrixTranspose;
+		bool voteSync; // Vote uses b as its member mask when synchronized.
 		PTXOperand mmaSelector;
 
 		/*! Flag containing one or more floating-point modifiers */
