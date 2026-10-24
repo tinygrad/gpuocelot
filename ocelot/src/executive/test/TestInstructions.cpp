@@ -5435,6 +5435,108 @@ public:
 		return true;
 	}
 
+	bool test_MatchSynchronization() {
+		for (bool all : {false, true}) for (bool wide : {false, true}) for (int size : {1, 31, 32})
+		for (const char* destination : {"result", "a", "m", "_", "sinkp"}) {
+			const std::string dest = destination;
+			if ((wide && dest == "a") || (!all && (dest == "_" || dest == "sinkp"))) continue;
+			const std::string outputReg = dest == "_" || dest == "sinkp" ? "result" : dest;
+			const std::string operands = !all ? dest : dest == "sinkp" ? "result|_" : dest + "|q";
+			std::stringstream source;
+			source << ".version 8.0\n.target sm_86\n.entry delayed_match() { .reg .u64 ptr; .reg .b64 w; .reg .b32 lane,delay,result,a,m,round,predout; .reg .pred p,q; "
+				<< "mov.u32 lane,%tid.x; mov.u32 result,0xdeadbeef; mov.u32 predout,0xdeadbeef; mov.u32 round,2; again: mov.u32 m,0x7fffffff; "
+				<< "setp.ge.u32 p,lane,16; selp.u32 delay,1,0,p; mov.b32 a,0; mov.b64 w,0; setp.eq.u32 p,lane,16; @p mov.b32 a,round; "
+				<< "setp.eq.u32 p,round,1; @p mov.b32 a,0; cvt.u64.u32 w,a; shl.b64 w,w,32; "
+				<< "loop: setp.eq.u32 p,lane,31; @p bra done; setp.ne.u32 p,delay,0; @p bra later; match." << (all ? "all" : "any") << ".sync." << (wide ? "b64 " : "b32 ")
+				<< operands << "," << (wide ? "w" : "a") << ",m; " << (all && dest != "sinkp" ? "selp.u32 predout,1,0,q; " : "")
+				<< "sub.u32 round,round,1; setp.ne.u32 p,round,0; @p bra again; bra done; later: sub.u32 delay,delay,1; bra loop; "
+				<< "done: st.global.u32 [ptr]," << outputReg << "; st.global.u32 [ptr+4],predout; ret; }";
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("delayed_match"), nullptr);
+			kernel.setKernelShape(size,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (int run = 0; run < 2; ++run) {
+				local.reset(); PTXU32 output[32][2] = {};
+				for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::St)
+					for (int lane = 0; lane < size; ++lane) local.setRegAsU64(lane, ins.d.reg, (PTXU64)&output[lane]);
+				local.execute();
+				for (int lane = 0; lane < size; ++lane) {
+					const PTXU32 members = size == 1 ? 1 : 0x7fffffffu;
+					const PTXU32 expected = lane == 31 ? (dest == "a" ? 0 : dest == "m" ? 0x7fffffffu : 0xdeadbeef) : dest == "_" ? 0xdeadbeef : members;
+					const PTXU32 predicate = lane == 31 || !all || dest == "sinkp" ? 0xdeadbeef : 1;
+					if (output[lane][0] != expected || output[lane][1] != predicate) { status << "match synchronization mismatch " << all << " " << wide << " " << dest << " CTA " << size << " lane " << lane << "\n"; return false; }
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_MatchExecution() {
+		for (bool all : {false, true}) for (bool wide : {false, true}) for (int size : {1, 31, 64})
+		for (int alias : {0, 1, 2}) for (int scenario : {0, 1, 2, 3}) {
+			if (wide && alias == 1) continue;
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry matching() { .reg .b32 d,a,m; .reg .b64 w; .reg .pred p; @!p match." +
+				std::string(all ? "all" : "any") + ".sync." + (wide ? "b64 " : "b32 ") + (all ? "d|p," : "d,") + (wide ? "w" : "a") + ",m; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("matching"), nullptr);
+			kernel.setKernelShape(size,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (auto ins : kernel.instructions) if (ins.opcode == PTXInstruction::Match) {
+				if (alias) ins.d.reg = alias == 1 ? ins.a.reg : ins.b.reg;
+				auto& context = local.getActiveContext(); PTXU32 initial[64];
+				for (int thread = 0; thread < size; ++thread) {
+					const int lane = thread % 32;
+					const PTXU64 value = scenario == 1 ? lane % 2 : wide ? (PTXU64(lane % 4) << 32) | (lane % 2) : lane % 4;
+					local.setRegAsB32(thread, ins.d.reg, 0xdeadbeef);
+					if (wide) local.setRegAsB64(thread, ins.a.reg, value); else local.setRegAsB32(thread, ins.a.reg, value);
+					local.setRegAsB32(thread, ins.b.reg, lane % 2 ? 0xaaaaaaaau : 0x55555555u);
+					local.setRegAsPredicate(thread, ins.pg.reg, scenario == 3);
+					context.active[thread] = scenario != 2 || lane % 2;
+					initial[thread] = local.getRegAsB32(thread, ins.d.reg);
+				}
+				local.eval_WarpSync(context, ins);
+				for (int thread = 0; thread < size; ++thread) {
+					const int lane = thread % 32;
+					const bool executing = scenario != 3 && (scenario != 2 || lane % 2), uniform = scenario == 1 || size == 1;
+					const PTXU32 existing = size == 1 ? 1 : size == 31 ? 0x7fffffffu : 0xffffffffu;
+					const PTXU32 members = (lane % 2 ? 0xaaaaaaaau : 0x55555555u) & existing;
+					const PTXU32 expected = !executing ? initial[thread] : all ? (uniform ? members : 0) : (scenario == 1 ? members : (0x11111111u << (lane % 4)) & existing);
+					if (local.getRegAsB32(thread, ins.d.reg) != expected || (all && local.getRegAsPredicate(thread, ins.pq.reg) != (executing ? uniform : scenario == 3))) {
+						status << "match execution mismatch at thread " << thread << "\n"; return false;
+					}
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_MatchParser() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry matching() { .reg .b32 d,a,m; .reg .b64 w; .reg .pred p; .reg .f16x2 h; ";
+		for (const char* mode : {"any", "all"}) for (const char* type : {"b32", "b64"})
+		for (const char* mask : {"m", "0xffffffff", "-1", "0"}) for (const char* guard : {"", "@!p "}) {
+			const std::string operation = "match." + std::string(mode) + ".sync." + type + " ";
+			const std::string input = std::string(type) == "b64" ? "w" : "a";
+			for (const char* dest : {"d", "d|p", "_|p", "d|_"}) {
+				if (std::string(mode) == "any" && std::string(dest) != "d") continue;
+				std::stringstream source(prefix + guard + operation + dest + "," + input + "," + mask + "; ret; }"), printed;
+				Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+				EmulatedKernel kernel(again.getKernel("matching"), nullptr); int found = 0;
+				for (const auto& ins : kernel.instructions) if (PTXInstruction::toString(ins.opcode) == "match") {
+					++found; if (!ins.valid().empty() || !ins.canObserveSideEffects()) return false;
+					auto invalid = ins; invalid.modifier = PTXInstruction::sat; if (invalid.valid().empty()) return false;
+				}
+				if (found != 1) return false;
+			}
+			for (const char* operands : {"w,a,m", "d,a,w", "d,a,0f3f800000", "d|w,a,m", "d|!p,a,m", "_|_,a,m"}) {
+				std::stringstream source(prefix + operation + operands + "; ret; }"); bool rejected = false;
+				try { Module bad; bad.load(source); } catch (const std::exception&) { rejected = true; }
+				if (!rejected) { status << "accepted invalid match operands\n"; return false; }
+			}
+		}
+		for (const char* instruction : {"match.any.b32 d,a,m;", "match.any.sync.b16 d,a,m;", "match.uni.sync.b32 d,a,m;", "match.any.sync.b32 d|p,a,m;", "match.any.sync.b32 d,a;", "match.all.sync.b64 d,a,m;"}) {
+			std::stringstream source(prefix + instruction + " ret; }"); bool rejected = false;
+			try { Module bad; bad.load(source); } catch (const std::exception&) { rejected = true; }
+			if (!rejected) { status << "accepted invalid match form\n"; return false; }
+		}
+		return true;
+	}
+
 	bool test_ReduxParser() {
 		const std::string prefix = ".version 8.0\n.target sm_86\n.entry redux_parse() { .reg .b32 d,a,m; .reg .b64 w; .reg .pred p; .reg .v2 .b32 v; ";
 		for (const char* form : {"add.s32", "add.u32", "min.s32", "min.u32", "max.s32", "max.u32", "and.b32", "or.b32", "xor.b32"})
@@ -11317,6 +11419,9 @@ public:
 			result = (result && test_F16Fma());
 			result = (result && test_Bf16Fma());
 			result = (result && test_MmaWarpParticipation());
+			result = (result && test_MatchParser());
+			result = (result && test_MatchExecution());
+			result = (result && test_MatchSynchronization());
 			result = (result && test_ReduxParser());
 			result = (result && test_ReduxExecution());
 			result = (result && test_ReduxSynchronization());

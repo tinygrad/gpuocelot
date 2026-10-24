@@ -441,6 +441,7 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case Prefetchu:  return "prefetchu";  break;
 		case Prmt:       return "prmt";       break;
 		case Rcp:        return "rcp";        break;
+		case Match:      return "match";
 		case Redux:      return "redux";
 		case Red:        return "red";        break;
 		case Rem:        return "rem";        break;
@@ -511,6 +512,7 @@ ir::PTXInstruction::PTXInstruction( Opcode op, const PTXOperand& _d,
 	mmaSparse = false;
 	matrixTranspose = false;
 	voteSync = false;
+	matchAll = false;
 	pg.condition = PTXOperand::PT;
 	pg.type = PTXOperand::pred;
 	barrierOperation = BarSync;
@@ -1845,6 +1847,22 @@ std::string ir::PTXInstruction::valid() const {
 						+ " only valid for float point instructions.";
 				}
 			}
+			break;
+		}
+		case Match: {
+			if ((type != PTXOperand::b32 && type != PTXOperand::b64) || modifier || vec != PTXOperand::v1) return "invalid match type/modifier";
+			for (const auto* operand : {&d, &a, &b, &pq})
+				if (operand->vec != PTXOperand::v1 || !operand->array.empty()) return "match requires scalar operands";
+			if (!(d.addressMode == PTXOperand::Register && d.bytes() == 4) &&
+				!(matchAll && d.addressMode == PTXOperand::BitBucket)) return "match requires a 32-bit destination";
+			if ((a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Immediate) ||
+				a.bytes() != PTXOperand::bytes(type)) return "match source must have instruction width";
+			if ((b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) || b.bytes() != 4 ||
+				(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32)) return "match requires a 32-bit integer member mask";
+			if (pq.addressMode != PTXOperand::Invalid && (!matchAll ||
+				!(pq.addressMode == PTXOperand::BitBucket || (pq.addressMode == PTXOperand::Register &&
+				pq.type == PTXOperand::pred && pq.condition == PTXOperand::Pred)))) return "invalid match predicate destination";
+			if (d.addressMode == PTXOperand::BitBucket && pq.addressMode == PTXOperand::BitBucket) return "match cannot discard both destinations";
 			break;
 		}
 		case Redux: {
@@ -3222,6 +3240,9 @@ std::string ir::PTXInstruction::toString() const {
 				+ PTXOperand::toString( type ) + " "
 				+ d.toString() + ", " + a.toString() + ", " + b.toString();
 		}
+		case Match:
+			return guard() + "match." + (matchAll ? "all" : "any") + ".sync." + PTXOperand::toString(type) + " " +
+				d.toString() + (pq.addressMode == PTXOperand::Invalid ? "" : "|" + pq.toString()) + ", " + a.toString() + ", " + b.toString();
 		case Redux:
 			return guard() + "redux.sync." + toString(reductionOperation) + "." + PTXOperand::toString(type) +
 				" " + d.toString() + ", " + a.toString() + ", " + b.toString();
@@ -3579,7 +3600,7 @@ bool ir::PTXInstruction::hasSideEffects() const {
 }
 
 bool ir::PTXInstruction::canObserveSideEffects() const {
-	if (opcode == Redux || (opcode == Vote && voteSync)) return true;
+	if (opcode == Match || opcode == Redux || (opcode == Vote && voteSync)) return true;
 	if (opcode == Atom || opcode == Ldmatrix || opcode == Movmatrix || opcode == Activemask) return true;
 
 	if (opcode == Ld) {

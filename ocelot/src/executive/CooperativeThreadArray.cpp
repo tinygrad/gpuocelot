@@ -857,9 +857,10 @@ void executive::CooperativeThreadArray::execute(int PC) {
 				eval_Tex(context, instr); break;
 			case ir::PTXInstruction::Trap:
 				eval_Trap(context, instr); break;
+			case ir::PTXInstruction::Match:
 			case ir::PTXInstruction::Redux:
 			case ir::PTXInstruction::Vote: {
-				const bool warpSync = instr.voteSync || instr.opcode == ir::PTXInstruction::Redux;
+				const bool warpSync = instr.voteSync || instr.opcode == ir::PTXInstruction::Redux || instr.opcode == ir::PTXInstruction::Match;
 				if (warpSync) eval_WarpSync(context, instr);
 				else reconvergenceMechanism->eval_Vote(context, instr);
 				break;
@@ -11145,6 +11146,43 @@ void executive::CooperativeThreadArray::eval_Vote(CTAContext &context,
 		if (!context.predicated(thread, instr)) continue;
 		if (instr.vote == ir::PTXInstruction::Ballot) setRegAsB32(thread, instr.d.reg, results[thread]);
 		else setRegAsPredicate(thread, instr.d.reg, results[thread]);
+	}
+}
+
+void executive::CooperativeThreadArray::eval_Match(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	std::vector<ir::PTXU32> results(threadCount);
+	std::vector<bool> unanimous(threadCount);
+	for (int warpStart = 0; warpStart < threadCount; warpStart += 32) {
+		const int lanes = min(32, threadCount - warpStart);
+		ir::PTXU64 values[32] = {};
+		ir::PTXU32 masks[32] = {}, participants = 0;
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (!context.predicated(warpStart + lane, instr)) continue;
+			participants |= ir::PTXU32(1) << lane;
+			masks[lane] = operandAsU32(warpStart + lane, instr.b);
+			values[lane] = instr.type == ir::PTXOperand::b64 ?
+				operandAsB64(warpStart + lane, instr.a) : operandAsB32(warpStart + lane, instr.a);
+		}
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (!context.predicated(warpStart + lane, instr)) continue;
+			const ir::PTXU32 members = masks[lane] & participants;
+			ir::PTXU32 matching = 0;
+			for (int member = 0; member < lanes; ++member) {
+				const ir::PTXU32 bit = ir::PTXU32(1) << member;
+				if ((members & bit) && values[member] == values[lane])
+					matching |= bit;
+			}
+			const bool allMatch = matching == members;
+			unanimous[warpStart + lane] = allMatch;
+			results[warpStart + lane] = instr.matchAll ? (allMatch ? members : 0) : matching;
+		}
+	}
+	// Gather every source, mask and result before writing aliased destinations.
+	for (int thread = 0; thread < threadCount; ++thread) {
+		if (!context.predicated(thread, instr)) continue;
+		if (instr.d.addressMode != ir::PTXOperand::BitBucket) setRegAsB32(thread, instr.d.reg, results[thread]);
+		if (instr.pq.addressMode == ir::PTXOperand::Register) setRegAsPredicate(thread, instr.pq.reg, unanimous[thread]);
 	}
 }
 

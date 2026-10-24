@@ -61,7 +61,7 @@
 %token<text> OPCODE_SULD OPCODE_TXQ OPCODE_SUST OPCODE_SURED OPCODE_SUQ OPCODE_SZEXT
 %token<text> OPCODE_BRA OPCODE_CALL OPCODE_RET OPCODE_EXIT OPCODE_TRAP 
 %token<text> OPCODE_BRKPT OPCODE_SUBC OPCODE_TEX OPCODE_LD OPCODE_BARSYNC
-%token<text> OPCODE_ATOM OPCODE_RED OPCODE_REDUX OPCODE_NOT OPCODE_CNOT OPCODE_VOTE
+%token<text> OPCODE_ATOM OPCODE_RED OPCODE_MATCH OPCODE_REDUX OPCODE_NOT OPCODE_CNOT OPCODE_VOTE
 %token<text> OPCODE_SHR OPCODE_SHL OPCODE_FMA OPCODE_MEMBAR OPCODE_PMEVENT
 %token<text> OPCODE_POPC OPCODE_PRMT OPCODE_CLZ OPCODE_BFIND OPCODE_BREV 
 %token<text> OPCODE_BFI OPCODE_BFE OPCODE_BMSK OPCODE_FNS OPCODE_TANH OPCODE_TESTP OPCODE_TLD4 OPCODE_BAR
@@ -695,7 +695,7 @@ opcode : OPCODE_COS | OPCODE_SQRT | OPCODE_ADD | OPCODE_RSQRT | OPCODE_ADDC
 	| OPCODE_BRA | OPCODE_CALL | OPCODE_RET | OPCODE_EXIT | OPCODE_TRAP 
 	| OPCODE_BRKPT | OPCODE_SUBC | OPCODE_TEX | OPCODE_LD | OPCODE_LDU
 	| OPCODE_BARSYNC | OPCODE_SULD | OPCODE_TXQ | OPCODE_SUST | OPCODE_SURED 
-	| OPCODE_SUQ | OPCODE_SZEXT | OPCODE_ATOM | OPCODE_RED | OPCODE_REDUX | OPCODE_NOT | OPCODE_CNOT
+	| OPCODE_SUQ | OPCODE_SZEXT | OPCODE_ATOM | OPCODE_RED | OPCODE_REDUX | OPCODE_MATCH | OPCODE_NOT | OPCODE_CNOT
 	| OPCODE_VOTE | OPCODE_SHR | OPCODE_SHL | OPCODE_MEMBAR | OPCODE_FENCE | OPCODE_FMA
 	| OPCODE_PMEVENT | OPCODE_POPC | OPCODE_CLZ | OPCODE_BFIND | OPCODE_BREV
 	| OPCODE_BFI | OPCODE_BMSK | OPCODE_FNS | OPCODE_TANH | OPCODE_TESTP | OPCODE_TLD4
@@ -945,7 +945,7 @@ instruction : activemask | ftzInstruction2 | ftzInstruction3 | approxInstruction
 	| basicInstruction3 | bfe | bfi | bfind | bmsk | brev | branch | addOrSub
 	| addCOrSubC | atom | bar | brkpt | clz | cvt | cvta | isspacep | div | dp2a | dp4a | exit
 	| fence | fns | ld | ldu | ldmatrix | lop3 | mad | mad24 | madc | mma | membar | mov | movmatrix | mul24 | mul | notInstruction
-	| pmevent | popc | prefetch | prefetchu | prmt | rcpSqrtInstruction | red | redux
+	| pmevent | popc | prefetch | prefetchu | prmt | rcpSqrtInstruction | red | redux | match
 	| ret | sad | selp | set | setp | slct | st | suld | suq | sured | sust | szext
 	| testp | tex | tld4 | trap | txq | vote | shfl | shf;
 
@@ -1660,6 +1660,21 @@ reductionSemantics : TOKEN_RELAXED { state.semantics( $<value>1 ); }
 optionalReductionSemantics : reductionSemantics
 	| /* empty */ { state.semantics( TOKEN_RELAXED ); }
 	;
+
+matchMode : TOKEN_ANY | TOKEN_ALL;
+
+match : OPCODE_MATCH matchMode TOKEN_SYNC dataType predicatePair ',' operand ',' operand ';'
+{
+	const auto operands = state.operandVector;
+	state.instruction($<text>1, $<value>4);
+	auto& instr = state.statement.instruction;
+	instr.matchAll = $<value>2 == TOKEN_ALL;
+	instr.pq = operands.size() == 5 ? operands[2].operand : ir::PTXOperand();
+	instr.a = operands[operands.size() - 2].operand;
+	if (instr.a.addressMode == ir::PTXOperand::Immediate) instr.a.type = instr.type;
+	instr.b = operands.back().operand;
+	if (instr.b.addressMode == ir::PTXOperand::Immediate && ir::PTXOperand::isInt(instr.b.type)) instr.b.type = ir::PTXOperand::u32;
+};
 
 redux : OPCODE_REDUX TOKEN_SYNC reductionOperation dataType operand ',' operand ',' operand ';'
 {
