@@ -1813,6 +1813,23 @@ shuffleModifier : shuffleModifierId
 	state.shuffle( $<value>1 );
 };
 
+shfl : OPCODE_SHFL TOKEN_SYNC shuffleModifier dataType predicatePair ',' operand ',' operand ',' operand ',' operand ';'
+{
+	const auto operands = state.operandVector;
+	state.instruction($<text>1, $<value>4);
+	auto& instr = state.statement.instruction;
+	instr.opcode = ir::PTXInstruction::ShflSync;
+	instr.pq = operands.size() == 7 ? operands[2].operand : ir::PTXOperand();
+	const unsigned first = operands.size() - 4;
+	instr.a = operands[first].operand;
+	instr.b = operands[first + 1].operand;
+	instr.c = operands[first + 2].operand;
+	instr.q = operands.back().operand;
+	if (instr.a.addressMode == ir::PTXOperand::Immediate && ir::PTXOperand::isInt(instr.a.type)) instr.a.type = ir::PTXOperand::b32;
+	for (auto* control : {&instr.b, &instr.c, &instr.q})
+		if (control->addressMode == ir::PTXOperand::Immediate && ir::PTXOperand::isInt(control->type)) control->type = ir::PTXOperand::u32;
+};
+
 shfl : OPCODE_SHFL shuffleModifier dataType predicatePair ',' operand ','
 	operand ',' operand ';'
 {

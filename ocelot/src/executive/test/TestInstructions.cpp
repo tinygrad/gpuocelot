@@ -16,6 +16,7 @@
 #include <hydrazine/debug.h>
 
 #include <ocelot/ir/Module.h>
+#include <ocelot/analysis/DataflowGraph.h>
 #include <ocelot/ir/ControlFlowGraph.h>
 #include <ocelot/executive/EmulatedKernel.h>
 #include <ocelot/executive/RuntimeException.h>
@@ -5433,6 +5434,130 @@ public:
 			}
 		}
 		return true;
+	}
+
+	bool test_ShflSyncSynchronization() {
+		for (const char* mode : {"up", "down", "bfly", "idx"}) for (int size : {1, 31, 32})
+		for (const char* destination : {"result", "a", "b", "c", "m", "_", "sinkp", "nonep"}) {
+			const std::string name = mode, dest = destination;
+			const std::string data = dest == "_" || dest == "sinkp" || dest == "nonep" ? "result" : dest;
+			const std::string operands = dest == "sinkp" ? "result|_" : dest == "nonep" ? "result" : dest + "|q";
+			const int offset = size == 1 ? 0 : 16, clamp = size == 1 || name == "up" ? 0 : 30;
+			std::stringstream source;
+			source << ".version 8.0\n.target sm_86\n.entry delayed_shuffle() { .reg .u64 ptr,out,off; .reg .u32 lane,delay,result,a,b,c,m,round,predout,slot; .reg .pred p,q; "
+				<< "mov.u32 lane,%tid.x; mov.u32 result,0xdeadbeef; mov.u32 predout,0xdeadbeef; mov.u32 round,2; "
+				<< "again: mov.u32 b," << offset << "; mov.u32 c," << clamp << "; mov.u32 m," << (size == 1 ? "1" : "0x7fffffff") << "; mul.lo.u32 a,round,100; add.u32 a,a,lane; "
+				<< "setp." << (name == "up" ? "lt" : "ge") << ".u32 p,lane,16; selp.u32 delay,1,0,p; "
+				<< "loop: setp.eq.u32 p,lane,31; @p bra done; setp.ne.u32 p,delay,0; @p bra later; shfl.sync." << name << ".b32 " << operands << ",a,b,c,m; "
+				<< (dest == "sinkp" || dest == "nonep" ? "" : "selp.u32 predout,1,0,q; ")
+				<< "sub.u32 slot,2,round; mul.wide.u32 off,slot,8; add.u64 out,ptr,off; st.global.u32 [out]," << data << "; st.global.u32 [out+4],predout; "
+				<< "sub.u32 round,round,1; setp.ne.u32 p,round,0; @p bra again; bra done; later: sub.u32 delay,delay,1; bra loop; done: ret; }";
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("delayed_shuffle"), nullptr);
+			kernel.setKernelShape(size,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (int run = 0; run < 2; ++run) {
+				local.reset(); PTXU32 output[32][4];
+				for (auto& row : output) for (auto& word : row) word = 0xdeadbeef;
+				for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Add && ins.type == PTXOperand::u64)
+					for (int lane = 0; lane < size; ++lane) local.setRegAsU64(lane, ins.a.reg, (PTXU64)&output[lane]);
+				local.execute();
+				for (int lane = 0; lane < size; ++lane) for (int round = 0; round < 2; ++round) {
+					int from = lane; bool valid = true;
+					if (size != 1) {
+						if (name == "up") { valid = lane >= 16; if (valid) from = lane - 16; }
+						if (name == "down") { valid = lane < 15; if (valid) from = lane + 16; }
+						if (name == "bfly") { valid = lane != 15; if (valid) from = lane ^ 16; }
+						if (name == "idx") from = 16;
+					}
+					const PTXU32 expected = lane == 31 || dest == "_" ? 0xdeadbeef : (2 - round) * 100 + from;
+					const PTXU32 predicate = lane == 31 || dest == "sinkp" || dest == "nonep" ? 0xdeadbeef : valid;
+					if (output[lane][round * 2] != expected || output[lane][round * 2 + 1] != predicate) { status << "shfl.sync waiting mismatch " << name << " " << dest << " CTA " << size << " lane " << lane << " round " << round << "\n"; return false; }
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_ShflSyncExecution() {
+		// Frozen source lanes use digits 0..9,a..v; predicate bits describe in-range lanes.
+		const struct { const char* mode; PTXU32 b, c; const char* sources; PTXU32 predicates; } cases[] = {
+			{"up", 0x00000001u, 0x00000000u, "00123456789abcdefghijklmnopqrstu", 0xfffffffeu},
+			{"up", 0x80000021u, 0x00001800u, "00123456889abcdegghijklmoopqrstu", 0xfefefefeu},
+			{"up", 0x00000002u, 0x00000005u, "012345656789abcdefghijklmnopqrst", 0xffffff80u},
+			{"down", 0x00000001u, 0x0000001fu, "123456789abcdefghijklmnopqrstuvv", 0x7fffffffu},
+			{"down", 0x00000007u, 0x00001807u, "71234567f9abcdefnhijklmnvpqrstuv", 0x01010101u},
+			{"down", 0x00000007u, 0x0000150au, "789abcde89abcdefnopqrstuopqrstuv", 0x00ff00ffu},
+			{"bfly", 0x00000001u, 0x0000001fu, "1032547698badcfehgjilknmporqtsvu", 0xffffffffu},
+			{"bfly", 0x80000010u, 0x00001807u, "0123456789abcdef0123456789abcdef", 0xffff0000u},
+			{"bfly", 0x0000001fu, 0x0000150au, "0123456789abcdeffedcba9876543210", 0xffff0000u},
+			{"idx", 0x80000021u, 0x0000181fu, "1111111199999999hhhhhhhhpppppppp", 0xffffffffu},
+			{"idx", 0x0000001fu, 0x0000150au, "ababefefababefefqrqruvuvqrqruvuv", 0xffffffffu},
+			{"idx", 0x0000000fu, 0x00000003u, "0123456789abcdefghijklmnopqrstuv", 0x00000000u},
+		};
+		const std::string alphabet = "0123456789abcdefghijklmnopqrstuv";
+		for (int mode = 0; mode < 4; ++mode) for (int phase = 0; phase < 3; ++phase)
+		for (int alias = 0; alias < 5; ++alias) for (bool disabled : {false, true}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry shuffle() { .reg .b32 d,a,b,c,m; .reg .pred p; @!p shfl.sync." +
+				std::string(cases[mode * 3].mode) + ".b32 d|p,a,b,c,m; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("shuffle"), nullptr);
+			kernel.setKernelShape(64,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::ShflSync) {
+				if (alias) ins.d.reg = alias == 1 ? ins.a.reg : alias == 2 ? ins.b.reg : alias == 3 ? ins.c.reg : ins.q.reg;
+				PTXU32 initial[64];
+				for (int thread = 0; thread < 64; ++thread) {
+					const int lane = thread % 32; const auto& test = cases[mode * 3 + (phase + lane) % 3];
+					local.setRegAsB32(thread, ins.d.reg, 0xdeadbeef);
+					local.setRegAsB32(thread, ins.a.reg, PTXU32(lane) * 0x11111111u ^ (thread / 32 * 0x01010101u));
+					local.setRegAsU32(thread, ins.b.reg, test.b | 0x40000000u); local.setRegAsU32(thread, ins.c.reg, test.c | 0xe000e0e0u);
+					local.setRegAsU32(thread, ins.q.reg, 0xffffffffu); local.setRegAsPredicate(thread, ins.pg.reg, disabled);
+					initial[thread] = local.getRegAsB32(thread, ins.d.reg);
+				}
+				local.execute();
+				for (int thread = 0; thread < 64; ++thread) {
+					const int lane = thread % 32; const auto& test = cases[mode * 3 + (phase + lane) % 3];
+					const PTXU32 from = alphabet.find(test.sources[lane]);
+					const PTXU32 expected = disabled ? initial[thread] : (from * 0x11111111u) ^ (thread / 32 * 0x01010101u);
+					if (local.getRegAsB32(thread, ins.d.reg) != expected || local.getRegAsPredicate(thread, ins.pq.reg) != (disabled || (test.predicates & (PTXU32(1) << lane)))) {
+						status << "shfl.sync execution mismatch " << test.mode << " thread " << thread << " alias " << alias << "\n"; return false;
+					}
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_ShflSyncParser() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry shuffle() { .reg .b32 d,a,b,c,m; .reg .b64 w; .reg .f16x2 h; .reg .pred p; .reg .v2 .b32 v; mov.b32 m,0xffffffff; ";
+		for (const char* mode : {"up", "down", "bfly", "idx"}) for (const char* guard : {"", "@!p "})
+		for (const char* dest : {"d", "d|p", "d|_", "_|p"}) for (const char* inputs : {"a,b,c,m", "h,1,31,0xffffffff", "v.x,33,0x1807,-1", "7,WARP_SZ,31,WARP_SZ", "WARP_SZ,b,c,m"}) {
+			const std::string operation = "shfl.sync." + std::string(mode) + ".b32 ";
+			std::stringstream source(prefix + guard + operation + dest + "," + inputs + "; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("shuffle"), nullptr); int found = 0;
+			for (const auto& ins : kernel.instructions) if (PTXInstruction::toString(ins.opcode) == "shfl.sync") {
+				++found; if (!ins.valid().empty() || !ins.canObserveSideEffects()) return false;
+				auto invalid = ins; invalid.modifier = PTXInstruction::sat; if (invalid.valid().empty()) return false;
+				if (ins.q.addressMode == PTXOperand::Register) {
+					for (const auto& definition : kernel.instructions) if (definition.opcode == PTXInstruction::Mov && definition.d.reg != ins.q.reg) return false;
+					auto copy = ins; analysis::DataflowGraph graph; const auto converted = graph.convert(copy); bool maskFound = false;
+					for (const auto& source : converted.s) maskFound |= source.pointer == &copy.q.reg;
+					if (!maskFound) return false;
+				}
+			}
+			if (found != 1) return false;
+		}
+		for (const char* operands : {"w,a,b,c,m", "d,w,b,c,m", "d,a,w,c,m", "d,a,b,w,m", "d,a,b,c,w", "d,a,b,c,0f3f800000", "d,a,0f3f800000,c,m", "d,a,b,0f3f800000,m", "d|!p,a,b,c,m", "d|w,a,b,c,m", "d,v,b,c,m"}) {
+			std::stringstream source(prefix + "shfl.sync.idx.b32 " + operands + "; ret; }"); bool rejected = false;
+			try { Module bad; bad.load(source); } catch (const std::exception&) { rejected = true; }
+			if (!rejected) { status << "accepted malformed shfl.sync\n"; return false; }
+		}
+		for (const char* instruction : {"shfl.sync.idx.b64 d,a,b,c,m;", "shfl.sync.idx.b32 d,a,b,c;", "shfl.sync.bad.b32 d,a,b,c,m;", "shfl.sync.idx.b32 d,a,b,c,m,m;", "shfl.sync.idx.b32 d,a,b,c,v;"}) {
+			std::stringstream source(prefix + instruction + " ret; }"); bool rejected = false;
+			try { Module bad; bad.load(source); } catch (const std::exception&) { rejected = true; }
+			if (!rejected) return false;
+		}
+		std::stringstream legacy(prefix + "shfl.up.b32 d,a,b,c; ret; }"), printed;
+		Module parsed; parsed.load(legacy); parsed.write(printed); Module again; again.load(printed);
+		return printed.str().find("shfl.up.b32") != std::string::npos;
 	}
 
 	bool test_WarpRegisters() {
@@ -11498,6 +11623,9 @@ public:
 			result = (result && test_F16Fma());
 			result = (result && test_Bf16Fma());
 			result = (result && test_MmaWarpParticipation());
+			result = (result && test_ShflSyncParser());
+			result = (result && test_ShflSyncExecution());
+			result = (result && test_ShflSyncSynchronization());
 			result = (result && test_WarpRegisters());
 			result = (result && test_BarWarpParser());
 			result = (result && test_BarWarpSynchronization());

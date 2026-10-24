@@ -826,6 +826,8 @@ void executive::CooperativeThreadArray::execute(int PC) {
 				eval_Tex(context, instr); break;
 			case ir::PTXInstruction::Trap:
 				eval_Trap(context, instr); break;
+			case ir::PTXInstruction::ShflSync:
+				eval_WarpSync(context, instr); break;
 			case ir::PTXInstruction::Match:
 			case ir::PTXInstruction::Redux:
 			case ir::PTXInstruction::Vote: {
@@ -11115,6 +11117,42 @@ void executive::CooperativeThreadArray::eval_Vote(CTAContext &context,
 		if (!context.predicated(thread, instr)) continue;
 		if (instr.vote == ir::PTXInstruction::Ballot) setRegAsB32(thread, instr.d.reg, results[thread]);
 		else setRegAsPredicate(thread, instr.d.reg, results[thread]);
+	}
+}
+
+void executive::CooperativeThreadArray::eval_Shfl(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	std::vector<ir::PTXU32> results(threadCount);
+	std::vector<bool> predicates(threadCount);
+	for (int warpStart = 0; warpStart < threadCount; warpStart += 32) {
+		const int lanes = min(32, threadCount - warpStart);
+		ir::PTXU32 values[32] = {};
+		for (int lane = 0; lane < lanes; ++lane)
+			if (context.predicated(warpStart + lane, instr)) values[lane] = operandAsB32(warpStart + lane, instr.a);
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (!context.predicated(warpStart + lane, instr)) continue;
+			const int offset = operandAsU32(warpStart + lane, instr.b) & 31;
+			const ir::PTXU32 control = operandAsU32(warpStart + lane, instr.c);
+			const int segmask = (control >> 8) & 31;
+			const int limit = (lane & segmask) | ((control & 31) & ~segmask);
+			int from = lane;
+			bool inRange = false;
+			switch (instr.shuffleMode) {
+				case ir::PTXInstruction::Up: from = lane - offset; inRange = from >= limit; break;
+				case ir::PTXInstruction::Down: from = lane + offset; inRange = from <= limit; break;
+				case ir::PTXInstruction::Bfly: from = lane ^ offset; inRange = from <= limit; break;
+				case ir::PTXInstruction::Idx: from = (lane & segmask) | (offset & ~segmask); inRange = from <= limit; break;
+				default: throw RuntimeException("invalid shuffle mode", context.PC, instr);
+			}
+			predicates[warpStart + lane] = inRange;
+			results[warpStart + lane] = values[inRange ? from : lane];
+		}
+	}
+	// All data and controls are read before writing aliased data or predicate destinations.
+	for (int thread = 0; thread < threadCount; ++thread) {
+		if (!context.predicated(thread, instr)) continue;
+		if (instr.d.addressMode != ir::PTXOperand::BitBucket) setRegAsB32(thread, instr.d.reg, results[thread]);
+		if (instr.pq.addressMode == ir::PTXOperand::Register) setRegAsPredicate(thread, instr.pq.reg, predicates[thread]);
 	}
 }
 

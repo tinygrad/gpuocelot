@@ -102,6 +102,7 @@ namespace ir {
 			SetP,
 			Shf,
 			Shfl,
+			ShflSync,
 			Shl,
 			Shr,
 			Sin,
@@ -636,7 +637,7 @@ namespace ir {
 
 		/*! Lookup table and predicate input for lop3 */
 		PTXOperand immLut;
-		/*! Predicate input for lop3; metadata register for sparse MMA. */
+		/*! Predicate input for lop3; sparse MMA metadata; shfl.sync member mask. */
 		PTXOperand q;
 
 		/*  Runtime annotations 

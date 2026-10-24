@@ -48,6 +48,7 @@ void executive::ReconvergenceMechanism::eval_WarpSync(CTAContext &context,
 	if (instr.opcode == ir::PTXInstruction::BarWarp) return;
 	if (instr.opcode == ir::PTXInstruction::Redux) cta->eval_Redux(context, instr);
 	else if (instr.opcode == ir::PTXInstruction::Match) cta->eval_Match(context, instr);
+	else if (instr.opcode == ir::PTXInstruction::ShflSync) cta->eval_Shfl(context, instr);
 	else cta->eval_Vote(context, instr);
 }
 
@@ -334,6 +335,7 @@ void executive::ReconvergenceIPDOM::eval_Exit(executive::CTAContext &context,
 
 void executive::ReconvergenceIPDOM::eval_WarpSync(CTAContext& context,
 	const ir::PTXInstruction& instr) {
+	const auto& memberMask = instr.opcode == ir::PTXInstruction::ShflSync ? instr.q : instr.b;
 	CTAContext combined(context);
 	if (!pendingVote.empty()) {
 		const auto& waiting = pendingVote.back();
@@ -344,7 +346,7 @@ void executive::ReconvergenceIPDOM::eval_WarpSync(CTAContext& context,
 	}
 	const auto arrived = combined.predicateMask(instr);
 	const ir::PTXU32 firstMask = arrived.any() ?
-		cta->operandAsU32(arrived.find_first(), instr.b) : 0;
+		cta->operandAsU32(arrived.find_first(), memberMask) : 0;
 	bool ready = true, sameGroup = true;
 	for (int start = 0; start < cta->threadCount; start += 32) {
 		const int lanes = std::min(32, cta->threadCount - start);
@@ -356,7 +358,7 @@ void executive::ReconvergenceIPDOM::eval_WarpSync(CTAContext& context,
 		}
 		for (int lane = 0; lane < lanes; ++lane) {
 			if (!arrived[start + lane]) continue;
-			const ir::PTXU32 mask = cta->operandAsU32(start + lane, instr.b);
+			const ir::PTXU32 mask = cta->operandAsU32(start + lane, memberMask);
 			sameGroup &= mask == firstMask;
 			const ir::PTXU32 members = mask & existingMask;
 			ready &= (arrivedMask & members) == members;

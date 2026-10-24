@@ -453,6 +453,7 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case Set:        return "set";        break;
 		case SetP:       return "setp";       break;
 		case Shf:        return "shf";        break;
+		case ShflSync:   return "shfl.sync";
 		case Shfl:       return "shfl";       break;
 		case Shl:        return "shl";        break;
 		case Shr:        return "shr";        break;
@@ -2387,6 +2388,21 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			break;			
 		}
+		case ShflSync: {
+			if (type != PTXOperand::b32 || modifier || vec != PTXOperand::v1 || shuffleMode < Up || shuffleMode > Idx) return "invalid shfl.sync mode/type/modifier";
+			for (const auto* operand : {&d, &a, &b, &c, &q, &pq})
+				if (operand->vec != PTXOperand::v1 || !operand->array.empty()) return "shfl.sync requires scalar operands";
+			if (!(d.addressMode == PTXOperand::BitBucket || (d.addressMode == PTXOperand::Register && d.bytes() == 4)) ||
+				(a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Immediate &&
+				!(a.addressMode == PTXOperand::Special && a.special == PTXOperand::warpSize)) || a.bytes() != 4) return "shfl.sync requires 32-bit data operands";
+			for (const auto* control : {&b, &c, &q})
+				if ((control->addressMode != PTXOperand::Register && control->addressMode != PTXOperand::Immediate &&
+					!(control->addressMode == PTXOperand::Special && control->special == PTXOperand::warpSize)) || control->bytes() != 4 ||
+					(!PTXOperand::isInt(control->type) && control->type != PTXOperand::b32)) return "shfl.sync requires 32-bit integer controls and member mask";
+			if (pq.addressMode != PTXOperand::Invalid && pq.addressMode != PTXOperand::BitBucket &&
+				!(pq.addressMode == PTXOperand::Register && pq.type == PTXOperand::pred && pq.condition == PTXOperand::Pred)) return "invalid shfl.sync predicate destination";
+			break;
+		}
 		case Shfl: {
 			if( type != PTXOperand::b32 ) {
 				return "invalid instruction type " 
@@ -3403,8 +3419,9 @@ std::string ir::PTXInstruction::toString() const {
 				+ d.toString() + ", " + a.toString() + ", " + b.toString()
 				+ ',' + c.toString();
 		}
-		case Shfl: {
-			std::string result = guard() + "shl." + toString( shuffleMode )
+		case Shfl:
+		case ShflSync: {
+			std::string result = guard() + toString(opcode) + "." + toString( shuffleMode )
 				+ "." +	PTXOperand::toString( type ) + " " + d.toString();
 
 			if( pq.addressMode != PTXOperand::Invalid && !isPt( pq ) ) {
@@ -3413,6 +3430,7 @@ std::string ir::PTXInstruction::toString() const {
 				
 			result += ", " + a.toString() + ", " + b.toString() + ", " +
 				c.toString();
+			if (opcode == ShflSync) result += ", " + q.toString();
 		
 			return result;
 		}
@@ -3610,7 +3628,7 @@ bool ir::PTXInstruction::hasSideEffects() const {
 }
 
 bool ir::PTXInstruction::canObserveSideEffects() const {
-	if (opcode == BarWarp || opcode == Match || opcode == Redux || (opcode == Vote && voteSync)) return true;
+	if (opcode == ShflSync || opcode == BarWarp || opcode == Match || opcode == Redux || (opcode == Vote && voteSync)) return true;
 	if (opcode == Atom || opcode == Ldmatrix || opcode == Movmatrix || opcode == Activemask) return true;
 
 	if (opcode == Ld) {
