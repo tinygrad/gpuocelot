@@ -5435,6 +5435,36 @@ public:
 		return true;
 	}
 
+	bool test_WarpRegisters() {
+		for (const auto shape : {Dim3(1,1,1), Dim3(31,1,1), Dim3(32,1,1), Dim3(33,1,1), Dim3(8,4,2), Dim3(7,5,2)})
+		for (const char* name : {"WARP_SZ", "%laneid", "%lanemask_eq", "%lanemask_lt", "%lanemask_le", "%lanemask_gt", "%lanemask_ge"}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry warp_regs() { .reg .u32 d; .reg .pred p; @!p mov.u32 d," + std::string(name) + "; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("warp_regs"), nullptr);
+			kernel.setKernelShape(shape.x,shape.y,shape.z); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Mov) for (int scenario = 0; scenario < 4; ++scenario) {
+				local.reset(); auto& context = local.getActiveContext();
+				for (int thread = 0; thread < local.threadCount; ++thread) {
+					context.active[thread] = scenario != 1 || thread % 2;
+					local.setRegAsPredicate(thread, ins.pg.reg, scenario == 3 || (scenario == 2 && thread % 3 == 0));
+					local.setRegAsU32(thread, ins.d.reg, 0xdeadbeef);
+				}
+				local.eval_Mov(context, ins);
+				for (int thread = 0; thread < local.threadCount; ++thread) {
+					const int lane = thread % 32; const auto reg = ins.a.special;
+					PTXU32 expected = reg == PTXOperand::warpSize ? 32 : reg == PTXOperand::laneId ? lane : 0;
+					for (int bit = 0; bit < 32; ++bit) {
+						const bool selected = reg == PTXOperand::lanemask_eq ? bit == lane : reg == PTXOperand::lanemask_lt ? bit < lane :
+							reg == PTXOperand::lanemask_le ? bit <= lane : reg == PTXOperand::lanemask_gt ? bit > lane : reg == PTXOperand::lanemask_ge && bit >= lane;
+						if (selected) expected |= PTXU32(1) << bit;
+					}
+					if (!context.predicated(thread, ins)) expected = 0xdeadbeef;
+					if (local.getRegAsU32(thread, ins.d.reg) != expected) { status << "warp register mismatch " << name << " thread " << thread << " CTA " << local.threadCount << "\n"; return false; }
+				}
+			}
+		}
+		return true;
+	}
+
 	bool test_BarWarpSynchronization() {
 		for (int size : {1, 31, 32, 64}) for (bool delayed : {false, true}) for (bool registerMask : {false, true}) {
 			if (delayed && size > 32) continue;
@@ -11468,6 +11498,7 @@ public:
 			result = (result && test_F16Fma());
 			result = (result && test_Bf16Fma());
 			result = (result && test_MmaWarpParticipation());
+			result = (result && test_WarpRegisters());
 			result = (result && test_BarWarpParser());
 			result = (result && test_BarWarpSynchronization());
 			result = (result && test_MatchParser());
