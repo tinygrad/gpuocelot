@@ -178,9 +178,9 @@ PTXKernel::RegisterVector PTXKernel::getReferencedRegisters() const
 				const ir::PTXInstruction&>(**instruction);
 			
 			const ir::PTXOperand* operands[] = {&ptx.pq, &ptx.d, &ptx.a, &ptx.b,
-				&ptx.c, &ptx.pg};
+				&ptx.c, &ptx.pg, &ptx.q};
 
-			for( unsigned int i = 0; i < 6; ++i )
+			for( unsigned int i = 0; i < 7; ++i )
 			{
 				const ir::PTXOperand& d = *operands[i];
 				if( d.addressMode != ir::PTXOperand::Register &&

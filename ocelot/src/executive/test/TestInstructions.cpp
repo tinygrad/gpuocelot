@@ -1653,6 +1653,442 @@ public:
 	// red is atom minus the writeback of the pre-update value; it shares
 	// evalAtomicRMW with eval_Atom but resolves its operation from the
 	// distinct reductionOperation field/enum rather than atomicOperation.
+	bool test_CreatepolicyRangeCvt() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.global .align 8 .b8 g[256]; .entry range_test() { .reg .b64 d,property; .reg .u64 p; .reg .v2 .u64 v; .reg .u32 s,t; .reg .f32 f; ";
+		for (const char* space : {"", ".global"}) for (const char* address : {"[p-8]", "[v.y+16]", "[0]", "[g+4]"}) for (const char* sizes : {"64,128", "s,t", "0,0x100000000", "WARP_SZ,128", "16,WARP_SZ"}) {
+			std::stringstream source(prefix + "createpolicy.range" + space + ".L2::evict_last.L2::evict_first.b64 d," + address + "," + sizes + "; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("range_test"), nullptr); kernel.setKernelShape(1,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			PTXU64 memory[32] = {};
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Createpolicy) {
+				if (!ins.mayHaveAddressableOperand() || ins.policyMode != PTXInstruction::PolicyRange) return false;
+				if (ins.a.addressMode == PTXOperand::Indirect) local.setRegAsU64(0, ins.a.reg, (PTXU64)(memory + 1));
+				if (ins.b.addressMode == PTXOperand::Register) local.setRegAsU32(0, ins.b.reg, 64);
+				if (ins.c.addressMode == PTXOperand::Register) local.setRegAsU32(0, ins.c.reg, 128);
+				local.setRegAsB64(0, ins.d.reg, 0xdeadbeef); local.execute();
+				if (local.getRegAsB64(0, ins.d.reg) != 0xdeadbeef) return false;
+			}
+		}
+		for (const char* input : {"property", "d", "0", "0xffffffffffffffffU"}) {
+			std::stringstream source(prefix + "createpolicy.cvt.L2.b64 d," + input + "; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("range_test"), nullptr); kernel.setKernelShape(1,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Createpolicy) {
+				if (ins.a.addressMode == PTXOperand::Register) local.setRegAsB64(0, ins.a.reg, 0);
+				local.setRegAsB64(0, ins.d.reg, 0xdeadbeef); local.execute();
+				if (ins.policyMode != PTXInstruction::PolicyCvt || local.getRegAsB64(0, ins.d.reg) != 0xdeadbeef) return false;
+			}
+		}
+		for (const char* body : {"range.shared.L2::evict_last.b64 d,[p],64,128", "range.L2::evict_last.b64 d,[f],64,128", "range.L2::evict_last.b64 d,[v],64,128", "range.L2::evict_last.b64 d,[p],f,128", "range.L2::evict_last.b64 d,[p],256,128", "range.L2::evict_last.b64 d,[p],64,0x100000001", "cvt.L2.b64 d,s", "cvt.L2.b64 d,0f00000000"}) {
+			std::stringstream source(prefix + "createpolicy." + body + "; ret; }");
+			try { Module bad; bad.load(source); return false; } catch (const std::exception&) {}
+		}
+		return true;
+	}
+
+	bool test_CreatepolicyFraction() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry policy_test() { .reg .b64 d; .reg .f32 f; .reg .pred p; ";
+		for (const char* primary : {"normal","first","last","unchanged"}) for (const char* secondary : {"", ".L2::evict_first"}) for (const char* fraction : {"", ",0.5", ",f"}) {
+			std::stringstream source(prefix + "@p createpolicy.fractional.L2::evict_" + primary + secondary + ".b64 d" + fraction + "; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("policy_test"), nullptr); kernel.setKernelShape(32,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Createpolicy) {
+				for (int thread = 0; thread < 32; ++thread) {
+					if (ins.a.addressMode == PTXOperand::Register) local.setRegAsF32(thread, ins.a.reg, 0.5f);
+					local.setRegAsB64(thread, ins.d.reg, 0xdeadbeef); local.setRegAsPredicate(thread, ins.pg.reg, thread % 2 && thread % 3);
+				}
+				local.execute();
+				for (int thread = 0; thread < 32; ++thread) if (local.getRegAsB64(thread, ins.d.reg) != 0xdeadbeefU) return false;
+			}
+		}
+		for (const char* suffix : {".L2::evict_last.b64 d,0.5", ".b64 d,0.0", ".b64 d,1.5", ".b32 d,0.5"}) {
+			std::stringstream source(prefix + "createpolicy.fractional.L2::evict_last" + suffix + "; ret; }");
+			try { Module bad; bad.load(source); return false; } catch (const std::exception&) {}
+		}
+		return true;
+	}
+
+	bool test_AtomicF64() {
+		const PTXU64 cases[][3] = {{1,1,2}, {0x10000000000000ULL,0x800fffffffffffffULL,1},
+			{0x3ff0000000000000ULL,0x3ca0000000000000ULL,0x3ff0000000000000ULL},
+			{0x3ff0000000000001ULL,0x3ca0000000000000ULL,0x3ff0000000000002ULL},
+			{0x3ff0000000000000ULL,0xbff0000000000000ULL,0}, {0x8000000000000000ULL,0x8000000000000000ULL,0x8000000000000000ULL},
+			{0x7fefffffffffffffULL,0x7fefffffffffffffULL,0x7ff0000000000000ULL},
+			{0x7ff0000000000000ULL,0xfff0000000000000ULL,0x7fffffffffffffffULL},
+			{0x7ff8123456789abcULL,0x3ff0000000000000ULL,0x7fffffffffffffffULL}, {0x7ff0123456789abcULL,1,0x7fffffffffffffffULL}};
+		for (bool atom : {false,true}) for (int destination = 0; destination < (atom ? 3 : 1); ++destination) for (int space = 0; space < 5; ++space) {
+			const bool shared = space == 1 || space >= 3, narrow = space == 4;
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry double_atom() { .shared .align 8 .b64 storage[3]; .reg .u" +
+				std::string(narrow ? "32" : "64") + " p; .reg .b64 d,b; " + (atom ? "atom" : "red") + (space == 0 ? ".global" : space == 1 ? ".shared" : "") +
+				".add.f64 " + (atom ? destination == 0 ? "d," : destination == 1 ? "b," : "_," : "") + "[p],b; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("double_atom"), nullptr); kernel.setKernelShape(32,1,1);
+			CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Atom || ins.opcode == PTXInstruction::Red)
+			for (const auto& test : cases) for (int mode : {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO}) {
+				PTXU64 global[3] = {}; auto* memory = shared ? (PTXU64*)local.functionCallStack.sharedMemoryPointer() : global;
+				memory[0] = 0xdeadbeef; memory[1] = test[0]; memory[2] = 0xfeedface;
+				const PTXU64 address = space == 1 ? 8 : (PTXU64)(memory + 1);
+				if (narrow) local.setRegAsU32(17, ins.a.reg, PTXU32(address)); else local.setRegAsU64(17, ins.a.reg, address);
+				local.setRegAsU64(17, ins.b.reg, test[1]); local.getActiveContext().active.reset(); local.getActiveContext().active[17] = true;
+				const int previous = hydrazine::fegetround(); hydrazine::fesetround(mode);
+				if (atom) local.eval_Atom(local.getActiveContext(), ins); else local.eval_Red(local.getActiveContext(), ins);
+				const bool restored = hydrazine::fegetround() == mode; hydrazine::fesetround(previous);
+				const PTXU64 actual = memory[1];
+				const bool correct = test[2] == 0x7fffffffffffffffULL ? (actual & 0x7ff0000000000000ULL) == 0x7ff0000000000000ULL && (actual & 0xfffffffffffffULL) : actual == test[2];
+				if (!restored || !correct || memory[0] != 0xdeadbeef || memory[2] != 0xfeedface) { status << "atomic f64 rounding mismatch\n"; return false; }
+				if (atom && destination != 2 && local.getRegAsU64(17, ins.d.reg) != test[0]) return false;
+			}
+		}
+		return true;
+	}
+
+	bool test_AtomicF32() {
+		const PTXU32 cases[][4] = {{1,1,0,2}, {0x80000001,0x80000001,0x80000000,0x80000002},
+			{0x800000,0x807fffff,0x800000,1}, {0x800000,0x80800001,0x80000000,0x80000001},
+			{0x800001,0x80800000,0,1}, {0x3f800000,0x33800000,0x3f800000,0x3f800000},
+			{0x3f800001,0x33800000,0x3f800002,0x3f800002}, {0x3f800000,0xbf800000,0,0},
+			{0x80000000,0x80000000,0x80000000,0x80000000}, {0x7f7fffff,0x7f7fffff,0x7f800000,0x7f800000},
+			{0x7f800000,0xff800000,0x7fffffff,0x7fffffff}, {0x7fc12345,0x3f800000,0x7fffffff,0x7fffffff}, {0x7fa12345,0x3f800000,0x7fffffff,0x7fffffff}};
+		for (bool atom : {false,true}) for (int destination = 0; destination < (atom ? 3 : 1); ++destination) for (int space = 0; space < 5; ++space) {
+			const bool shared = space == 1 || space >= 3, narrow = space == 4;
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry floating_atom() { .shared .align 4 .b32 storage[3]; .reg .u" +
+				std::string(narrow ? "32" : "64") + " p; .reg .b32 d,b; " + (atom ? "atom" : "red") + (space == 0 ? ".global" : space == 1 ? ".shared" : "") +
+				".add.f32 " + (atom ? destination == 0 ? "d," : destination == 1 ? "b," : "_," : "") + "[p],b; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("floating_atom"), nullptr); kernel.setKernelShape(32,1,1);
+			CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Atom || ins.opcode == PTXInstruction::Red)
+			for (const auto& test : cases) for (int mode : {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO}) {
+				PTXU32 global[3] = {}; auto* memory = shared ? (PTXU32*)local.functionCallStack.sharedMemoryPointer() : global;
+				memory[0] = 0xdeadbeef; memory[1] = test[0]; memory[2] = 0xfeedface;
+				const PTXU64 address = space == 1 ? 4 : (PTXU64)(memory + 1);
+				if (narrow) local.setRegAsU32(17, ins.a.reg, PTXU32(address)); else local.setRegAsU64(17, ins.a.reg, address);
+				local.setRegAsU32(17, ins.b.reg, test[1]);
+				if (atom && destination == 0) local.setRegAsU32(0, ins.d.reg, 0xbeef);
+				local.getActiveContext().active.reset(); local.getActiveContext().active[17] = true;
+				const int previous = hydrazine::fegetround(); hydrazine::fesetround(mode);
+				if (atom) local.eval_Atom(local.getActiveContext(), ins); else local.eval_Red(local.getActiveContext(), ins);
+				const bool restored = hydrazine::fegetround() == mode; hydrazine::fesetround(previous);
+				const PTXU32 expected = test[shared ? 3 : 2], actual = memory[1];
+				const bool correct = expected == 0x7fffffff ? (actual & 0x7f800000) == 0x7f800000 && (actual & 0x7fffff) : actual == expected;
+				if (!restored || !correct || memory[0] != 0xdeadbeef || memory[2] != 0xfeedface) { status << "atomic f32 rounding/FTZ mismatch\n"; return false; }
+				if (atom && destination != 2 && local.getRegAsU32(17, ins.d.reg) != test[0]) return false;
+				if (atom && destination == 0 && local.getRegAsU32(0, ins.d.reg) != 0xbeef) return false;
+			}
+		}
+		return true;
+	}
+
+	bool test_AtomicCacheHints() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry hints() { .reg .u64 p; .reg .b64 policy,wide,val64; .reg .v2 .b64 v; .reg .b32 r,b; .reg .b16 h,hb; mov.b64 policy,0; ";
+		for (bool atom : {false,true}) for (const char* space : {"", ".global"})
+		for (const char* form : {"add.u32", "add.f64", "add.noftz.f16", "add.noftz.f16x2"}) for (const char* policy : {"", "policy", "v.y", "5"}) {
+			const std::string operation = form;
+			const bool wide = operation == "add.f64", half = operation == "add.noftz.f16";
+			const std::string operands = std::string(atom ? (wide ? "wide," : half ? "h," : "r,") : "") + "[p]," + (wide ? "val64" : half ? "hb" : "b");
+			std::string spelling = operation; spelling.insert(spelling.rfind('.'), ".L2::cache_hint");
+			std::stringstream source(prefix + (atom ? "atom" : "red") + space + "." + spelling + " " + operands +
+				(*policy ? "," + std::string(policy) : "") + "; red.global.add.u32 [p],1; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("hints"), nullptr); int seen = 0;
+			for (auto ins : kernel.instructions) if (ins.opcode == PTXInstruction::Atom || ins.opcode == PTXInstruction::Red) {
+				if (seen++) { if (ins.cacheHint || ins.q.addressMode != PTXOperand::Invalid) return false; continue; }
+				if (!ins.cacheHint || (*policy && ins.q.bytes() != 8)) return false;
+				if (ins.q.addressMode == PTXOperand::Register) {
+					analysis::DataflowGraph graph; auto converted = graph.convert(ins); bool read = false;
+					for (const auto& input : converted.s) read |= input.pointer == &ins.q.reg;
+					if (!read || ins.q.reg == ins.a.reg) return false;
+				}
+				if (operation == "add.u32") {
+					kernel.setKernelShape(1,1,1); CooperativeThreadArray local(&kernel, Dim3(), false); PTXU32 memory = 7;
+					local.setRegAsU64(0, ins.a.reg, (PTXU64)&memory); local.setRegAsU32(0, ins.b.reg, 3);
+					if (atom) local.eval_Atom(local.getActiveContext(), ins); else local.eval_Red(local.getActiveContext(), ins);
+					if (memory != 10 || (atom && local.getRegAsU32(0, ins.d.reg) != 7)) return false;
+				}
+			}
+		}
+		for (const char* instruction : {"red.shared.add.L2::cache_hint.u32 [p],b,policy", "red.global.add.u32 [p],b,policy", "red.global.add.L2::cache_hint.u32 [p],b,b", "red.global.add.L2::cache_hint.u32 [p],b,v", "atom.global.cas.L2::cache_hint.b32 r,[p],b,policy", "atom.global.add.u32 r,[p],b,policy"}) {
+			std::stringstream source(prefix + instruction + "; ret; }");
+			try { Module bad; bad.load(source); return false; } catch (const std::exception&) {}
+		}
+		return true;
+	}
+
+	bool test_AtomAddresses() {
+		for (int mode = 0; mode < 8; ++mode) for (int addressForm : {0,1,2})
+		for (const char* form : {"add.u32", "add.noftz.f16", "add.noftz.f16x2", "cas.b16", "cas.b32", "cas.b64"}) {
+			const bool absolute = addressForm == 2;
+			if (absolute && (mode < 3 || mode == 7)) continue;
+			const std::string operation = form;
+			const bool shared = mode != 0 && mode != 7, address32 = mode == 1 || mode == 3 || mode == 5, cas = operation.find("cas") == 0;
+			const int width = operation == "cas.b64" ? 64 : operation == "cas.b16" || operation == "add.noftz.f16" ? 16 : 32;
+			const std::string qualifier = mode < 3 ? "" : mode == 7 ? ".global" : mode >= 5 ? ".shared::cta" : ".shared";
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry address_atom() { .shared .align 8 .b64 storage[3]; .reg .u" +
+				std::string(address32 ? "32" : "64") + " p; .reg .v2 .u" + (address32 ? "32" : "64") + " v; .reg .b" + std::to_string(width) +
+				" d,b,c; atom" + qualifier + "." + operation + " d,[" + (absolute ? "8" : addressForm == 1 ? "v.y-8" : "p-8") + "],b" + (cas ? ",c" : "") + "; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("address_atom"), nullptr); kernel.setKernelShape(32,1,1);
+			CooperativeThreadArray local(&kernel, Dim3(), false);
+			const PTXU64 mask = ~PTXU64(0) >> (64 - width), initial = width == 64 ? 7 : 0x12345678abcd0007ULL;
+			PTXU64 global[3] = {11,initial,22}; auto* memory = shared ? (PTXU64*)local.functionCallStack.sharedMemoryPointer() : global;
+			memory[0] = 11; memory[1] = initial; memory[2] = 22;
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Atom) {
+				if (ins.addressSpace != (mode < 3 ? PTXInstruction::Generic : shared ? PTXInstruction::Shared : PTXInstruction::Global) || ins.a.offset != (absolute ? 0 : -8)) return false;
+				const PTXU64 pointer = shared && mode >= 3 ? 16 : (PTXU64)(memory + 2);
+				local.getActiveContext().active.reset();
+				for (int lane : {3,17}) {
+					local.getActiveContext().active[lane] = true;
+					if (!absolute) {
+						if (address32) local.setRegAsU32(lane, ins.a.reg, PTXU32(pointer)); else local.setRegAsU64(lane, ins.a.reg, pointer);
+					}
+					local.setRegAsU64(lane, ins.b.reg, cas ? initial & mask : 1);
+					if (cas) local.setRegAsU64(lane, ins.c.reg, 1);
+				}
+				local.eval_Atom(local.getActiveContext(), ins);
+				if (memory[0] != 11 || memory[1] != (cas ? (initial & ~mask) | 1 : initial + 2) || memory[2] != 22) return false;
+				if ((local.getRegAsU64(3, ins.d.reg) & mask) != (initial & mask) ||
+					(local.getRegAsU64(17, ins.d.reg) & mask) != (cas ? 1 : (initial & mask) + 1)) return false;
+			}
+		}
+		for (const char* address : {"[f]", "[h]", "[v]", "[p+2147483648]", "[p-2147483649]", "[0x100000000]"}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry bad_address() { .reg .u64 p; .reg .b16 h; .reg .f32 f; .reg .v2 .u64 v; .reg .b32 d; atom.global.add.u32 d," + std::string(address) + ",1; ret; }");
+			try { Module bad; bad.load(source); return false; } catch (const std::exception&) {}
+		}
+		return true;
+	}
+
+	bool test_AtomCas() {
+		for (int width : {16,32,64}) for (bool shared : {false,true}) for (bool match : {false,true}) for (int alias = 0; alias < 5; ++alias) {
+			const PTXU64 mask = ~PTXU64(0) >> (64 - width), initial = 0x5555aaaa00001234ULL, old = initial & mask;
+			const PTXU64 compare = match ? old : old ^ 1, replacement = 0xfedc;
+			const std::string destination = alias == 1 ? "b" : alias == 2 ? "c" : alias == 3 ? "_" : "d";
+			const std::string inputs = alias == 4 ? std::to_string(compare) + "U," + std::to_string(replacement) + "U" : "b,c";
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry cas_test() { .shared .align 8 .b64 storage; .reg .u64 p; .reg .b" +
+				std::to_string(width) + " b,c,d; atom." + (shared ? "shared" : "global") + ".cas.b" + std::to_string(width) + " " + destination + ",[p]," + inputs + "; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("cas_test"), nullptr); kernel.setKernelShape(32,1,1);
+			CooperativeThreadArray local(&kernel, Dim3(), false); PTXU64 global = initial;
+			auto* memory = shared ? (PTXU64*)local.functionCallStack.sharedMemoryPointer() : &global; *memory = initial;
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Atom) {
+				local.getActiveContext().active.reset(); local.getActiveContext().active[17] = true;
+				local.setRegAsU64(17, ins.a.reg, shared ? 0 : (PTXU64)memory);
+				if (alias != 4) { local.setRegAsU64(17, ins.b.reg, compare); local.setRegAsU64(17, ins.c.reg, replacement); }
+				local.eval_Atom(local.getActiveContext(), ins);
+				if (*memory != ((initial & ~mask) | (match ? replacement : old))) return false;
+				if (alias != 3 && (local.getRegAsU64(17, ins.d.reg) & mask) != old) return false;
+			}
+		}
+		for (const char* form : {"cas.b16 h,[p],h", "cas.b16 v,[p],h,h", "cas.b16 h,[p],v,h", "cas.b16 h,[p],h,v", "exch.b16 h,[p],h", "and.b16 h,[p],h", "cas.noftz.b16 h,[p],h,h"}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry invalid_cas() { .reg .u64 p; .reg .b16 h; .reg .b32 v; atom.global." + std::string(form) + "; ret; }");
+			try { Module bad; bad.load(source); return false; } catch (const std::exception&) {}
+		}
+		return true;
+	}
+
+	bool test_AtomHalf() {
+		const PTXU16 cases[][4] = {{1,1,2,3}, {0x3c00,0x1000,0x3c00,0x3c00}, {0x3c01,0x1000,0x3c02,0x3c02}};
+		for (bool packed : {false,true}) for (bool shared : {false,true}) for (int destination = 0; destination < 3; ++destination) {
+			const std::string dtype = packed ? "f16x2" : "f16", bits = packed ? "32" : "16";
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry half_atom() { .shared .align 4 .b32 storage; .reg .u64 ptr; .reg .b" + bits +
+				" value,d; atom.acq_rel.cta." + (shared ? "shared" : "global") + ".add.noftz." + dtype + " " +
+				(destination == 0 ? "d" : destination == 1 ? "value" : "_") + ",[ptr],value; ret; }"), printed;
+			Module module; module.load(source); module.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("half_atom"), nullptr); kernel.setKernelShape(32,1,1);
+			CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Atom) for (const auto& test : cases) {
+				PTXU32 global = 0; auto* memory = shared ? (PTXU32*)local.functionCallStack.sharedMemoryPointer() : &global;
+				*memory = PTXU32(test[0]) | (PTXU32(0x3c00) << 16);
+				const PTXU32 input = test[1] | (packed ? 0x40000000U : 0);
+				local.getActiveContext().active.reset();
+				for (int lane = 0; lane < 32; ++lane) {
+					local.setRegAsU64(lane, ins.a.reg, shared ? 0 : (PTXU64)memory);
+					if (destination == 0) {
+						if (packed) local.setRegAsU32(lane, ins.d.reg, 0xdeadbeef);
+						else local.setRegAsU16(lane, ins.d.reg, 0xbeef);
+					}
+					if (packed) local.setRegAsU32(lane, ins.b.reg, input);
+					else local.setRegAsU16(lane, ins.b.reg, input);
+					local.getActiveContext().active[lane] = lane == 3 || lane == 17;
+				}
+				const int previous = hydrazine::fegetround(); hydrazine::fesetround(FE_UPWARD);
+				local.eval_Atom(local.getActiveContext(), ins);
+				const bool restored = hydrazine::fegetround() == FE_UPWARD; hydrazine::fesetround(previous);
+				if (!restored || *memory != (test[3] | (packed ? 0x45000000U : 0x3c000000U))) return false;
+				if (destination != 2) for (int lane = 0; lane < 32; ++lane) {
+					const PTXU32 expected = lane == 3 ? test[0] | (packed ? 0x3c000000U : 0) : lane == 17 ?
+						test[2] | (packed ? 0x42000000U : 0) : destination == 1 ? input : packed ? 0xdeadbeefU : 0xbeefU;
+					if ((packed ? local.getRegAsU32(lane, ins.d.reg) : local.getRegAsU16(lane, ins.d.reg)) != expected) return false;
+				}
+			}
+		}
+		for (const char* form : {"add.f16 h,[p],h", "add.f16x2 v,[p],v", "add.noftz.f32 v,[p],v", "add.noftz.bf16 h,[p],h", "add.noftz.bf16x2 v,[p],v", "min.noftz.f16 h,[p],h", "add.noftz.f16 v,[p],h", "add.noftz.f16x2 v,[p],h", "add.noftz.f16 h,[p],1", "add.noftz.f16 h,[p],h,h", "add.noftz.f16 h,[h],h"}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry invalid_atom() { .reg .u64 p; .reg .b16 h; .reg .b32 v; atom.global." + std::string(form) + "; ret; }");
+			try { Module bad; bad.load(source); return false; } catch (const std::exception&) {}
+		}
+		return true;
+	}
+
+	bool test_RedHalfExecution() {
+		const PTXU16 cases[][3] = {{1,1,2}, {0x400,0x8001,0x3ff}, {0x3c00,0x1000,0x3c00},
+			{0x3c01,0x1000,0x3c02}, {0x7bff,0x7bff,0x7c00}, {0x3c00,0xbc00,0}, {0x8000,0x8000,0x8000}, {0x7c00,0xfc00,0x7fff}};
+		for (bool packed : {false, true}) for (bool shared : {false, true}) for (const auto& test : cases) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry half_red() { .shared .align 4 .b32 storage; .reg .u64 ptr; .reg .b" +
+				std::string(packed ? "32" : "16") + " value; red." + (shared ? "shared" : "global") + ".add.noftz." + (packed ? "f16x2" : "f16") + " [ptr],value; ret; }");
+			Module module; module.load(source); EmulatedKernel kernel(module.getKernel("half_red"), nullptr);
+			kernel.setKernelShape(32,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Red) {
+				for (int mode : {FE_TONEAREST, FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO}) {
+					PTXU32 global = 0; auto* memory = shared ? (PTXU32*)local.functionCallStack.sharedMemoryPointer() : &global;
+					*memory = PTXU32(test[0]) | (PTXU32(0x3c00) << 16);
+					local.getActiveContext().active.reset(); local.getActiveContext().active[17] = true;
+					local.setRegAsU64(17, ins.a.reg, shared ? 0 : (PTXU64)memory);
+					if (packed) local.setRegAsU32(17, ins.b.reg, PTXU32(test[1]) | (PTXU32(0x4000) << 16));
+					else local.setRegAsU16(17, ins.b.reg, test[1]);
+					const int previous = hydrazine::fegetround(); hydrazine::fesetround(mode);
+					local.eval_Red(local.getActiveContext(), ins);
+					const bool restored = hydrazine::fegetround() == mode; hydrazine::fesetround(previous);
+					const PTXU16 low = *memory;
+					const bool correctLow = test[2] == 0x7fff ? (low & 0x7c00) == 0x7c00 && (low & 0x3ff) : low == test[2];
+					if (!restored || !correctLow || (*memory >> 16) != (packed ? 0x4200U : 0x3c00U)) return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_RedHalfParser() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry half_red() { .reg .u64 ptr; .reg .b16 h; .reg .b32 v; ";
+		for (const char* space : {"", ".global", ".shared", ".shared::cta"}) for (bool packed : {false, true}) {
+			std::stringstream source(prefix + "red.release.cta" + space + ".add.noftz." + (packed ? "f16x2 [ptr],v" : "f16 [ptr],h") + "; ret; }"), printed;
+			Module module; module.load(source); module.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("half_red"), nullptr);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Red)
+				if (ins.modifier != PTXInstruction::noftz || ins.b.bytes() != (packed ? 4U : 2U)) return false;
+		}
+		for (const char* form : {"add.f16 [ptr],h", "add.f16x2 [ptr],v", "min.noftz.f16 [ptr],h", "add.noftz.f32 [ptr],v", "add.noftz.bf16 [ptr],h", "add.noftz.bf16x2 [ptr],v", "add.noftz.f16 [ptr],v", "add.noftz.f16x2 [ptr],h", "add.noftz.f16 [ptr],1", "add.noftz.f16x2 [ptr],WARP_SZ"}) {
+			std::stringstream source(prefix + "red.global." + form + "; ret; }"); bool rejected = false;
+			try { Module module; module.load(source); } catch (const std::exception&) { rejected = true; }
+			if (!rejected) return false;
+		}
+		return true;
+	}
+
+	bool test_RedGenericExecution() {
+		for (int form = 0; form < 4; ++form) {
+			const bool shared = form != 0, narrow = form == 2, symbol = form == 3;
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry generic_red() { .shared .align 8 .b8 storage[16]; .reg .u" +
+				std::string(narrow ? "32" : "64") + " ptr; red.add.u32 " + (symbol ? "[storage+4]" : "[ptr-4]") + ",1; ret; }");
+			Module module; module.load(source); EmulatedKernel kernel(module.getKernel("generic_red"), nullptr);
+			kernel.setKernelShape(32,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			PTXU32 global[] = {11,7,22};
+			auto* memory = shared ? (PTXU32*)local.functionCallStack.sharedMemoryPointer() : global;
+			memory[0] = 11; memory[1] = 7; memory[2] = 22;
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Red) {
+				for (int lane = 0; lane < 32; ++lane) {
+					local.getActiveContext().active[lane] = lane % 2;
+					const PTXU64 pointer = (PTXU64)(memory + 2);
+					if (narrow) local.setRegAsU32(lane, ins.a.reg, PTXU32(pointer));
+					else local.setRegAsU64(lane, ins.a.reg, pointer);
+				}
+				local.eval_Red(local.getActiveContext(), ins);
+			}
+			if (memory[0] != 11 || memory[1] != 23 || memory[2] != 22) return false;
+		}
+		return true;
+	}
+
+	bool test_RedGenericParser() {
+		for (const char* space : {"", ".global", ".shared", ".shared::cta"}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry generic_red() { .reg .u64 ptr; red.release.cta" +
+				std::string(space) + ".add.u32 [ptr-4],1; ret; }"), printed;
+			Module module; module.load(source); module.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("generic_red"), nullptr);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Red) {
+				const auto expected = !*space ? PTXInstruction::Generic : std::string(space) == ".global" ? PTXInstruction::Global : PTXInstruction::Shared;
+				if (ins.addressSpace != expected || ins.a.offset != -4 || ins.semantics != PTXInstruction::Release || ins.scope != PTXInstruction::CtaLevel) return false;
+			}
+		}
+		return true;
+	}
+
+	bool test_RedCheckedAddresses() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry checked_red() { .reg .u64 ptr; .reg .u32 value; .reg .f32 f; .reg .u16 h; .reg .v2 .u64 v; .shared .f32 counter; ";
+		for (const char* address : {"[ptr-4]", "[ptr + -4]", "[ptr-2147483648]", "[ptr+2147483647]", "[v.y+8]", "[0xffffffff]", "[counter]"}) {
+			std::stringstream source(prefix + "red.shared.add.u32 " + address + ",value; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("checked_red"), nullptr);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Red && ins.a.addressMode == PTXOperand::Indirect && std::string(address).find("v.y") != std::string::npos)
+				if (ins.a.reg == ins.b.reg || ins.a.offset != 8) return false;
+		}
+		for (const char* operands : {"[v],value", "v,value", "[f],value", "[h],value", "[0f3f800000],value", "[ptr+2147483648],value", "[ptr-2147483649],value", "[0x100000000],value", "[ptr],ptr", "[ptr],v", "[ptr],f", "0x100000000,value", "[ptr],0f3f800000"}) {
+			std::stringstream source(prefix + "red.global.add.u32 " + operands + "; ret; }"); bool rejected = false;
+			try { Module bad; bad.load(source); } catch (const std::exception&) { rejected = true; }
+			if (!rejected) { status << "accepted invalid reduction operands\n"; return false; }
+		}
+		for (const char* form : {"add.u32", "add.u64", "and.b64", "and.b32"}) {
+			std::stringstream source(prefix + "red.global." + form + " [ptr],WARP_SZ; ret; }");
+			Module module; module.load(source); EmulatedKernel kernel(module.getKernel("checked_red"), nullptr);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Red && (ins.b.addressMode != PTXOperand::Immediate || ins.b.imm_uint != 32)) return false;
+		}
+		std::stringstream invalid(prefix + "red.global.add.u64 [ptr],0d3ff0000000000000; ret; }");
+		try { Module module; module.load(invalid); return false; } catch (const std::exception&) {}
+		return true;
+	}
+
+	bool test_RedFloatConstants() {
+		for (bool wide : {false, true}) for (bool decimal : {false, true}) {
+			const std::string prefix = ".version 8.0\n.target sm_86\n.entry floating_red() { .reg .u64 ptr; red.global.add." + std::string(wide ? "f64" : "f32") + " [ptr],";
+			std::stringstream source(prefix + (decimal ? "1.5" : wide ? "0d3ff8000000000000" : "0f3fc00000") + "; ret; }");
+			std::stringstream bad(prefix + (decimal ? "1" : "WARP_SZ") + "; ret; }");
+			try { Module invalid; invalid.load(bad); return false; } catch (const std::exception&) {}
+			Module module; module.load(source); EmulatedKernel kernel(module.getKernel("floating_red"), nullptr);
+			kernel.setKernelShape(32,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Red) {
+				PTXF32 single = 2; PTXF64 doubleValue = 2;
+				for (int lane = 0; lane < 32; ++lane) local.setRegAsU64(lane, ins.a.reg, wide ? (PTXU64)&doubleValue : (PTXU64)&single);
+				local.eval_Red(local.getActiveContext(), ins);
+				if ((wide ? doubleValue : single) != 50) return false;
+			}
+		}
+		return true;
+	}
+
+	bool test_RedAddressOperands() {
+		for (const char* address : {"ptr", "[ptr]", "[ptr+4]", "[ptr-4]"}) for (bool immediate : {false, true}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry reduce() { .reg .u64 ptr; .reg .u32 value; .reg .pred p; @!p red.global.add.u32 " +
+				std::string(address) + "," + (immediate ? "5" : "value") + "; ret; }"), printed;
+			Module parsed; parsed.load(source);
+			EmulatedKernel original(parsed.getKernel("reduce"), nullptr);
+			for (const auto& ins : original.instructions) if (ins.opcode == PTXInstruction::Red)
+				if (ins.d.addressMode != PTXOperand::Invalid || ins.a.bytes() != 8 || ins.b.bytes() != 4) { status << "red address/value mapped incorrectly\n"; return false; }
+			parsed.write(printed); Module roundtrip; roundtrip.load(printed);
+			EmulatedKernel kernel(roundtrip.getKernel("reduce"), nullptr);
+			kernel.setKernelShape(32,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (auto ins : kernel.instructions) if (ins.opcode == PTXInstruction::Red) {
+				if (!ins.hasSideEffects() || !ins.canObserveSideEffects() || !ins.isMemoryInstruction() || !ins.mayHaveAddressableOperand()) return false;
+				analysis::DataflowGraph graph; const auto converted = graph.convert(ins);
+				if (!converted.d.empty()) return false;
+				bool addressRead = false; for (const auto& input : converted.s) addressRead |= input.pointer == &ins.a.reg;
+				if (!addressRead) return false;
+				for (int scenario = 0; scenario < 4; ++scenario) {
+					local.reset(); auto& context = local.getActiveContext(); PTXU32 memory[] = {0x12345678,10,0x87654321};
+					const PTXU64 base = (PTXU64)&memory[1] - ins.a.offset;
+					for (int thread = 0; thread < 32; ++thread) {
+						context.active[thread] = scenario != 1 || thread % 2;
+						local.setRegAsPredicate(thread, ins.pg.reg, scenario == 3 || (scenario == 2 && thread % 3 == 0));
+						local.setRegAsU64(thread, ins.a.reg, base);
+						if (!immediate) local.setRegAsU32(thread, ins.b.reg, thread + 1);
+					}
+					local.eval_Red(context, ins);
+					const PTXU32 sums[] = {528,272,352,0}, counts[] = {32,16,21,0};
+					if (memory[0] != 0x12345678 || memory[1] != 10 + (immediate ? 5 * counts[scenario] : sums[scenario]) || memory[2] != 0x87654321) { status << "red memory mismatch\n"; return false; }
+					for (int thread = 0; thread < 32; ++thread)
+						if (local.getRegAsU64(thread, ins.a.reg) != base || (!immediate && local.getRegAsU32(thread, ins.b.reg) != PTXU32(thread + 1))) return false;
+				}
+			}
+		}
+		return true;
+	}
+
 	bool test_Red() {
 		PTXU32 mem = 10;
 		PTXInstruction ins;
@@ -11580,6 +12016,21 @@ public:
 			result = (result && test_StCacheOperator());
 			result = (result && test_GrammarSharedActionFix());
 			result = (result && test_PrefetchOpcode());
+			result = (result && test_RedGenericParser());
+			result = (result && test_RedHalfParser());
+			result = (result && test_AtomHalf());
+			result = (result && test_AtomCas());
+			result = (result && test_AtomAddresses());
+			result = (result && test_AtomicCacheHints());
+			result = (result && test_AtomicF32());
+			result = (result && test_AtomicF64());
+			result = (result && test_CreatepolicyFraction());
+			result = (result && test_CreatepolicyRangeCvt());
+			result = (result && test_RedHalfExecution());
+			result = (result && test_RedGenericExecution());
+			result = (result && test_RedCheckedAddresses());
+			result = (result && test_RedFloatConstants());
+			result = (result && test_RedAddressOperands());
 			result = (result && test_Red());
 			result = (result && test_Fence());
 			result = (result && test_AtomicRedSemantics());

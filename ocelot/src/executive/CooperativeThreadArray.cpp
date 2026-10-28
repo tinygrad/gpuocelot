@@ -776,6 +776,10 @@ void executive::CooperativeThreadArray::execute(int PC) {
 				eval_Popc(context, instr); break;
 			case ir::PTXInstruction::Prefetch:
 				eval_Prefetch(context, instr); break;
+			case ir::PTXInstruction::Createpolicy:
+				// Cache hints are not modeled by the CTA emulator; no policy is needed.
+				trace();
+				break;
 			case ir::PTXInstruction::Prefetchu:
 				eval_Prefetchu(context, instr); break;
 			case ir::PTXInstruction::Prmt:
@@ -2212,7 +2216,7 @@ void executive::CooperativeThreadArray::eval_And(CTAContext &context,
 
 */
 void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir::PTXInstruction &instr) {
-	evalAtomicRMW(context, instr, instr.atomicOperation, true);
+	evalAtomicRMW(context, instr, instr.atomicOperation, instr.d.addressMode != ir::PTXOperand::BitBucket);
 }
 
 // atom writes the pre-update value back to instr.d; red performs the same
@@ -2224,8 +2228,24 @@ void executive::CooperativeThreadArray::evalAtomicRMW(CTAContext &context,
 	const ir::PTXInstruction &instr, ir::PTXInstruction::AtomicOperation operation,
 	bool writeback) {
 	size_t elementSize = 0;
+	const auto genericSource = [&](const char* source) {
+		const bool address32 = instr.a.bytes() == sizeof(ir::PTXU32);
+		if (address32) {
+			const ir::PTXU32 address = (ir::PTXU64)source;
+			const auto* shared = (const char*)functionCallStack.sharedMemoryPointer();
+			const ir::PTXU32 offset = address - ir::PTXU32((ir::PTXU64)shared);
+			if (offset < functionCallStack.sharedMemorySize()) return shared + offset;
+			return (const char*)(ir::PTXU64)address;
+		}
+		return source;
+	};
 
 	switch (instr.type) {
+		case ir::PTXOperand::b16:
+		case ir::PTXOperand::f16:
+			elementSize = sizeof(ir::PTXU16);
+			break;
+		case ir::PTXOperand::f16x2:
 		case ir::PTXOperand::f32:		// fall through
 		case ir::PTXOperand::b32:		// fall through
 		case ir::PTXOperand::s32:		// fall through
@@ -2270,6 +2290,7 @@ void executive::CooperativeThreadArray::evalAtomicRMW(CTAContext &context,
 						context.PC, instr);
 			}
 
+			if (instr.addressSpace == ir::PTXInstruction::Generic) source = genericSource(source);
 			currentEvent.memory_addresses.push_back((ir::PTXU64)source);
 		}
 	}
@@ -2299,6 +2320,9 @@ void executive::CooperativeThreadArray::evalAtomicRMW(CTAContext &context,
 		}
 
 		switch (instr.addressSpace) {
+			case ir::PTXInstruction::Generic:
+				source = genericSource(source);
+				break;
 			case ir::PTXInstruction::Global:
 				{
 
@@ -2389,13 +2413,21 @@ void executive::CooperativeThreadArray::evalAtomicRMW(CTAContext &context,
 				break;
 			case ir::PTXInstruction::AtomicCas:
 				{
-					if (instr.type == ir::PTXOperand::b32
+					if (instr.type == ir::PTXOperand::b16) {
+						ir::PTXU16 old;
+						std::memcpy(&old, source, sizeof(old));
+						const ir::PTXU16 compare = operandAsU16(threadID, instr.b), replacement = operandAsU16(threadID, instr.c);
+						const ir::PTXU16 result = old == compare ? replacement : old;
+						std::memcpy((char*)source, &result, sizeof(result));
+						if (writeback) setRegAsB16(threadID, instr.d.reg, old);
+					}
+					else if (instr.type == ir::PTXOperand::b32
 						|| instr.type == ir::PTXOperand::s32
 						|| instr.type == ir::PTXOperand::u32) {
 						ir::PTXB32 d = *((ir::PTXB32*)source);
-						if (writeback) setRegAsB32(threadID, instr.d.reg, d);
 						ir::PTXB32 b = operandAsB32(threadID, instr.b);
 						ir::PTXB32 c = operandAsB32(threadID, instr.c);
+						if (writeback) setRegAsB32(threadID, instr.d.reg, d);
 						*((ir::PTXB32*)source) = (d==b) ? c : d;
 						reportE(REPORT_ATOM, "Atomically updated " << d
 							<< " to " << *((ir::PTXB32*)source) );
@@ -2404,9 +2436,9 @@ void executive::CooperativeThreadArray::evalAtomicRMW(CTAContext &context,
 						|| instr.type == ir::PTXOperand::s64
 						|| instr.type == ir::PTXOperand::u64) {
 						ir::PTXB64 d = *((ir::PTXB64*)source);
-						if (writeback) setRegAsB64(threadID, instr.d.reg, d);
 						ir::PTXB64 b = operandAsB64(threadID, instr.b);
 						ir::PTXB64 c = operandAsB64(threadID, instr.c);
+						if (writeback) setRegAsB64(threadID, instr.d.reg, d);
 						*((ir::PTXB64*)source) = (d==b) ? c : d;
 						reportE(REPORT_ATOM, "Atomically updated " << d
 							<< " to " << *((ir::PTXB64*)source) );
@@ -2447,7 +2479,23 @@ void executive::CooperativeThreadArray::evalAtomicRMW(CTAContext &context,
 				break;
 			case ir::PTXInstruction::AtomicAdd:
 				{
-					if (instr.type == ir::PTXOperand::u32) {
+					if (instr.type == ir::PTXOperand::f16 || instr.type == ir::PTXOperand::f16x2) {
+						const ir::PTXU32 value = elementSize == 2 ? operandAsU16(threadID, instr.b) : operandAsU32(threadID, instr.b);
+						ir::PTXU32 original = 0;
+						for (size_t half = 0; half < elementSize / 2; ++half) {
+							ir::PTXU16 old;
+							std::memcpy(&old, source + 2 * half, sizeof(old));
+							original |= ir::PTXU32(old) << (16 * half);
+							const ir::PTXU16 result = toF16(roundedAdd<double>(f16ToF32(old),
+								f16ToF32(ir::PTXU16(value >> (16 * half))), ir::PTXInstruction::rn), ir::PTXInstruction::rn);
+							std::memcpy((char*)source + 2 * half, &result, sizeof(result));
+						}
+						if (writeback) {
+							if (elementSize == 2) setRegAsB16(threadID, instr.d.reg, original);
+							else setRegAsB32(threadID, instr.d.reg, original);
+						}
+					}
+					else if (instr.type == ir::PTXOperand::u32) {
 						ir::PTXU32 d = *((ir::PTXU32*)source);
 						if (writeback) setRegAsU32(threadID, instr.d.reg, d);
 						ir::PTXU32 b = operandAsU32(threadID, instr.b);
@@ -2464,12 +2512,18 @@ void executive::CooperativeThreadArray::evalAtomicRMW(CTAContext &context,
 							<< " to " << *((ir::PTXS32*)source) );
 					}
 					else if (instr.type == ir::PTXOperand::f32) {
-						ir::PTXF32 d = *((ir::PTXF32*)source);
+						ir::PTXF32 d;
+						std::memcpy(&d, source, sizeof(d));
+						const ir::PTXF32 b = operandAsF32(threadID, instr.b);
+						const bool shared = instr.addressSpace == ir::PTXInstruction::Shared ||
+							(instr.addressSpace == ir::PTXInstruction::Generic && addressInRange<ir::PTXU64>(
+								(ir::PTXU64)source, (ir::PTXU64)functionCallStack.sharedMemoryPointer(), functionCallStack.sharedMemorySize()));
+						const int modifiers = ir::PTXInstruction::rn | (shared ? 0 : ir::PTXInstruction::ftz);
+						const ir::PTXF32 result = ftz(modifiers, roundedAdd(ftz(modifiers, d), ftz(modifiers, b), modifiers));
+						std::memcpy((char*)source, &result, sizeof(result));
 						if (writeback) setRegAsF32(threadID, instr.d.reg, d);
-						ir::PTXF32 b = operandAsF32(threadID, instr.b);
-						*((ir::PTXF32*)source) = b + d;
 						reportE(REPORT_ATOM, "Atomically updated " << d
-							<< " to " << *((ir::PTXF32*)source) );
+							<< " to " << result );
 					}
 					else if (instr.type == ir::PTXOperand::u64) {
 						ir::PTXU64 d = *((ir::PTXU64*)source);
@@ -2480,12 +2534,14 @@ void executive::CooperativeThreadArray::evalAtomicRMW(CTAContext &context,
 							<< " to " << *((ir::PTXU64*)source) );
 					}
 					else if (instr.type == ir::PTXOperand::f64) {
-						ir::PTXF64 d = *((ir::PTXF64*)source);
+						ir::PTXF64 d;
+						std::memcpy(&d, source, sizeof(d));
+						const ir::PTXF64 b = operandAsF64(threadID, instr.b);
+						const ir::PTXF64 result = roundedAdd(d, b, ir::PTXInstruction::rn);
+						std::memcpy((char*)source, &result, sizeof(result));
 						if (writeback) setRegAsF64(threadID, instr.d.reg, d);
-						ir::PTXF64 b = operandAsF64(threadID, instr.b);
-						*((ir::PTXF64*)source) = b + d;
 						reportE(REPORT_ATOM, "Atomically updated " << d
-							<< " to " << *((ir::PTXF64*)source) );
+							<< " to " << result );
 					}
 					else {
 						throw RuntimeException("invalid data type",

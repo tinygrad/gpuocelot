@@ -242,9 +242,9 @@ namespace parser
 						long long int value, YYLTYPE& location, 
 						bool invert );
 					void arrayOperand( YYLTYPE& location );
-					void matrixAddress(const std::string&, long long, YYLTYPE&, bool subtract = false);
-					void matrixImmediate(long long unsigned, YYLTYPE&);
-					void matrixNegativeOffset(const std::string&, long long, YYLTYPE&);
+					void checkedAddress(const std::string&, long long, YYLTYPE&, bool subtract = false);
+					void checkedImmediate(long long unsigned, YYLTYPE&);
+					void checkedNegativeOffset(const std::string&, long long, YYLTYPE&);
 					void arrayOperand( unsigned int elements, YYLTYPE& location );
 					void returnOperand();
 					void guard( const std::string& name, YYLTYPE& one, 

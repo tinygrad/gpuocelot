@@ -40,6 +40,16 @@ std::string ir::PTXInstruction::toString(CacheLevel cache) {
 	return "";
 }
 
+std::string ir::PTXInstruction::toString(CachePriority priority) {
+	switch (priority) {
+		case EvictNormal: return "L2::evict_normal";
+		case EvictLast: return "L2::evict_last";
+		case EvictFirst: return "L2::evict_first";
+		case EvictUnchanged: return "L2::evict_unchanged";
+	}
+	return "";
+}
+
 std::string ir::PTXInstruction::toStringLoad(CacheOperation operation) {
 	switch( operation ) {
 		case Ca: return "ca";
@@ -264,6 +274,7 @@ std::string ir::PTXInstruction::toString( Modifier modifier ) {
 		case rp:     return "rp";     break;
 		case approx: return "approx"; break;
 		case ftz:    return "ftz";    break;
+		case noftz:  return "noftz";  break;
 		case nan:    return "NaN";    break;
 		case xorsign:return "xorsign";break;
 		case abs:    return "abs";    break;
@@ -439,6 +450,7 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case Pmevent:    return "pmevent";    break;
 		case Popc:       return "popc";       break;
 		case Prefetch:   return "prefetch";   break;
+		case Createpolicy: return "createpolicy";
 		case Prefetchu:  return "prefetchu";  break;
 		case Prmt:       return "prmt";       break;
 		case Rcp:        return "rcp";        break;
@@ -525,6 +537,10 @@ ir::PTXInstruction::PTXInstruction( Opcode op, const PTXOperand& _d,
 	addressSpace = AddressSpace_Invalid;
 	tailCall = false;
 	mmio = false;
+	cacheHint = false;
+	policyMode = PolicyFractional;
+	primaryPriority = EvictNormal;
+	secondaryPriority = EvictUnchanged;
 	cacheOperation = Ca;
 	booleanOperator = BoolAnd;
 	semantics = AcqRel;
@@ -540,6 +556,37 @@ bool ir::PTXInstruction::operator==( const PTXInstruction& i ) const {
 }
 
 std::string ir::PTXInstruction::valid() const {
+	if (opcode == Createpolicy) {
+		if (type != PTXOperand::b64 || modifier || vec != PTXOperand::v1 || d.addressMode != PTXOperand::Register ||
+			d.vec != PTXOperand::v1 || !d.array.empty() || !PTXOperand::valid(PTXOperand::b64,d.type)) return "createpolicy requires a scalar b64 destination";
+		if (policyMode == PolicyCvt) return (a.addressMode == PTXOperand::Register || (a.addressMode == PTXOperand::Immediate && PTXOperand::isInt(a.type))) && a.vec == PTXOperand::v1 && a.array.empty() &&
+			PTXOperand::valid(PTXOperand::b64,a.type) ? "" : "createpolicy.cvt requires a scalar b64 source";
+		if (primaryPriority < EvictNormal || primaryPriority > EvictUnchanged ||
+			(secondaryPriority != EvictFirst && secondaryPriority != EvictUnchanged)) return "invalid createpolicy mode/priority";
+		if (policyMode == PolicyRange) {
+			if (a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Indirect && a.addressMode != PTXOperand::Address && a.addressMode != PTXOperand::Immediate) return "invalid policy address operand";
+			if (a.addressMode == PTXOperand::Immediate && a.imm_uint > 0xffffffffULL) return "policy absolute address must fit in 32 bits";
+			if ((addressSpace != Global && addressSpace != Generic) || a.vec != PTXOperand::v1 || !a.array.empty() ||
+				(a.addressMode != PTXOperand::Address && ((a.bytes() != 4 && a.bytes() != 8) || (!PTXOperand::isInt(a.type) && a.type != PTXOperand::b32 && a.type != PTXOperand::b64)))) return "createpolicy.range requires a global address";
+			for (const auto* size : {&b,&c}) if ((size->addressMode != PTXOperand::Register && size->addressMode != PTXOperand::Immediate) ||
+				size->vec != PTXOperand::v1 || !size->array.empty() || !PTXOperand::valid(PTXOperand::u32,size->type) ||
+				(size->addressMode == PTXOperand::Immediate && size->imm_uint > 0x100000000ULL)) return "createpolicy.range requires 32-bit integer sizes";
+			if (b.addressMode == PTXOperand::Immediate && c.addressMode == PTXOperand::Immediate && b.imm_uint > c.imm_uint) return "createpolicy primary size exceeds total size";
+			return "";
+		}
+		if (policyMode != PolicyFractional) return "invalid createpolicy mode";
+		if ((a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Immediate) || a.vec != PTXOperand::v1 ||
+			!a.array.empty() || !PTXOperand::valid(PTXOperand::f32,a.type)) return "createpolicy fraction must be scalar f32";
+		if (a.addressMode == PTXOperand::Immediate && !(a.imm_single > 0 && a.imm_single <= 1)) return "createpolicy fraction must be in (0,1]";
+		return "";
+	}
+	if (opcode == Atom || opcode == Red) {
+		if (cacheHint && (addressSpace != Global && addressSpace != Generic)) return "atomic cache hints require global addressing";
+		if (cacheHint && opcode == Atom && atomicOperation == AtomicCas) return "atom.cas does not support cache hints";
+		if (q.addressMode != PTXOperand::Invalid && (!cacheHint || (q.addressMode != PTXOperand::Register && q.addressMode != PTXOperand::Immediate) ||
+			q.vec != PTXOperand::v1 || !q.array.empty() || q.bytes() != 8 || !PTXOperand::valid(PTXOperand::b64, q.type)))
+			return "atomic cache policy requires .L2::cache_hint and a scalar 64-bit operand";
+	}
 	if (opcode != Mma && (d.vec == PTXOperand::v8 || a.vec == PTXOperand::v8 ||
 		b.vec == PTXOperand::v8 || c.vec == PTXOperand::v8)) return "eight-register fragments require mma";
 	if( opcode == Min || opcode == Max ) {
@@ -662,10 +709,37 @@ std::string ir::PTXInstruction::valid() const {
 			break;	
 		}
 		case Atom: {
+			const bool half = type == PTXOperand::f16 || type == PTXOperand::f16x2;
+			if ((atomicOperation == AtomicCas) != (c.addressMode != PTXOperand::Invalid)) return "atom.cas requires two values; other atom operations require one";
+			if (a.addressMode != PTXOperand::Address && a.addressMode != PTXOperand::Register &&
+				a.addressMode != PTXOperand::Indirect && a.addressMode != PTXOperand::Immediate) return "atom requires an address";
+			if (a.vec != PTXOperand::v1 || !a.array.empty() || (a.addressMode != PTXOperand::Address &&
+				((a.bytes() != 4 && a.bytes() != 8) || (!PTXOperand::isInt(a.type) && a.type != PTXOperand::b32 && a.type != PTXOperand::b64))))
+				return "atom requires a scalar integer address";
+			if (a.addressMode == PTXOperand::Immediate && a.imm_uint > 0xffffffffULL) return "atom absolute address must fit in 32 bits";
+			const bool cas16 = type == PTXOperand::b16 && atomicOperation == AtomicCas;
+			if (cas16) {
+				if (modifier || vec != PTXOperand::v1) return "atom.cas.b16 does not accept modifiers or vectors";
+				for (const auto* operand : {&d, &b, &c}) {
+					if (operand == &d && operand->addressMode == PTXOperand::BitBucket) continue;
+					if ((operand->addressMode != PTXOperand::Register && !(operand != &d && operand->addressMode == PTXOperand::Immediate)) ||
+						operand->vec != PTXOperand::v1 || !operand->array.empty() || operand->bytes() != 2 || !PTXOperand::valid(type, operand->type))
+						return "atom.cas.b16 requires scalar 16-bit operands";
+				}
+			}
+			if ((half && modifier != noftz) || (!half && (modifier & noftz))) return "atom requires .noftz only for f16/f16x2";
+			if (half) {
+				if (atomicOperation != AtomicAdd || c.addressMode != PTXOperand::Invalid || vec != PTXOperand::v1)
+					return "half atom requires scalar two-source add";
+				if (b.addressMode != PTXOperand::Register || b.vec != PTXOperand::v1 || !b.array.empty() ||
+					b.bytes() != PTXOperand::bytes(type) || !PTXOperand::valid(type, b.type)) return "half atom requires a matching scalar register source";
+				if (d.addressMode != PTXOperand::BitBucket && (d.addressMode != PTXOperand::Register ||
+					d.vec != PTXOperand::v1 || !d.array.empty() || d.bytes() != PTXOperand::bytes(type) || !PTXOperand::valid(type, d.type))) return "half atom requires a matching scalar register destination";
+			}
 			if( ( atomicOperation == AtomicAnd || atomicOperation == AtomicOr
 				|| atomicOperation == AtomicXor || atomicOperation == AtomicCas
 				|| atomicOperation == AtomicExch )
-				&& type != PTXOperand::b32 && type != PTXOperand::b64 ) {
+				&& type != PTXOperand::b32 && type != PTXOperand::b64 && !cas16 ) {
 				return "invalid instruction type "
 					+ PTXOperand::toString( type ) + " for atomic "
 					+ toString( atomicOperation );
@@ -679,7 +753,7 @@ std::string ir::PTXInstruction::valid() const {
 			if( atomicOperation == AtomicAdd
 				&& type != PTXOperand::u32 && type != PTXOperand::s32
 				&& type != PTXOperand::u64 && type != PTXOperand::f32
-				&& type != PTXOperand::f64 ) {
+				&& type != PTXOperand::f64 && !half ) {
 				return "invalid instruction type "
 					+ PTXOperand::toString( type ) + " for atomic "
 					+ toString( atomicOperation );
@@ -691,7 +765,7 @@ std::string ir::PTXInstruction::valid() const {
 					+ PTXOperand::toString( type ) + " for atomic "
 					+ toString( atomicOperation );
 			}
-			if( !( addressSpace == Shared || addressSpace == Global ) ) {
+			if( !( addressSpace == Shared || addressSpace == Global || addressSpace == Generic ) ) {
 				return "invalid adress space " + toString( addressSpace );
 			}
 			break;
@@ -2173,6 +2247,10 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case Red: {
+			const bool half = type == PTXOperand::f16 || type == PTXOperand::f16x2;
+			if (modifier != (half ? noftz : Modifier_invalid)) return "red requires .noftz only for f16/f16x2";
+			if (half && (reductionOperation != ReductionAdd || b.addressMode != PTXOperand::Register))
+				return "half red requires add and a register value";
 			if( ( reductionOperation == ReductionAnd
 				|| reductionOperation == ReductionOr
 				|| reductionOperation == ReductionXor )
@@ -2184,7 +2262,7 @@ std::string ir::PTXInstruction::valid() const {
 			if( reductionOperation == ReductionAdd
 				&& ( type != PTXOperand::u32 && type != PTXOperand::s32
 				&& type != PTXOperand::u64 && type != PTXOperand::f32
-				&& type != PTXOperand::f64 ) ) {
+				&& type != PTXOperand::f64 && !half ) ) {
 				return "invalid instruction type "
 					+ PTXOperand::toString( type ) + " for reduction "
 					+ toString( reductionOperation );
@@ -2210,8 +2288,17 @@ std::string ir::PTXInstruction::valid() const {
 				&& a.addressMode != PTXOperand::Immediate ) {
 				return "operand A must be an address";
 			}
-			if( addressSpace != Shared && addressSpace != Global ) {
-				return "address space much be either shared or global";
+			if (a.vec != PTXOperand::v1 || !a.array.empty() || (a.addressMode != PTXOperand::Address &&
+				((a.bytes() != 4 && a.bytes() != 8) || (!PTXOperand::isInt(a.type) && a.type != PTXOperand::b32 && a.type != PTXOperand::b64))))
+				return "red requires a scalar integer address";
+			if (a.addressMode == PTXOperand::Immediate && a.imm_uint > 0xffffffffULL) return "red absolute address must fit in 32 bits";
+			if (b.vec != PTXOperand::v1 || !b.array.empty() || b.bytes() != PTXOperand::bytes(type) ||
+				(b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate &&
+				!(b.addressMode == PTXOperand::Special && b.special == PTXOperand::warpSize)) ||
+				(type != PTXOperand::b32 && type != PTXOperand::b64 && !PTXOperand::valid(type, b.type)))
+				return "red requires a scalar value compatible with instruction type";
+			if( addressSpace != Shared && addressSpace != Global && addressSpace != Generic ) {
+				return "red address space must be shared, global or generic";
 			}
 			break;
 		}
@@ -2935,14 +3022,17 @@ std::string ir::PTXInstruction::toString() const {
 				result += ( ( scope == GlobalLevel ) ? "gpu" : toString( scope ) )
 					+ std::string( "." );
 			}
-			result += toString( addressSpace )
-				+ "." + toString( atomicOperation ) + "."
-				+ PTXOperand::toString( type ) + " "
+			if (addressSpace != Generic) result += toString(addressSpace) + ".";
+			result += toString( atomicOperation ) + ".";
+			if (modifier & noftz) result += "noftz.";
+			if (cacheHint) result += "L2::cache_hint.";
+			result += PTXOperand::toString( type ) + " "
 				+ d.toString() + ", [" + a.toString() + "], "
 				+ b.toString();
 			if( c.addressMode != PTXOperand::Invalid ) {
 				result += ", " + c.toString();
 			}
+			if (q.addressMode != PTXOperand::Invalid) result += ", " + q.toString();
 			return result;
 		}
 		case BarWarp:
@@ -3314,6 +3404,13 @@ std::string ir::PTXInstruction::toString() const {
 			return guard() + "prefetch." + toString(addressSpace) + "." + 
 				PTXInstruction::toString(cacheLevel) + " [" + d.toString() + "]";
 		}
+		case Createpolicy: {
+			const std::string start = guard() + "createpolicy.";
+			if (policyMode == PolicyCvt) return start + "cvt.L2.b64 " + d.toString() + ", " + a.toString();
+			const std::string mode = policyMode == PolicyRange ? (addressSpace == Global ? "range.global." : "range.") : "fractional.";
+			return start + mode + toString(primaryPriority) + "." + toString(secondaryPriority) + ".b64 " + d.toString() + ", " +
+				(policyMode == PolicyRange ? "[" + a.toString() + "], " + b.toString() + ", " + c.toString() : a.toString());
+		}
 		case Prefetchu: {
 			return guard() + "prefetchu.L1 [" + d.toString() + "]";
 		}
@@ -3348,10 +3445,13 @@ std::string ir::PTXInstruction::toString() const {
 				result += ( ( scope == GlobalLevel ) ? "gpu" : toString( scope ) )
 					+ std::string( "." );
 			}
-			result += toString( addressSpace ) + "."
-				+ toString( reductionOperation ) + "."
-				+ PTXOperand::toString( type ) + " " + d.toString() + ", "
-				+ a.toString();
+			if (addressSpace != Generic) result += toString(addressSpace) + ".";
+			result += toString( reductionOperation ) + ".";
+			if (modifier & noftz) result += "noftz.";
+			if (cacheHint) result += "L2::cache_hint.";
+			result += PTXOperand::toString( type ) + " [" + a.toString() + "], "
+				+ b.toString();
+			if (q.addressMode != PTXOperand::Invalid) result += ", " + q.toString();
 			return result;
 		}
 		case Rem: {
@@ -3611,7 +3711,7 @@ bool ir::PTXInstruction::isStore() const {
 
 bool ir::PTXInstruction::mayHaveAddressableOperand() const {
 	return opcode == Mov || opcode == Ld || opcode == St || opcode == Cvta
-		|| opcode == Atom || opcode == Ldu || opcode == Ldmatrix;
+		|| opcode == Atom || opcode == Red || opcode == Ldu || opcode == Ldmatrix || opcode == Createpolicy;
 }
 
 bool ir::PTXInstruction::mayHaveRelaxedTypeDestination() const {
@@ -3620,7 +3720,7 @@ bool ir::PTXInstruction::mayHaveRelaxedTypeDestination() const {
 }
 
 bool ir::PTXInstruction::hasSideEffects() const {
-	return opcode == St || opcode == Atom || opcode == BarWarp || opcode == Bar
+	return opcode == St || opcode == Atom || opcode == Red || opcode == BarWarp || opcode == Bar
 		|| opcode == Bra || opcode == Call || opcode == Exit || opcode == Ldu
 		|| opcode == Membar || opcode == Tex || opcode == Tld4
 		|| opcode == Prefetch || opcode == Sust || opcode == Suq
@@ -3629,7 +3729,7 @@ bool ir::PTXInstruction::hasSideEffects() const {
 
 bool ir::PTXInstruction::canObserveSideEffects() const {
 	if (opcode == ShflSync || opcode == BarWarp || opcode == Match || opcode == Redux || (opcode == Vote && voteSync)) return true;
-	if (opcode == Atom || opcode == Ldmatrix || opcode == Movmatrix || opcode == Activemask) return true;
+	if (opcode == Atom || opcode == Red || opcode == Ldmatrix || opcode == Movmatrix || opcode == Activemask) return true;
 
 	if (opcode == Ld) {
 		if (volatility == Volatile) {
@@ -3647,7 +3747,7 @@ bool ir::PTXInstruction::canObserveSideEffects() const {
 }
 
 bool ir::PTXInstruction::isMemoryInstruction() const {
-	return opcode == St || opcode == Atom
+	return opcode == St || opcode == Atom || opcode == Red
 		|| opcode == Ldu
 		|| opcode == Tex || opcode == Tld4
 		|| opcode == Prefetch || opcode == Sust || opcode == Ld || opcode == Ldmatrix;

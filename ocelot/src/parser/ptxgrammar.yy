@@ -106,7 +106,7 @@
 %token<value> TOKEN_RN TOKEN_RNA TOKEN_RM TOKEN_RZ TOKEN_RP TOKEN_SAT TOKEN_SATFINITE TOKEN_VOLATILE
 %token<value> TOKEN_TAIL TOKEN_UNI TOKEN_ALIGN TOKEN_BYTE TOKEN_WIDE TOKEN_CARRY
 %token<value> TOKEN_RNI TOKEN_RMI TOKEN_RZI TOKEN_RPI
-%token<value> TOKEN_FTZ TOKEN_APPROX TOKEN_FULL TOKEN_SHIFT_AMOUNT
+%token<value> TOKEN_FTZ TOKEN_NOFTZ TOKEN_APPROX TOKEN_FULL TOKEN_SHIFT_AMOUNT
 %token<value> TOKEN_NAN_MODIFIER TOKEN_XORSIGN TOKEN_ABS_MODIFIER TOKEN_RELU
 %token<value> TOKEN_R TOKEN_G TOKEN_B TOKEN_A TOKEN_L
 
@@ -127,7 +127,11 @@
 
 %token<value> TOKEN_CA TOKEN_WB TOKEN_CG TOKEN_CS TOKEN_LU TOKEN_CV TOKEN_WT TOKEN_NC
 
-%token<value> TOKEN_L1 TOKEN_L2
+%token<value> TOKEN_L1 TOKEN_L2 TOKEN_L2_CACHE_HINT
+%token<text> OPCODE_CREATEPOLICY
+%token TOKEN_FRACTIONAL TOKEN_EVICT_NORMAL TOKEN_EVICT_LAST TOKEN_EVICT_FIRST TOKEN_EVICT_UNCHANGED
+%token TOKEN_POLICY_RANGE TOKEN_POLICY_CVT
+%type<value> policyPriority
 
 %token<value> TOKEN_P
 
@@ -699,7 +703,7 @@ opcode : OPCODE_COS | OPCODE_SQRT | OPCODE_ADD | OPCODE_RSQRT | OPCODE_ADDC
 	| OPCODE_VOTE | OPCODE_SHR | OPCODE_SHL | OPCODE_MEMBAR | OPCODE_FENCE | OPCODE_FMA
 	| OPCODE_PMEVENT | OPCODE_POPC | OPCODE_CLZ | OPCODE_BFIND | OPCODE_BREV
 	| OPCODE_BFI | OPCODE_BMSK | OPCODE_FNS | OPCODE_TANH | OPCODE_TESTP | OPCODE_TLD4
-	| OPCODE_PREFETCH | OPCODE_PREFETCHU;
+	| OPCODE_PREFETCH | OPCODE_PREFETCHU | OPCODE_CREATEPOLICY;
 
 mma : OPCODE_MMA TOKEN_SP TOKEN_SYNC TOKEN_ALIGNED TOKEN_M16N8K8 TOKEN_ROW TOKEN_COL
 	TOKEN_F32 TOKEN_TF32 TOKEN_TF32 TOKEN_F32
@@ -945,7 +949,7 @@ instruction : activemask | ftzInstruction2 | ftzInstruction3 | approxInstruction
 	| basicInstruction3 | bfe | bfi | bfind | bmsk | brev | branch | addOrSub
 	| addCOrSubC | atom | bar | brkpt | clz | cvt | cvta | isspacep | div | dp2a | dp4a | exit
 	| fence | fns | ld | ldu | ldmatrix | lop3 | mad | mad24 | madc | mma | membar | mov | movmatrix | mul24 | mul | notInstruction
-	| pmevent | popc | prefetch | prefetchu | prmt | rcpSqrtInstruction | red | redux | match
+	| pmevent | popc | prefetch | prefetchu | createpolicy | prmt | rcpSqrtInstruction | red | redux | match
 	| ret | sad | selp | set | setp | slct | st | suld | suq | sured | sust | szext
 	| testp | tex | tld4 | trap | txq | vote | shfl | shf;
 
@@ -1152,12 +1156,6 @@ atomicOperation : atomicOperationId
 	state.atomic( $<value>1 );
 };
 
-atomModifier: addressSpace;
-atomModifier: /* empty string */
-{
-	state.addressSpace(TOKEN_GLOBAL);
-}
-
 atomicSemantics : TOKEN_RELAXED { state.semantics( $<value>1 ); }
 	| TOKEN_ACQUIRE { state.semantics( $<value>1 ); }
 	| TOKEN_RELEASE { state.semantics( $<value>1 ); }
@@ -1172,18 +1170,26 @@ atomicScope : fenceScopeType { state.scope( $<value>1 ); };
 
 optionalAtomicScope : atomicScope | /* empty */;
 
-atom : OPCODE_ATOM optionalAtomicSemantics optionalAtomicScope atomModifier
-	atomicOperation dataType operand ',' '['
-	memoryOperand ']' ',' operand ';'
+atom : OPCODE_ATOM optionalAtomicSemantics optionalAtomicScope atomicAddressSpace
+	atomicOperation optionalNoftz atomicCacheHint dataType operand ',' '['
+	checkedAddress ']' ',' operand ';'
 {
-	state.instruction( $<text>1, $<value>6 );
+	state.instruction( $<text>1, $<value>8 );
+	if (state.statement.instruction.a.addressMode == ir::PTXOperand::Immediate)
+		state.statement.instruction.a.type = ir::PTXOperand::u64;
 };
 
-atom : OPCODE_ATOM optionalAtomicSemantics optionalAtomicScope atomModifier
-	atomicOperation dataType operand ',' '['
-	memoryOperand ']' ',' operand ',' operand ';'
+atom : OPCODE_ATOM optionalAtomicSemantics optionalAtomicScope atomicAddressSpace
+	atomicOperation optionalNoftz atomicCacheHint dataType operand ',' '['
+	checkedAddress ']' ',' operand ',' operand ';'
 {
-	state.instruction( $<text>1, $<value>6 );
+	if (state.statement.instruction.cacheHint) {
+		state.statement.instruction.q = state.operandVector.back().operand;
+		state.operandVector.pop_back();
+	}
+	state.instruction( $<text>1, $<value>8 );
+	if (state.statement.instruction.a.addressMode == ir::PTXOperand::Immediate)
+		state.statement.instruction.a.type = ir::PTXOperand::u64;
 };
 
 shiftAmount : TOKEN_SHIFT_AMOUNT
@@ -1444,7 +1450,7 @@ matrixSpace : TOKEN_SHARED { state.addressSpace(TOKEN_SHARED); }
 	| TOKEN_SHARED_CTA { state.addressSpace(TOKEN_SHARED); }
 	| /* empty */ { state.statement.instruction.addressSpace = ir::PTXInstruction::Generic; };
 ldmatrix : OPCODE_LDMATRIX TOKEN_SYNC TOKEN_ALIGNED TOKEN_M8N8 matrixCount
-	matrixTranspose matrixSpace TOKEN_B16 arrayOperand ',' '[' matrixAddress ']' ';'
+	matrixTranspose matrixSpace TOKEN_B16 arrayOperand ',' '[' checkedAddress ']' ';'
 {
 	state.instruction($<text>1, TOKEN_B16);
 	auto& instruction = state.statement.instruction;
@@ -1452,12 +1458,12 @@ ldmatrix : OPCODE_LDMATRIX TOKEN_SYNC TOKEN_ALIGNED TOKEN_M8N8 matrixCount
 	if (instruction.a.addressMode == ir::PTXOperand::Immediate) instruction.a.type = ir::PTXOperand::u64;
 };
 
-matrixAddress : identifier optionalVectorIndex { state.matrixAddress($<text>1, 0, @1); }
-	| identifier optionalVectorIndex TOKEN_DECIMAL_CONSTANT { state.matrixNegativeOffset($<text>1, $<value>3, @1); }
-	| identifier optionalVectorIndex '+' TOKEN_DECIMAL_CONSTANT { state.matrixAddress($<text>1, $<value>4, @1); }
-	| identifier optionalVectorIndex '-' TOKEN_DECIMAL_CONSTANT { state.matrixAddress($<text>1, $<value>4, @1, true); }
-	| TOKEN_DECIMAL_CONSTANT { state.matrixImmediate($<value>1, @1); }
-	| TOKEN_UNSIGNED_DECIMAL_CONSTANT { state.matrixImmediate($<uvalue>1, @1); };
+checkedAddress : identifier optionalVectorIndex { state.checkedAddress($<text>1, 0, @1); }
+	| identifier optionalVectorIndex TOKEN_DECIMAL_CONSTANT { state.checkedNegativeOffset($<text>1, $<value>3, @1); }
+	| identifier optionalVectorIndex '+' TOKEN_DECIMAL_CONSTANT { state.checkedAddress($<text>1, $<value>4, @1); }
+	| identifier optionalVectorIndex '-' TOKEN_DECIMAL_CONSTANT { state.checkedAddress($<text>1, $<value>4, @1, true); }
+	| TOKEN_DECIMAL_CONSTANT { state.checkedImmediate($<value>1, @1); }
+	| TOKEN_UNSIGNED_DECIMAL_CONSTANT { state.checkedImmediate($<uvalue>1, @1); };
 
 ldu : OPCODE_LDU ldModifier dataType arrayOperand ',' '[' memoryOperand ']' ';'
 {
@@ -1622,6 +1628,41 @@ cacheLevel : TOKEN_L1 { state.cacheLevel( $<value>1 ); }
 	| TOKEN_L2 { state.cacheLevel( $<value>1 ); }
 	;
 
+policyPriority : TOKEN_EVICT_NORMAL { $$ = ir::PTXInstruction::EvictNormal; }
+	| TOKEN_EVICT_LAST { $$ = ir::PTXInstruction::EvictLast; }
+	| TOKEN_EVICT_FIRST { $$ = ir::PTXInstruction::EvictFirst; }
+	| TOKEN_EVICT_UNCHANGED { $$ = ir::PTXInstruction::EvictUnchanged; };
+policyPriorities : policyPriority { state.statement.instruction.primaryPriority = ir::PTXInstruction::CachePriority($1); }
+	| policyPriority policyPriority { state.statement.instruction.primaryPriority = ir::PTXInstruction::CachePriority($1); state.statement.instruction.secondaryPriority = ir::PTXInstruction::CachePriority($2); };
+policyFraction : /* empty */ { state.operandVector.push_back(ir::PTXOperand(1.0f)); }
+	| ',' operand;
+createpolicy : OPCODE_CREATEPOLICY TOKEN_FRACTIONAL policyPriorities TOKEN_B64 operand policyFraction ';'
+{
+	const auto fraction = state.operandVector.back().operand;
+	state.instruction($1, TOKEN_B64);
+	state.statement.instruction.a = fraction;
+	if (fraction.addressMode == ir::PTXOperand::Immediate && fraction.type == ir::PTXOperand::f64)
+		state.statement.instruction.a = ir::PTXOperand(float(fraction.imm_float));
+};
+
+createpolicy : OPCODE_CREATEPOLICY TOKEN_POLICY_CVT TOKEN_L2 TOKEN_B64 operand ',' operand ';'
+{
+	const auto property = state.operandVector.back().operand;
+	state.instruction($1, TOKEN_B64); state.statement.instruction.policyMode = ir::PTXInstruction::PolicyCvt;
+	state.statement.instruction.a = property;
+};
+createpolicy : OPCODE_CREATEPOLICY TOKEN_POLICY_RANGE optionalAddressSpace policyPriorities TOKEN_B64 operand ',' '[' checkedAddress ']' ',' operand ',' operand ';'
+{
+	const auto primary = state.operandVector[state.operandVector.size() - 2].operand, total = state.operandVector.back().operand;
+	state.instruction($1, TOKEN_B64); auto& ins = state.statement.instruction; ins.policyMode = ir::PTXInstruction::PolicyRange;
+	ins.b = primary; ins.c = total;
+	if (ins.a.addressMode == ir::PTXOperand::Immediate) ins.a.type = ir::PTXOperand::u64;
+	for (auto* size : {&ins.b,&ins.c}) {
+		if (size->addressMode == ir::PTXOperand::Special && size->special == ir::PTXOperand::warpSize) *size = ir::PTXOperand(32,ir::PTXOperand::u32);
+		else if (size->addressMode == ir::PTXOperand::Immediate && ir::PTXOperand::isInt(size->type)) size->type = ir::PTXOperand::u32;
+	}
+};
+
 prefetch : OPCODE_PREFETCH addressSpace cacheLevel '[' memoryOperand ']' ';'
 {
 	state.instruction( $<text>1 );
@@ -1696,11 +1737,37 @@ redux : OPCODE_REDUX TOKEN_SYNC reductionOperation dataType operand ',' operand 
 	state.statement.instruction.b = mask;
 };
 
-red : OPCODE_RED optionalReductionSemantics optionalAtomicScope addressSpace
-	reductionOperation dataType operand ','
-	operand ';'
+redAddress : '[' checkedAddress ']' | operand;
+
+atomicAddressSpace : optionalAddressSpace
+	| TOKEN_SHARED_CTA { state.addressSpace(TOKEN_SHARED); };
+
+optionalNoftz : /* empty */
+	| TOKEN_NOFTZ { state.modifier($1); };
+
+atomicCacheHint : /* empty */
+	| TOKEN_L2_CACHE_HINT { state.statement.instruction.cacheHint = true; };
+atomicCachePolicy : /* empty */
+	| ',' operand { state.statement.instruction.q = state.operandVector.back().operand; state.operandVector.pop_back(); };
+
+red : OPCODE_RED optionalReductionSemantics optionalAtomicScope atomicAddressSpace
+	reductionOperation optionalNoftz atomicCacheHint dataType redAddress ','
+	operand atomicCachePolicy ';'
 {
-	state.instruction( $<text>1, $<value>6 );
+	const auto value = state.operandVector.back().operand;
+	state.instruction( $<text>1, $<value>8 );
+	auto& instr = state.statement.instruction;
+	instr.b = value;
+	if (value.addressMode == ir::PTXOperand::Special && value.special == ir::PTXOperand::warpSize)
+		instr.b = ir::PTXOperand(32, ir::PTXOperand::u64);
+	if (instr.b.addressMode == ir::PTXOperand::Immediate) {
+		if (instr.type == ir::PTXOperand::f32 && instr.b.type == ir::PTXOperand::f64) {
+			instr.b.imm_single = static_cast<ir::PTXF32>(instr.b.imm_float);
+			instr.b.type = ir::PTXOperand::f32;
+		} else if (ir::PTXOperand::isInt(instr.b.type) && !ir::PTXOperand::isFloat(instr.type)) instr.b.type = instr.type;
+	}
+	instr.a = instr.d;
+	instr.d = ir::PTXOperand();
 };
 
 ret : OPCODE_RET optionalUni ';'

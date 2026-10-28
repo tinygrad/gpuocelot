@@ -1661,7 +1661,7 @@ namespace parser
 		operandVector.push_back( OperandWrapper( operand, mode->space ) );
 	}
 
-	void PTXParser::State::matrixAddress(const std::string& name, long long offset,
+	void PTXParser::State::checkedAddress(const std::string& name, long long offset,
 		YYLTYPE& location, bool subtract)
 	{
 		if (offset < -2147483648LL || offset > 2147483648LL)
@@ -1673,19 +1673,19 @@ namespace parser
 		auto& address = operandVector.back().operand;
 		if (address.vec != ir::PTXOperand::v1 || !address.array.empty() ||
 			(address.addressMode != ir::PTXOperand::Register && address.addressMode != ir::PTXOperand::Address))
-			throw_exception(toString(location, *this) << "ldmatrix requires a scalar address", InvalidArray);
+			throw_exception(toString(location, *this) << "Memory operand requires a scalar address", InvalidArray);
 		if (address.addressMode == ir::PTXOperand::Register) address.addressMode = ir::PTXOperand::Indirect;
 		address.offset = static_cast<int>(offset);
 	}
 
-	void PTXParser::State::matrixNegativeOffset(const std::string& name, long long offset, YYLTYPE& location)
+	void PTXParser::State::checkedNegativeOffset(const std::string& name, long long offset, YYLTYPE& location)
 	{
 		if (offset >= 0)
 			throw_exception(toString(location, *this) << "Missing address offset operator", InvalidArray);
-		matrixAddress(name, offset, location);
+		checkedAddress(name, offset, location);
 	}
 
-	void PTXParser::State::matrixImmediate(long long unsigned value, YYLTYPE& location)
+	void PTXParser::State::checkedImmediate(long long unsigned value, YYLTYPE& location)
 	{
 		if (value > 0xffffffffULL)
 			throw_exception(toString(location, *this) << "Absolute address exceeds unsigned 32 bits", InvalidArray);
@@ -2817,6 +2817,7 @@ namespace parser
 		if( string == "copysign" ) return ir::PTXInstruction::CopySign;
 		if( string == "cos" ) return ir::PTXInstruction::Cos;
 		if( string == "cvt" ) return ir::PTXInstruction::Cvt;
+		if (string == "createpolicy") return ir::PTXInstruction::Createpolicy;
 		if( string == "cvta" ) return ir::PTXInstruction::Cvta;
 		if( string == "div" ) return ir::PTXInstruction::Div;
 		if( string == "dp2a" ) return ir::PTXInstruction::Dp2a;
@@ -2910,6 +2911,7 @@ namespace parser
 			case TOKEN_RPI: return ir::PTXInstruction::rpi; break;
 			case TOKEN_RP: return ir::PTXInstruction::rp; break;
 			case TOKEN_FTZ: return ir::PTXInstruction::ftz; break;
+			case TOKEN_NOFTZ: return ir::PTXInstruction::noftz; break;
 			case TOKEN_APPROX: return ir::PTXInstruction::approx; break;			
 			case TOKEN_NAN_MODIFIER: return ir::PTXInstruction::nan; break;
 			case TOKEN_XORSIGN: return ir::PTXInstruction::xorsign; break;

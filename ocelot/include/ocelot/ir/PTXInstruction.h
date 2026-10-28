@@ -87,6 +87,7 @@ namespace ir {
 			Pmevent,
 			Popc,
 			Prefetch,
+			Createpolicy,
 			Prefetchu,
 			Prmt,
 			Rcp,
@@ -168,6 +169,7 @@ namespace ir {
 			relu = 524288,	//< clamp negative floating-point results to zero
 			rna = 1048576,	//< round to nearest, ties away from zero
 			satfinite = 2097152,	//< clamp integer mma result to representable range
+			noftz = 4194304,	//< preserve subnormal inputs and results
 			Modifier_invalid = 0
 		};
 			
@@ -392,6 +394,9 @@ namespace ir {
 		
 	public:
 		static std::string toString( Level );
+		enum CachePriority { EvictNormal, EvictLast, EvictFirst, EvictUnchanged };
+		enum PolicyMode { PolicyFractional, PolicyRange, PolicyCvt };
+		static std::string toString(CachePriority);
 		static std::string toString( Semantics );
 		static std::string toString( CacheLevel cache );
 		static std::string toStringLoad( CacheOperation op );
@@ -554,6 +559,9 @@ namespace ir {
 			semantics/scope pair but are syntactically distinct and must
 			round-trip through the printer differently. */
 		bool mmio;
+		bool cacheHint; // atom/red .L2::cache_hint; policy operand is q.
+		PolicyMode policyMode;
+		CachePriority primaryPriority, secondaryPriority;
 	
 		/*! If the instruction is predicated, the guard */
 		PTXOperand pg;

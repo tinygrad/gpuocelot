@@ -117,7 +117,8 @@ DataflowGraph::Instruction DataflowGraph::convert( ir::PTXInstruction& i )
 		sources[ 4 ] = &ir::PTXInstruction::pq;
 	}
 
-	if (i.opcode == ir::PTXInstruction::ShflSync || (i.opcode == ir::PTXInstruction::Mma && i.mmaSparse)) {
+	if (i.opcode == ir::PTXInstruction::ShflSync || (i.opcode == ir::PTXInstruction::Mma && i.mmaSparse) ||
+		((i.opcode == ir::PTXInstruction::Atom || i.opcode == ir::PTXInstruction::Red) && i.cacheHint)) {
 		limit = 5;
 		sources[4] = &ir::PTXInstruction::q;
 	}

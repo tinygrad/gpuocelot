@@ -140,6 +140,7 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return OPCODE_COS; }
 "cvt"                           { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_CVT; }
+"createpolicy"                  { sstrcpy(yylval->text, yytext, 1024); return OPCODE_CREATEPOLICY; }
 "cvta"                          { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_CVTA; }
 "div"                           { sstrcpy( yylval->text, yytext, 1024 ); \
@@ -450,6 +451,7 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
 ".satfinite"                    { yylval->value = TOKEN_SATFINITE; return TOKEN_SATFINITE; }
 ".sat"                          { yylval->value = TOKEN_SAT; return TOKEN_SAT; }
 ".ftz"                          { yylval->value = TOKEN_FTZ; return TOKEN_FTZ; }
+".noftz"                        { yylval->value = TOKEN_NOFTZ; return TOKEN_NOFTZ; }
 ".relu"                         { yylval->value = TOKEN_RELU; return TOKEN_RELU; }
 ".approx"                       { yylval->value = TOKEN_APPROX; \
                                     return TOKEN_APPROX; }
@@ -518,6 +520,14 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
 
 ".L1"                           { yylval->value = TOKEN_L1; return TOKEN_L1; }
 ".L2"                           { yylval->value = TOKEN_L2; return TOKEN_L2; }
+".L2::cache_hint"               { yylval->value = TOKEN_L2_CACHE_HINT; return TOKEN_L2_CACHE_HINT; }
+".fractional"                   { return TOKEN_FRACTIONAL; }
+".range"                        { return TOKEN_POLICY_RANGE; }
+".cvt"                          { return TOKEN_POLICY_CVT; }
+".L2::evict_normal"             { return TOKEN_EVICT_NORMAL; }
+".L2::evict_last"               { return TOKEN_EVICT_LAST; }
+".L2::evict_first"              { return TOKEN_EVICT_FIRST; }
+".L2::evict_unchanged"          { return TOKEN_EVICT_UNCHANGED; }
 
 ".width"                        { yylval->value = TOKEN_WIDTH; \
                                     return TOKEN_WIDTH; }
