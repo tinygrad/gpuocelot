@@ -2817,6 +2817,10 @@ namespace parser
 		if( string == "copysign" ) return ir::PTXInstruction::CopySign;
 		if( string == "cos" ) return ir::PTXInstruction::Cos;
 		if( string == "cvt" ) return ir::PTXInstruction::Cvt;
+		if (string == "cp.async") return ir::PTXInstruction::CpAsync;
+		if (string == "cp.async.commit_group") return ir::PTXInstruction::CpAsyncCommitGroup;
+		if (string == "cp.async.wait_group") return ir::PTXInstruction::CpAsyncWaitGroup;
+		if (string == "cp.async.wait_all") return ir::PTXInstruction::CpAsyncWaitAll;
 		if (string == "createpolicy") return ir::PTXInstruction::Createpolicy;
 		if( string == "cvta" ) return ir::PTXInstruction::Cvta;
 		if( string == "div" ) return ir::PTXInstruction::Div;

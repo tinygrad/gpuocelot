@@ -65,6 +65,7 @@
 %token<text> OPCODE_SHR OPCODE_SHL OPCODE_FMA OPCODE_MEMBAR OPCODE_PMEVENT
 %token<text> OPCODE_POPC OPCODE_PRMT OPCODE_CLZ OPCODE_BFIND OPCODE_BREV 
 %token<text> OPCODE_BFI OPCODE_BFE OPCODE_BMSK OPCODE_FNS OPCODE_TANH OPCODE_TESTP OPCODE_TLD4 OPCODE_BAR
+%token<text> OPCODE_CP_ASYNC OPCODE_CP_COMMIT OPCODE_CP_WAIT_GROUP OPCODE_CP_WAIT_ALL
 %token<text> OPCODE_PREFETCH OPCODE_PREFETCHU OPCODE_SHFL OPCODE_SHF
 %token<text> OPCODE_MMA
 %token<text> OPCODE_LDMATRIX OPCODE_MOVMATRIX OPCODE_ACTIVEMASK
@@ -127,7 +128,7 @@
 
 %token<value> TOKEN_CA TOKEN_WB TOKEN_CG TOKEN_CS TOKEN_LU TOKEN_CV TOKEN_WT TOKEN_NC
 
-%token<value> TOKEN_L1 TOKEN_L2 TOKEN_L2_CACHE_HINT
+%token<value> TOKEN_L1 TOKEN_L2 TOKEN_L2_CACHE_HINT TOKEN_L2_PREFETCH
 %token<text> OPCODE_CREATEPOLICY
 %token TOKEN_FRACTIONAL TOKEN_EVICT_NORMAL TOKEN_EVICT_LAST TOKEN_EVICT_FIRST TOKEN_EVICT_UNCHANGED
 %token TOKEN_POLICY_RANGE TOKEN_POLICY_CVT
@@ -703,7 +704,8 @@ opcode : OPCODE_COS | OPCODE_SQRT | OPCODE_ADD | OPCODE_RSQRT | OPCODE_ADDC
 	| OPCODE_VOTE | OPCODE_SHR | OPCODE_SHL | OPCODE_MEMBAR | OPCODE_FENCE | OPCODE_FMA
 	| OPCODE_PMEVENT | OPCODE_POPC | OPCODE_CLZ | OPCODE_BFIND | OPCODE_BREV
 	| OPCODE_BFI | OPCODE_BMSK | OPCODE_FNS | OPCODE_TANH | OPCODE_TESTP | OPCODE_TLD4
-	| OPCODE_PREFETCH | OPCODE_PREFETCHU | OPCODE_CREATEPOLICY;
+	| OPCODE_PREFETCH | OPCODE_PREFETCHU | OPCODE_CREATEPOLICY
+	| OPCODE_CP_ASYNC | OPCODE_CP_COMMIT | OPCODE_CP_WAIT_GROUP | OPCODE_CP_WAIT_ALL;
 
 mma : OPCODE_MMA TOKEN_SP TOKEN_SYNC TOKEN_ALIGNED TOKEN_M16N8K8 TOKEN_ROW TOKEN_COL
 	TOKEN_F32 TOKEN_TF32 TOKEN_TF32 TOKEN_F32
@@ -949,7 +951,7 @@ instruction : activemask | ftzInstruction2 | ftzInstruction3 | approxInstruction
 	| basicInstruction3 | bfe | bfi | bfind | bmsk | brev | branch | addOrSub
 	| addCOrSubC | atom | bar | brkpt | clz | cvt | cvta | isspacep | div | dp2a | dp4a | exit
 	| fence | fns | ld | ldu | ldmatrix | lop3 | mad | mad24 | madc | mma | membar | mov | movmatrix | mul24 | mul | notInstruction
-	| pmevent | popc | prefetch | prefetchu | createpolicy | prmt | rcpSqrtInstruction | red | redux | match
+	| cpAsync | cpAsyncWait | pmevent | popc | prefetch | prefetchu | createpolicy | prmt | rcpSqrtInstruction | red | redux | match
 	| ret | sad | selp | set | setp | slct | st | suld | suq | sured | sust | szext
 	| testp | tex | tld4 | trap | txq | vote | shfl | shf;
 
@@ -1662,6 +1664,33 @@ createpolicy : OPCODE_CREATEPOLICY TOKEN_POLICY_RANGE optionalAddressSpace polic
 		else if (size->addressMode == ir::PTXOperand::Immediate && ir::PTXOperand::isInt(size->type)) size->type = ir::PTXOperand::u32;
 	}
 };
+
+cpAsyncCache : TOKEN_CA { state.cacheOperation($1); } | TOKEN_CG { state.cacheOperation($1); };
+cpAsyncShared : TOKEN_SHARED | TOKEN_SHARED_CTA;
+cpAsyncSource : /* empty */ | ',' operand | ',' operand ',' operand;
+cpAsyncPrefetch : /* empty */ | TOKEN_L2_PREFETCH { state.statement.instruction.prefetchSize = $1; };
+cpAsync : OPCODE_CP_ASYNC cpAsyncCache cpAsyncShared TOKEN_GLOBAL atomicCacheHint cpAsyncPrefetch '[' checkedAddress ']' ',' '[' checkedAddress ']' ',' operand cpAsyncSource ';' {
+	const auto dst = state.operandVector[1].operand, src = state.operandVector[2].operand, size = state.operandVector[3].operand;
+	auto sourceSize = ir::PTXOperand(), policy = ir::PTXOperand();
+	if (state.operandVector.size() == 6) {
+		sourceSize = state.operandVector[4].operand; policy = state.operandVector.back().operand;
+	} else if (state.operandVector.size() == 5) {
+		const auto extra = state.operandVector.back().operand;
+		if (state.statement.instruction.cacheHint && extra.type != ir::PTXOperand::pred && extra.bytes() == 8) policy = extra;
+		else sourceSize = extra;
+	}
+	state.instruction($1, TOKEN_B32);
+	auto& ins = state.statement.instruction; ins.pq = ir::PTXOperand(); ins.q = policy; ins.c = sourceSize; ins.d = dst; ins.a = src; ins.b = size; ins.addressSpace = ir::PTXInstruction::Shared;
+};
+
+cpAsyncWait : OPCODE_CP_COMMIT ';' { state.instruction($1); }
+ | OPCODE_CP_WAIT_ALL ';' { state.instruction($1); }
+ | OPCODE_CP_WAIT_GROUP operand ';' {
+	auto count = state.operandVector.back().operand;
+	if (count.addressMode == ir::PTXOperand::Special && count.special == ir::PTXOperand::warpSize) count = ir::PTXOperand(32, ir::PTXOperand::u32);
+	state.instruction($1); state.statement.instruction.a = count;
+	state.statement.instruction.d = ir::PTXOperand();
+ };
 
 prefetch : OPCODE_PREFETCH addressSpace cacheLevel '[' memoryOperand ']' ';'
 {

@@ -450,6 +450,10 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case Pmevent:    return "pmevent";    break;
 		case Popc:       return "popc";       break;
 		case Prefetch:   return "prefetch";   break;
+		case CpAsync: return "cp.async";
+		case CpAsyncCommitGroup: return "cp.async.commit_group";
+		case CpAsyncWaitGroup: return "cp.async.wait_group";
+		case CpAsyncWaitAll: return "cp.async.wait_all";
 		case Createpolicy: return "createpolicy";
 		case Prefetchu:  return "prefetchu";  break;
 		case Prmt:       return "prmt";       break;
@@ -538,6 +542,7 @@ ir::PTXInstruction::PTXInstruction( Opcode op, const PTXOperand& _d,
 	tailCall = false;
 	mmio = false;
 	cacheHint = false;
+	prefetchSize = 0;
 	policyMode = PolicyFractional;
 	primaryPriority = EvictNormal;
 	secondaryPriority = EvictUnchanged;
@@ -556,6 +561,33 @@ bool ir::PTXInstruction::operator==( const PTXInstruction& i ) const {
 }
 
 std::string ir::PTXInstruction::valid() const {
+	if (opcode == CpAsync) {
+		if (prefetchSize && prefetchSize != 64 && prefetchSize != 128 && prefetchSize != 256) return "invalid cp.async prefetch size";
+		if (q.addressMode != PTXOperand::Invalid && (!cacheHint || (q.addressMode != PTXOperand::Register && q.addressMode != PTXOperand::Immediate) ||
+			q.vec != PTXOperand::v1 || !q.array.empty() || q.bytes() != 8 || !PTXOperand::valid(PTXOperand::b64,q.type))) return "cp.async policy requires cache_hint and a scalar 64-bit operand";
+		if (cacheOperation != Ca && cacheOperation != Cg) return "cp.async requires .ca or .cg";
+		if (b.addressMode != PTXOperand::Immediate || !PTXOperand::isInt(b.type) ||
+			(b.imm_uint != 4 && b.imm_uint != 8 && b.imm_uint != 16) || (cacheOperation == Cg && b.imm_uint != 16)) return "invalid cp.async copy size";
+		for (const auto* address : {&d, &a}) {
+			if (address->vec != PTXOperand::v1 || !address->array.empty()) return "cp.async requires scalar addresses";
+			if (address->addressMode == PTXOperand::Address) continue;
+			if (address->addressMode != PTXOperand::Indirect && address->addressMode != PTXOperand::Register && address->addressMode != PTXOperand::Immediate) return "invalid cp.async address";
+			if ((!PTXOperand::isInt(address->type) && address->type != PTXOperand::b32 && address->type != PTXOperand::b64) || (address->bytes() != 4 && address->bytes() != 8)) return "cp.async addresses require 32 or 64 bits";
+			if (address->addressMode == PTXOperand::Immediate && address->imm_uint > 0xffffffffULL) return "absolute address must fit in 32 bits";
+		}
+		if (c.addressMode != PTXOperand::Invalid) {
+			if (c.vec != PTXOperand::v1 || !c.array.empty()) return "cp.async requires a scalar source size or predicate";
+			if (c.type == PTXOperand::pred) {
+				if (c.addressMode != PTXOperand::Register) return "cp.async ignore-src requires a predicate register";
+			} else if ((c.addressMode != PTXOperand::Register && c.addressMode != PTXOperand::Immediate) ||
+				(!PTXOperand::isInt(c.type) && c.type != PTXOperand::b32) ||
+				(c.addressMode == PTXOperand::Register && c.bytes() != 4)) return "invalid cp.async source size";
+		}
+		return "";
+	}
+	if (opcode == CpAsyncCommitGroup || opcode == CpAsyncWaitAll) return "";
+	if (opcode == CpAsyncWaitGroup) return a.addressMode == PTXOperand::Immediate &&
+		PTXOperand::isInt(a.type) && (!PTXOperand::isSigned(a.type) || a.imm_int >= 0) ? "" : "cp.async.wait_group requires a nonnegative integer constant";
 	if (opcode == Createpolicy) {
 		if (type != PTXOperand::b64 || modifier || vec != PTXOperand::v1 || d.addressMode != PTXOperand::Register ||
 			d.vec != PTXOperand::v1 || !d.array.empty() || !PTXOperand::valid(PTXOperand::b64,d.type)) return "createpolicy requires a scalar b64 destination";
@@ -3404,6 +3436,17 @@ std::string ir::PTXInstruction::toString() const {
 			return guard() + "prefetch." + toString(addressSpace) + "." + 
 				PTXInstruction::toString(cacheLevel) + " [" + d.toString() + "]";
 		}
+		case CpAsync: {
+			std::string result = guard() + "cp.async." + (cacheOperation == Cg ? "cg" : "ca") + ".shared.global";
+			// Omit an unused hint to keep a folded source-size literal unambiguous.
+			if (cacheHint && (q.addressMode != PTXOperand::Invalid || c.addressMode != PTXOperand::Immediate)) result += ".L2::cache_hint";
+			if (prefetchSize) result += ".L2::" + std::to_string(prefetchSize) + "B";
+			return result + " [" + d.toString() + "], [" + a.toString() + "], " + b.toString() +
+				(c.addressMode == PTXOperand::Invalid ? "" : ", " + c.toString()) + (q.addressMode == PTXOperand::Invalid ? "" : ", " + q.toString());
+		}
+		case CpAsyncCommitGroup:
+		case CpAsyncWaitAll: return guard() + toString(opcode);
+		case CpAsyncWaitGroup: return guard() + toString(opcode) + " " + a.toString();
 		case Createpolicy: {
 			const std::string start = guard() + "createpolicy.";
 			if (policyMode == PolicyCvt) return start + "cvt.L2.b64 " + d.toString() + ", " + a.toString();
@@ -3706,12 +3749,12 @@ bool ir::PTXInstruction::isLoad() const {
 }
 
 bool ir::PTXInstruction::isStore() const {
-	return opcode == St;
+	return opcode == St || opcode == CpAsync;
 }
 
 bool ir::PTXInstruction::mayHaveAddressableOperand() const {
 	return opcode == Mov || opcode == Ld || opcode == St || opcode == Cvta
-		|| opcode == Atom || opcode == Red || opcode == Ldu || opcode == Ldmatrix || opcode == Createpolicy;
+		|| opcode == Atom || opcode == Red || opcode == Ldu || opcode == Ldmatrix || opcode == Createpolicy || opcode == CpAsync;
 }
 
 bool ir::PTXInstruction::mayHaveRelaxedTypeDestination() const {
@@ -3720,7 +3763,8 @@ bool ir::PTXInstruction::mayHaveRelaxedTypeDestination() const {
 }
 
 bool ir::PTXInstruction::hasSideEffects() const {
-	return opcode == St || opcode == Atom || opcode == Red || opcode == BarWarp || opcode == Bar
+	return opcode == CpAsync || opcode == CpAsyncCommitGroup || opcode == CpAsyncWaitGroup || opcode == CpAsyncWaitAll
+		|| opcode == St || opcode == Atom || opcode == Red || opcode == BarWarp || opcode == Bar
 		|| opcode == Bra || opcode == Call || opcode == Exit || opcode == Ldu
 		|| opcode == Membar || opcode == Tex || opcode == Tld4
 		|| opcode == Prefetch || opcode == Sust || opcode == Suq
@@ -3729,7 +3773,7 @@ bool ir::PTXInstruction::hasSideEffects() const {
 
 bool ir::PTXInstruction::canObserveSideEffects() const {
 	if (opcode == ShflSync || opcode == BarWarp || opcode == Match || opcode == Redux || (opcode == Vote && voteSync)) return true;
-	if (opcode == Atom || opcode == Red || opcode == Ldmatrix || opcode == Movmatrix || opcode == Activemask) return true;
+	if (opcode == CpAsync || opcode == Atom || opcode == Red || opcode == Ldmatrix || opcode == Movmatrix || opcode == Activemask) return true;
 
 	if (opcode == Ld) {
 		if (volatility == Volatile) {
@@ -3747,7 +3791,7 @@ bool ir::PTXInstruction::canObserveSideEffects() const {
 }
 
 bool ir::PTXInstruction::isMemoryInstruction() const {
-	return opcode == St || opcode == Atom || opcode == Red
+	return opcode == CpAsync || opcode == St || opcode == Atom || opcode == Red
 		|| opcode == Ldu
 		|| opcode == Tex || opcode == Tld4
 		|| opcode == Prefetch || opcode == Sust || opcode == Ld || opcode == Ldmatrix;

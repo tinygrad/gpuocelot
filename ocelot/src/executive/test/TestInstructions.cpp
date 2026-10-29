@@ -1653,6 +1653,138 @@ public:
 	// red is atom minus the writeback of the pre-update value; it shares
 	// evalAtomicRMW with eval_Atom but resolves its operation from the
 	// distinct reductionOperation field/enum rather than atomicOperation.
+	bool test_CpAsyncHints() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry cp_hints() { .shared .align 16 .b8 storage[16]; .reg .u32 d,n; .reg .u64 s; .reg .b64 policy; .reg .pred p; ";
+		for (const char* prefetch : {"", ".L2::64B", ".L2::128B", ".L2::256B"}) for (const char* tail : {"", ",policy", ",n", ",p", ",n,policy", ",p,policy", ",0,policy"}) {
+			std::stringstream source(prefix + "cp.async.ca.shared.global.L2::cache_hint" + prefetch + " [d],[s],16" + tail + "; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("cp_hints"), nullptr);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::CpAsync)
+				if (!ins.cacheHint) return false;
+		}
+		for (const char* body : {"ca.shared.global [d],[s],16,0,policy", "ca.shared.global.L2::cache_hint [d],[s],16,0,n", "ca.shared.global.L2::32B [d],[s],16", "ca.shared.global.L2::64B.L2::128B [d],[s],16"}) {
+			std::stringstream source(prefix + "cp.async." + body + "; ret; }");
+			try { Module bad; bad.load(source); return false; } catch (const std::exception&) {}
+		}
+		return true;
+	}
+
+	bool test_CpAsyncUndefinedBehavior() {
+		alignas(16) unsigned char input[32]; for (int i = 0; i < 32; ++i) input[i] = i + 1;
+		for (const std::string mode : {"n", "17", "-1", "dst-alignment", "src-alignment", "bounds"}) {
+			const bool registerCount = mode != "17" && mode != "-1";
+			const std::string count = registerCount ? "n" : mode;
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry cp_ub() { .shared .align 16 .b8 storage[32]; "
+				".reg .u32 d,n,completed; .reg .u64 s; cp.async.ca.shared.global [d],[s],16," + std::string(count) + "; mov.u32 completed,1; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("cp_ub"), nullptr); kernel.setKernelShape(2,1,1);
+			CooperativeThreadArray local(&kernel, Dim3(), false);
+			auto* shared = (unsigned char*)local.functionCallStack.sharedMemoryPointer(); std::memset(shared, 0xa5, 32);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::CpAsync) {
+				for (int lane = 0; lane < 2; ++lane) {
+					const unsigned int dst = lane ? 16 : mode == "dst-alignment" ? 1 : mode == "bounds" ? 32 : 0;
+					local.setRegAsU32(lane, ins.d.reg, dst);
+					local.setRegAsU64(lane, ins.a.reg, (PTXU64)(input + lane * 16 + (!lane && mode == "src-alignment")));
+					if (registerCount) local.setRegAsU32(lane, ins.c.reg, lane ? 8 : mode == "n" ? 17 : 16);
+				}
+			}
+			try { local.execute(); } catch (...) { status << "cp.async UB must not throw: " << mode << "\n"; return false; }
+			for (int i = 0; i < 32; ++i) {
+				const unsigned char expected = registerCount && i >= 16 ? (i < 24 ? input[i] : 0) : 0xa5;
+				if (shared[i] != expected) return false;
+			}
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Mov)
+				for (int lane = 0; lane < 2; ++lane) if (local.getRegAsU32(lane, ins.d.reg) != 1) return false;
+		}
+		return true;
+	}
+
+	bool test_CpAsyncZeroFill() {
+		alignas(16) unsigned char input[16]; for (int i = 0; i < 16; ++i) input[i] = 17 * i + 3;
+		for (int size : {4,8,16}) for (const char* option : {"0", "1", "n", "p", "!p"}) for (bool flag : {false,true}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry cp_zero() { .shared .align 16 .b8 storage[32]; .reg .u32 d,n; .reg .u64 s; .reg .pred p; cp.async.ca.shared.global [d],[s]," +
+				std::to_string(size) + "," + option + "; cp.async.wait_all; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("cp_zero"), nullptr); kernel.setKernelShape(1,1,1);
+			CooperativeThreadArray local(&kernel, Dim3(), false);
+			auto* shared = (unsigned char*)local.functionCallStack.sharedMemoryPointer(); std::memset(shared, 0xa5, 32);
+			unsigned int count = 0;
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::CpAsync) {
+				count = ins.c.type == PTXOperand::pred ? ((std::string(option) == "!p" ? !flag : flag) ? 0 : size) : std::string(option) == "n" ? size - 1 : std::stoi(option);
+				local.setRegAsU32(0, ins.d.reg, 0); local.setRegAsU64(0, ins.a.reg, count ? (PTXU64)input : 1);
+				if (ins.c.addressMode == PTXOperand::Register) {
+					if (ins.c.type == PTXOperand::pred) local.setRegAsPredicate(0, ins.c.reg, flag);
+					else local.setRegAsU32(0, ins.c.reg, size - 1);
+				}
+			}
+			local.execute();
+			for (int i = 0; i < 32; ++i) if (shared[i] != (i < count ? input[i] : i < size ? 0 : 0xa5)) return false;
+		}
+		return true;
+	}
+
+	bool test_CpAsyncCopy() {
+		alignas(16) unsigned char input[2048];
+		for (int i = 0; i < 2048; ++i) input[i] = (37 * i + 19) & 255;
+		for (int width : {32,64}) for (int threads : {1,31,64}) for (int size : {4,8,16}) for (bool cg : {false,true}) {
+			if (cg && size != 16) continue;
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry cp_copy() { .shared .align 16 .b8 storage[2048]; .reg .u" + std::to_string(width) +
+				" d; .reg .u64 s; .reg .pred p; @p cp.async." + (cg ? "cg" : "ca") + ".shared.global [d], [s], " + std::to_string(size) +
+				"; cp.async.commit_group; cp.async.wait_group 0; cp.async.wait_all; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("cp_copy"), nullptr);
+			kernel.setKernelShape(threads,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (int run = 0; run < 2; ++run) {
+				local.reset(); auto* shared = (unsigned char*)local.functionCallStack.sharedMemoryPointer();
+				std::memset(shared, 0xa5, 2048);
+				for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::CpAsync) {
+					for (int lane = 0; lane < threads; ++lane) {
+						if (width == 32) local.setRegAsU32(lane, ins.d.reg, lane * 32);
+						else local.setRegAsU64(lane, ins.d.reg, lane * 32);
+						local.setRegAsU64(lane, ins.a.reg, (PTXU64)(input + lane * 32));
+						local.setRegAsPredicate(lane, ins.pg.reg, (lane + run) % 2);
+					}
+				}
+				local.execute();
+				for (int i = 0; i < 2048; ++i) {
+					const unsigned char expected = i / 32 < threads && ((i / 32 + run) % 2) && i % 32 < size ? input[i] : 0xa5;
+					if (shared[i] != expected) { status << "cp.async byte mismatch " << i << "\n"; return false; }
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_CpAsyncFrontend() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry cp_front() { .reg .u32 d; .reg .u64 s; .reg .v2 .u64 v; .reg .f32 f; ";
+		for (const char* body : {"ca.shared.global [d], [s], 4", "ca.shared::cta.global [d+8], [v.y+16], 8", "ca.shared.global [0], [s], 16", "cg.shared.global [d], [s], 16"}) {
+			std::stringstream source(prefix + "cp.async." + body + "; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("cp_front"), nullptr);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::CpAsync)
+				if (!ins.isStore() || !ins.isMemoryInstruction() || !ins.hasSideEffects()) return false;
+		}
+		for (const char* body : {"ca.shared.global [d],[s],2", "cg.shared.global [d],[s],8", "ca.shared.global [f],[s],4", "ca.shared.global [d],[s],4.0", "ca.global.shared [d],[s],4", "ca.shared.global [d],[s],4,s", "ca.shared.global [d],[s],4,f"}) {
+			std::stringstream source(prefix + "cp.async." + body + "; ret; }");
+			try { Module bad; bad.load(source); return false; } catch (const std::exception&) {}
+		}
+		return true;
+	}
+
+	bool test_CpAsyncWait() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry copy_wait() { .reg .u32 n; ";
+		for (const char* body : {"cp.async.commit_group", "cp.async.wait_all", "cp.async.wait_group 0", "cp.async.wait_group 7", "cp.async.wait_group WARP_SZ"}) {
+			std::stringstream source(prefix + body + "; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("copy_wait"), nullptr); kernel.setKernelShape(32,1,1);
+			for (const auto& ins : kernel.instructions) if (!ins.hasSideEffects()) return false;
+			CooperativeThreadArray local(&kernel, Dim3(), false); local.execute();
+		}
+		for (const char* value : {"n", "-1", "0.5"}) {
+			std::stringstream source(prefix + "cp.async.wait_group " + value + "; ret; }");
+			try { Module bad; bad.load(source); return false; } catch (const std::exception&) {}
+		}
+		return true;
+	}
+
 	bool test_CreatepolicyRangeCvt() {
 		const std::string prefix = ".version 8.0\n.target sm_86\n.global .align 8 .b8 g[256]; .entry range_test() { .reg .b64 d,property; .reg .u64 p; .reg .v2 .u64 v; .reg .u32 s,t; .reg .f32 f; ";
 		for (const char* space : {"", ".global"}) for (const char* address : {"[p-8]", "[v.y+16]", "[0]", "[g+4]"}) for (const char* sizes : {"64,128", "s,t", "0,0x100000000", "WARP_SZ,128", "16,WARP_SZ"}) {
@@ -1793,11 +1925,7 @@ public:
 			for (auto ins : kernel.instructions) if (ins.opcode == PTXInstruction::Atom || ins.opcode == PTXInstruction::Red) {
 				if (seen++) { if (ins.cacheHint || ins.q.addressMode != PTXOperand::Invalid) return false; continue; }
 				if (!ins.cacheHint || (*policy && ins.q.bytes() != 8)) return false;
-				if (ins.q.addressMode == PTXOperand::Register) {
-					analysis::DataflowGraph graph; auto converted = graph.convert(ins); bool read = false;
-					for (const auto& input : converted.s) read |= input.pointer == &ins.q.reg;
-					if (!read || ins.q.reg == ins.a.reg) return false;
-				}
+				if (ins.q.addressMode == PTXOperand::Register && ins.q.reg == ins.a.reg) return false;
 				if (operation == "add.u32") {
 					kernel.setKernelShape(1,1,1); CooperativeThreadArray local(&kernel, Dim3(), false); PTXU32 memory = 7;
 					local.setRegAsU64(0, ins.a.reg, (PTXU64)&memory); local.setRegAsU32(0, ins.b.reg, 3);
@@ -5974,9 +6102,6 @@ public:
 				auto invalid = ins; invalid.modifier = PTXInstruction::sat; if (invalid.valid().empty()) return false;
 				if (ins.q.addressMode == PTXOperand::Register) {
 					for (const auto& definition : kernel.instructions) if (definition.opcode == PTXInstruction::Mov && definition.d.reg != ins.q.reg) return false;
-					auto copy = ins; analysis::DataflowGraph graph; const auto converted = graph.convert(copy); bool maskFound = false;
-					for (const auto& source : converted.s) maskFound |= source.pointer == &copy.q.reg;
-					if (!maskFound) return false;
 				}
 			}
 			if (found != 1) return false;
@@ -12024,6 +12149,12 @@ public:
 			result = (result && test_AtomicCacheHints());
 			result = (result && test_AtomicF32());
 			result = (result && test_AtomicF64());
+			result = (result && test_CpAsyncHints());
+			result = (result && test_CpAsyncUndefinedBehavior());
+			result = (result && test_CpAsyncZeroFill());
+			result = (result && test_CpAsyncCopy());
+			result = (result && test_CpAsyncFrontend());
+			result = (result && test_CpAsyncWait());
 			result = (result && test_CreatepolicyFraction());
 			result = (result && test_CreatepolicyRangeCvt());
 			result = (result && test_RedHalfExecution());

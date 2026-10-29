@@ -207,6 +207,10 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return OPCODE_OR; }
 "pmevent"                       { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_PMEVENT; }
+"cp.async"                      { sstrcpy(yylval->text, yytext, 1024); return OPCODE_CP_ASYNC; }
+"cp.async.commit_group"         { sstrcpy(yylval->text, yytext, 1024); return OPCODE_CP_COMMIT; }
+"cp.async.wait_group"           { sstrcpy(yylval->text, yytext, 1024); return OPCODE_CP_WAIT_GROUP; }
+"cp.async.wait_all"             { sstrcpy(yylval->text, yytext, 1024); return OPCODE_CP_WAIT_ALL; }
 "prefetch"                      { sstrcpy( yylval->text, yytext, 1024 ); \
                                   return OPCODE_PREFETCH; }
 "prefetchu"                     { sstrcpy( yylval->text, yytext, 1024 ); \
@@ -520,6 +524,9 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
 
 ".L1"                           { yylval->value = TOKEN_L1; return TOKEN_L1; }
 ".L2"                           { yylval->value = TOKEN_L2; return TOKEN_L2; }
+".L2::64B"                     { yylval->value = 64; return TOKEN_L2_PREFETCH; }
+".L2::128B"                    { yylval->value = 128; return TOKEN_L2_PREFETCH; }
+".L2::256B"                    { yylval->value = 256; return TOKEN_L2_PREFETCH; }
 ".L2::cache_hint"               { yylval->value = TOKEN_L2_CACHE_HINT; return TOKEN_L2_CACHE_HINT; }
 ".fractional"                   { return TOKEN_FRACTIONAL; }
 ".range"                        { return TOKEN_POLICY_RANGE; }

@@ -88,6 +88,10 @@ namespace ir {
 			Popc,
 			Prefetch,
 			Createpolicy,
+			CpAsync,
+			CpAsyncCommitGroup,
+			CpAsyncWaitGroup,
+			CpAsyncWaitAll,
 			Prefetchu,
 			Prmt,
 			Rcp,
@@ -559,7 +563,8 @@ namespace ir {
 			semantics/scope pair but are syntactically distinct and must
 			round-trip through the printer differently. */
 		bool mmio;
-		bool cacheHint; // atom/red .L2::cache_hint; policy operand is q.
+		bool cacheHint; // .L2::cache_hint; policy operand is q.
+		unsigned int prefetchSize; // cp.async L2 prefetch hint in bytes; zero means absent.
 		PolicyMode policyMode;
 		CachePriority primaryPriority, secondaryPriority;
 	

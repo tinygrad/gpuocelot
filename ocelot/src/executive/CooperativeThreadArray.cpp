@@ -776,6 +776,14 @@ void executive::CooperativeThreadArray::execute(int PC) {
 				eval_Popc(context, instr); break;
 			case ir::PTXInstruction::Prefetch:
 				eval_Prefetch(context, instr); break;
+			case ir::PTXInstruction::CpAsync:
+				eval_CpAsync(context, instr); break;
+			case ir::PTXInstruction::CpAsyncCommitGroup:
+			case ir::PTXInstruction::CpAsyncWaitGroup:
+			case ir::PTXInstruction::CpAsyncWaitAll:
+				// Copies complete immediately in the CTA emulator.
+				trace();
+				break;
 			case ir::PTXInstruction::Createpolicy:
 				// Cache hints are not modeled by the CTA emulator; no policy is needed.
 				trace();
@@ -7708,6 +7716,40 @@ void executive::CooperativeThreadArray::eval_Popc(CTAContext &context,
 	}
 	else {
 		throw RuntimeException("unsupported data type", context.PC, instr);
+	}
+}
+
+void executive::CooperativeThreadArray::eval_CpAsync(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	const std::string error = instr.valid();
+	if (!error.empty()) throw RuntimeException(error, context.PC, instr);
+	trace();
+	auto* shared = (unsigned char*)functionCallStack.sharedMemoryPointer();
+	const ir::PTXU64 sharedSize = functionCallStack.sharedMemorySize();
+	const unsigned int size = instr.b.imm_uint;
+	// Complete the copy immediately; commit/wait instructions have no pending work.
+	for (int thread = 0; thread < threadCount; ++thread) {
+		if (!context.predicated(thread, instr)) continue;
+		const ir::PTXU64 dst = instr.d.bytes() == 4 ? operandAsU32(thread, instr.d) : operandAsU64(thread, instr.d);
+		const ir::PTXU64 src = instr.a.bytes() == 4 ? operandAsU32(thread, instr.a) : operandAsU64(thread, instr.a);
+		unsigned int sourceSize = size;
+		if (instr.c.type == ir::PTXOperand::pred) {
+			const bool ignore = instr.c.condition == ir::PTXOperand::PT ||
+				(instr.c.condition != ir::PTXOperand::nPT && operandAsPredicate(thread, instr.c));
+			if (ignore) sourceSize = 0;
+		} else if (instr.c.addressMode != ir::PTXOperand::Invalid) sourceSize = operandAsU32(thread, instr.c);
+		if (sourceSize > size) {
+			report("warning: cp.async src-size " << sourceSize << " exceeds cp-size " << size
+				<< "; undefined behavior at PC " << context.PC << ", thread " << thread);
+			continue; // Leave this destination unchanged instead of making an invalid host copy.
+		}
+		if (dst % size || (sourceSize && src % size) || dst > sharedSize || sharedSize - dst < size) {
+			report("warning: cp.async misaligned address or out-of-bounds shared destination"
+				<< "; undefined behavior at PC " << context.PC << ", thread " << thread);
+			continue;
+		}
+		if (sourceSize) std::memcpy(shared + dst, (const void*)src, sourceSize);
+		std::memset(shared + dst + sourceSize, 0, size - sourceSize);
 	}
 }
 

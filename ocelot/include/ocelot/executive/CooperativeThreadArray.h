@@ -451,6 +451,7 @@ namespace executive {
 
 	public:
 		/*Handlers for each instruction */
+		void eval_CpAsync(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Abs(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Add(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_AddC(CTAContext &context, const ir::PTXInstruction &instr);
