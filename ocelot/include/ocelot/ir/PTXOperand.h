@@ -15,6 +15,9 @@
 
 namespace ir {
 
+	// Physical threads per warp on the supported NVIDIA PTX targets.
+	constexpr int WARP_SZ = 32;
+
 	typedef uint8_t PTXU8;
 	typedef uint16_t PTXU16;
 	typedef uint32_t PTXU32;

@@ -1667,7 +1667,7 @@ createpolicy : OPCODE_CREATEPOLICY TOKEN_POLICY_RANGE optionalAddressSpace polic
 	ins.b = primary; ins.c = total;
 	if (ins.a.addressMode == ir::PTXOperand::Immediate) ins.a.type = ir::PTXOperand::u64;
 	for (auto* size : {&ins.b,&ins.c}) {
-		if (size->addressMode == ir::PTXOperand::Special && size->special == ir::PTXOperand::warpSize) *size = ir::PTXOperand(32,ir::PTXOperand::u32);
+		if (size->addressMode == ir::PTXOperand::Special && size->special == ir::PTXOperand::warpSize) *size = ir::PTXOperand(ir::WARP_SZ,ir::PTXOperand::u32);
 		else if (size->addressMode == ir::PTXOperand::Immediate && ir::PTXOperand::isInt(size->type)) size->type = ir::PTXOperand::u32;
 	}
 };
@@ -1709,11 +1709,11 @@ wmmaType : dataTypeId | TOKEN_TF32 | TOKEN_S4 | TOKEN_U4 | TOKEN_B1;
 wmmaStride : /* empty */ | ',' operand;
 wmmaMemory : OPCODE_WMMA_MEMORY TOKEN_SYNC TOKEN_ALIGNED wmmaMemoryModifiers wmmaType arrayOperand ',' '[' checkedAddress ']' wmmaStride ';' {
  const auto address = state.operandVector[2].operand; auto stride = state.operandVector.size() == 4 ? state.operandVector[3].operand : ir::PTXOperand();
- if (stride.addressMode == ir::PTXOperand::Special && stride.special == ir::PTXOperand::warpSize) stride = ir::PTXOperand(32,ir::PTXOperand::u32);
+ if (stride.addressMode == ir::PTXOperand::Special && stride.special == ir::PTXOperand::warpSize) stride = ir::PTXOperand(ir::WARP_SZ,ir::PTXOperand::u32);
  state.instruction($1,$5); state.statement.instruction.a = address; state.statement.instruction.b = stride;
 } | OPCODE_WMMA_MEMORY TOKEN_SYNC TOKEN_ALIGNED wmmaMemoryModifiers wmmaType '[' checkedAddress ']' ',' arrayOperand wmmaStride ';' {
  const auto address = state.operandVector[1].operand; auto stride = state.operandVector.size() == 4 ? state.operandVector[3].operand : ir::PTXOperand();
- if (stride.addressMode == ir::PTXOperand::Special && stride.special == ir::PTXOperand::warpSize) stride = ir::PTXOperand(32,ir::PTXOperand::u32);
+ if (stride.addressMode == ir::PTXOperand::Special && stride.special == ir::PTXOperand::warpSize) stride = ir::PTXOperand(ir::WARP_SZ,ir::PTXOperand::u32);
  state.instruction($1,$5); state.statement.instruction.d = address; state.statement.instruction.b = stride;
 };
 
@@ -1729,11 +1729,11 @@ mbarrier : OPCODE_MBAR_WAIT mbarrierAcquire mbarrierScope matrixSpace TOKEN_B64 
  | OPCODE_MBAR_ARRIVE mbarrierArrival ';' {
  const auto address = state.operandVector[2].operand;
  auto count = state.operandVector.size() == 4 ? state.operandVector[3].operand : ir::PTXOperand(1,ir::PTXOperand::u32);
- if (count.addressMode == ir::PTXOperand::Special && count.special == ir::PTXOperand::warpSize) count = ir::PTXOperand(32,ir::PTXOperand::u32);
+ if (count.addressMode == ir::PTXOperand::Special && count.special == ir::PTXOperand::warpSize) count = ir::PTXOperand(ir::WARP_SZ,ir::PTXOperand::u32);
  state.instruction($1,TOKEN_B64); state.statement.instruction.a = address; state.statement.instruction.b = count;
 } | OPCODE_MBAR_INIT matrixSpace TOKEN_B64 '[' checkedAddress ']' ',' operand ';' {
 	auto count = state.operandVector.back().operand;
-	if (count.addressMode == ir::PTXOperand::Special && count.special == ir::PTXOperand::warpSize) count = ir::PTXOperand(32,ir::PTXOperand::u32);
+	if (count.addressMode == ir::PTXOperand::Special && count.special == ir::PTXOperand::warpSize) count = ir::PTXOperand(ir::WARP_SZ,ir::PTXOperand::u32);
 	state.instruction($1, TOKEN_B64); auto& ins = state.statement.instruction;
 	ins.a = ins.d; ins.b = count; ins.d = ir::PTXOperand();
 } | OPCODE_MBAR_CP matrixSpace TOKEN_B64 '[' checkedAddress ']' ';' {
@@ -1764,7 +1764,7 @@ cpAsyncWait : OPCODE_CP_COMMIT ';' { state.instruction($1); }
  | OPCODE_CP_WAIT_ALL ';' { state.instruction($1); }
  | OPCODE_CP_WAIT_GROUP operand ';' {
 	auto count = state.operandVector.back().operand;
-	if (count.addressMode == ir::PTXOperand::Special && count.special == ir::PTXOperand::warpSize) count = ir::PTXOperand(32, ir::PTXOperand::u32);
+	if (count.addressMode == ir::PTXOperand::Special && count.special == ir::PTXOperand::warpSize) count = ir::PTXOperand(ir::WARP_SZ, ir::PTXOperand::u32);
 	state.instruction($1); state.statement.instruction.a = count;
 	state.statement.instruction.d = ir::PTXOperand();
  };
@@ -1865,7 +1865,7 @@ red : OPCODE_RED optionalReductionSemantics optionalAtomicScope atomicAddressSpa
 	auto& instr = state.statement.instruction;
 	instr.b = value;
 	if (value.addressMode == ir::PTXOperand::Special && value.special == ir::PTXOperand::warpSize)
-		instr.b = ir::PTXOperand(32, ir::PTXOperand::u64);
+		instr.b = ir::PTXOperand(ir::WARP_SZ, ir::PTXOperand::u64);
 	if (instr.b.addressMode == ir::PTXOperand::Immediate) {
 		if (instr.type == ir::PTXOperand::f32 && instr.b.type == ir::PTXOperand::f64) {
 			instr.b.imm_single = static_cast<ir::PTXF32>(instr.b.imm_float);

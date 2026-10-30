@@ -348,8 +348,8 @@ void executive::ReconvergenceIPDOM::eval_WarpSync(CTAContext& context,
 	const ir::PTXU32 firstMask = arrived.any() ?
 		cta->operandAsU32(arrived.find_first(), memberMask) : 0;
 	bool ready = true, sameGroup = true;
-	for (int start = 0; start < cta->threadCount; start += 32) {
-		const int lanes = std::min(32, cta->threadCount - start);
+	for (int start = 0; start < cta->threadCount; start += ir::WARP_SZ) {
+		const int lanes = std::min(ir::WARP_SZ, cta->threadCount - start);
 		ir::PTXU32 arrivedMask = 0, existingMask = 0;
 		for (int lane = 0; lane < lanes; ++lane) {
 			const ir::PTXU32 bit = ir::PTXU32(1) << lane;
@@ -368,7 +368,7 @@ void executive::ReconvergenceIPDOM::eval_WarpSync(CTAContext& context,
 		ReconvergenceMechanism::eval_WarpSync(context, instr);
 		return;
 	}
-	if (cta->threadCount > 32 || !sameGroup || arrived != combined.active ||
+	if (cta->threadCount > ir::WARP_SZ || !sameGroup || arrived != combined.active ||
 		std::find(tokenStack.begin(), tokenStack.end(), Call) != tokenStack.end())
 		throw RuntimeException("divergent vote waiting currently supports one call-free warp", context.PC, instr);
 	if (ready) {
@@ -880,7 +880,7 @@ void executive::ReconvergenceTFSortedStack::pop() {
 ////////////////////////////////////////////////////////////////////////////////
 executive::ReconvergenceTFSoftware::ReconvergenceTFSoftware(
 	CooperativeThreadArray *cta)
-: ReconvergenceMechanism(cta), warpSize(32)
+: ReconvergenceMechanism(cta), warpSize(ir::WARP_SZ)
 {
 	type = Reconverge_TFSoftware;
 }

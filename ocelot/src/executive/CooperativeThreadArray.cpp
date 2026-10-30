@@ -105,8 +105,7 @@
 #define REPORT_VOTE       1
 #define REPORT_XOR        1
 
-// Physical warp width for the supported NVIDIA targets.
-static constexpr int WARP_SZ = 32;
+using ir::WARP_SZ;
 
 template <typename T>
 static T CTAAbs(T a) {
@@ -5073,7 +5072,7 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 		throw RuntimeException(error, context.PC, instr);
 	}
 
-	const int completeThreads = (threadCount / 32) * 32;
+	const int completeThreads = (threadCount / WARP_SZ) * WARP_SZ;
 	for (int threadID = completeThreads; threadID < threadCount; ++threadID) {
 		if (context.predicated(threadID, instr)) {
 			throw RuntimeException("mma requires all warp lanes to participate",
@@ -5085,16 +5084,16 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 	if (inputType == ir::PTXOperand::b1) {
 		const int rows = instr.mmaShape == ir::PTXInstruction::MmaM8N8K128 ? 8 : 16;
 		const int kWords = instr.mmaShape == ir::PTXInstruction::MmaM16N8K256 ? 8 : 4;
-		for (int warpStart = 0; warpStart < completeThreads; warpStart += 32) {
+		for (int warpStart = 0; warpStart < completeThreads; warpStart += WARP_SZ) {
 			int participants = 0;
-			for (int lane = 0; lane < 32; ++lane) participants += context.predicated(warpStart + lane, instr);
+			for (int lane = 0; lane < WARP_SZ; ++lane) participants += context.predicated(warpStart + lane, instr);
 			if (!participants) continue;
-			if (participants != 32) {
+			if (participants != WARP_SZ) {
 				throw RuntimeException("mma requires all warp lanes to participate", context.PC, instr);
 			}
 			// Each word holds 32 consecutive K bits; A register pairs select rows and K halves.
 			ir::PTXU32 A[16][8], B[8][8], D[16][8];
-			for (int lane = 0; lane < 32; ++lane) {
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
 				const int threadID = warpStart + lane;
 				const int groupID = lane >> 2;
 				const int threadInGroup = lane & 3;
@@ -5120,7 +5119,7 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 					}
 				}
 			}
-			for (int lane = 0; lane < 32; ++lane) {
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
 				for (unsigned i = 0; i < instr.d.array.size(); ++i) {
 					const int row = (lane >> 2) + (i / 2) * 8, col = (lane & 3) * 2 + (i & 1);
 					setRegAsB32(warpStart + lane, instr.d.array[i].reg, D[row][col]);
@@ -5136,19 +5135,19 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 
 	if (instr.mmaShape == ir::PTXInstruction::MmaM8N8K4 &&
 		inputType == ir::PTXOperand::f64) {
-		for (int warpStart = 0; warpStart < completeThreads; warpStart += 32) {
+		for (int warpStart = 0; warpStart < completeThreads; warpStart += WARP_SZ) {
 			int participants = 0;
-			for (int lane = 0; lane < 32; ++lane) {
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
 				if (context.predicated(warpStart + lane, instr)) ++participants;
 			}
 			if (participants == 0) continue;
-			if (participants != 32) {
+			if (participants != WARP_SZ) {
 				throw RuntimeException("mma requires all warp lanes to participate",
 					context.PC, instr);
 			}
 
 			ir::PTXF64 A[8][4], B[4][8], D[8][8];
-			for (int lane = 0; lane < 32; ++lane) {
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
 				const int threadID = warpStart + lane;
 				const int groupID = lane >> 2;
 				const int threadInGroup = lane & 3;
@@ -5169,7 +5168,7 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 				}
 			}
 
-			for (int lane = 0; lane < 32; ++lane) {
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
 				const int threadID = warpStart + lane;
 				const int groupID = lane >> 2;
 				const int threadInGroup = lane & 3;
@@ -5208,15 +5207,15 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 			return static_cast<ir::PTXS32>(acc);
 		};
 
-		for (int warpStart = 0; warpStart < completeThreads; warpStart += 32) {
+		for (int warpStart = 0; warpStart < completeThreads; warpStart += WARP_SZ) {
 			int participants = 0;
-			for (int lane = 0; lane < 32; ++lane) {
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
 				if (context.predicated(warpStart + lane, instr)) {
 					++participants;
 				}
 			}
 			if (participants == 0) continue;
-			if (participants != 32) {
+			if (participants != WARP_SZ) {
 				throw RuntimeException("mma requires all warp lanes to participate",
 					context.PC, instr);
 			}
@@ -5229,7 +5228,7 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 				ir::PTXS32 B[32][8] = {};
 				ir::PTXS32 C[8][8] = {};
 
-				for (int lane = 0; lane < 32; ++lane) {
+				for (int lane = 0; lane < WARP_SZ; ++lane) {
 					int threadID = warpStart + lane;
 					int groupID = lane >> 2;
 					int threadInGroup = lane & 3;
@@ -5264,7 +5263,7 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 					}
 				}
 
-				for (int lane = 0; lane < 32; ++lane) {
+				for (int lane = 0; lane < WARP_SZ; ++lane) {
 					int threadID = warpStart + lane;
 					int groupID = lane >> 2;
 					int threadInGroup = lane & 3;
@@ -5284,7 +5283,7 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 				ir::PTXS32 B[128][8] = {};
 				ir::PTXS32 C[16][8] = {};
 
-				for (int lane = 0; lane < 32; ++lane) {
+				for (int lane = 0; lane < WARP_SZ; ++lane) {
 					int threadID = warpStart + lane;
 					int groupID = lane >> 2;
 					int threadInGroup = lane & 3;
@@ -5336,7 +5335,7 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 					}
 				}
 
-				for (int lane = 0; lane < 32; ++lane) {
+				for (int lane = 0; lane < WARP_SZ; ++lane) {
 					int threadID = warpStart + lane;
 					int groupID = lane >> 2;
 					int threadInGroup = lane & 3;
@@ -5355,7 +5354,7 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 				ir::PTXS32 B[32][8] = {};
 				ir::PTXS32 C[16][8] = {};
 
-				for (int lane = 0; lane < 32; ++lane) {
+				for (int lane = 0; lane < WARP_SZ; ++lane) {
 					int threadID = warpStart + lane;
 					int groupID = lane >> 2;
 					int threadInGroup = lane & 3;
@@ -5393,7 +5392,7 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 					}
 				}
 
-				for (int lane = 0; lane < 32; ++lane) {
+				for (int lane = 0; lane < WARP_SZ; ++lane) {
 					int threadID = warpStart + lane;
 					int groupID = lane >> 2;
 					int threadInGroup = lane & 3;
@@ -5414,14 +5413,14 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 
 	if (instr.mmaShape == ir::PTXInstruction::MmaM8N8K4 &&
 		inputType == ir::PTXOperand::f16) {
-		for (int warp = 0; warp < completeThreads; warp += 32) {
+		for (int warp = 0; warp < completeThreads; warp += WARP_SZ) {
 			int participants = 0;
-			for (int lane = 0; lane < 32; ++lane) participants += context.predicated(warp + lane, instr);
+			for (int lane = 0; lane < WARP_SZ; ++lane) participants += context.predicated(warp + lane, instr);
 			if (!participants) continue;
-			if (participants != 32) throw RuntimeException("mma requires all warp lanes to participate", context.PC, instr);
+			if (participants != WARP_SZ) throw RuntimeException("mma requires all warp lanes to participate", context.PC, instr);
 			// Four independent products: lanes 4*g..4*g+3 and 16+4*g..19+4*g.
 			ir::PTXF32 A[4][8][4], B[4][4][8], D[4][8][8];
-			for (int lane = 0; lane < 32; ++lane) {
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
 				const int group = (lane >> 2) & 3, row = (lane & 3) + (lane >= 16 ? 4 : 0);
 				for (int i = 0; i < 4; ++i) {
 					const int aRow = instr.mmaAColumnMajor ? i + (lane >= 16 ? 4 : 0) : row;
@@ -5446,7 +5445,7 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 							D[group][row][col] = std::fma(A[group][row][k], B[group][k][col], D[group][row][col]);
 							if (instr.type == ir::PTXOperand::f16) D[group][row][col] = f16ToF32(toF16(D[group][row][col], 0));
 						}
-			for (int lane = 0; lane < 32; ++lane) {
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
 				const int group = (lane >> 2) & 3, row = (lane & 3) + (lane >= 16 ? 4 : 0);
 				if (instr.type == ir::PTXOperand::f32) {
 					for (int i = 0; i < 8; ++i) {
@@ -5471,15 +5470,15 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 	const bool m16n8k8 = instr.mmaShape == ir::PTXInstruction::MmaM16N8K8;
 	const bool m16n8k4 = instr.mmaShape == ir::PTXInstruction::MmaM16N8K4;
 	const bool sparseK32 = instr.mmaSparse && instr.mmaShape == ir::PTXInstruction::MmaM16N8K32;
-	for (int warpStart = 0; warpStart < completeThreads; warpStart += 32) {
+	for (int warpStart = 0; warpStart < completeThreads; warpStart += WARP_SZ) {
 		int participants = 0;
-		for (int lane = 0; lane < 32; ++lane) {
+		for (int lane = 0; lane < WARP_SZ; ++lane) {
 			if (context.predicated(warpStart + lane, instr)) {
 				++participants;
 			}
 		}
 		if (participants == 0) continue;
-		if (participants != 32) {
+		if (participants != WARP_SZ) {
 			throw RuntimeException("mma requires all warp lanes to participate",
 				context.PC, instr);
 		}
@@ -5488,7 +5487,7 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 		ir::PTXF32 B[32][8] = {};
 		ir::PTXF32 C[16][8] = {};
 
-		for (int lane = 0; lane < 32; ++lane) {
+		for (int lane = 0; lane < WARP_SZ; ++lane) {
 			int threadID = warpStart + lane;
 			int groupID = lane >> 2;
 			int threadInGroup = lane & 3;
@@ -5581,7 +5580,7 @@ void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
 			}
 		}
 
-		for (int lane = 0; lane < 32; ++lane) {
+		for (int lane = 0; lane < WARP_SZ; ++lane) {
 			int threadID = warpStart + lane;
 			int groupID = lane >> 2;
 			int threadInGroup = lane & 3;
@@ -6168,18 +6167,18 @@ void executive::CooperativeThreadArray::eval_Ldmatrix(CTAContext& context,
 	if (!error.empty()) throw RuntimeException(error, context.PC, instr);
 	const auto* shared = static_cast<const unsigned char*>(functionCallStack.sharedMemoryPointer());
 	const ir::PTXU64 size = functionCallStack.sharedMemorySize();
-	const int completeThreads = (threadCount / 32) * 32;
+	const int completeThreads = (threadCount / WARP_SZ) * WARP_SZ;
 	for (int threadID = completeThreads; threadID < threadCount; ++threadID) {
 		if (context.predicated(threadID, instr)) {
 			throw RuntimeException("ldmatrix requires all warp lanes to participate",
 				context.PC, instr);
 		}
 	}
-	for (int warpStart = 0; warpStart < completeThreads; warpStart += 32) {
+	for (int warpStart = 0; warpStart < completeThreads; warpStart += WARP_SZ) {
 		int participants = 0;
-		for (int lane = 0; lane < 32; ++lane) participants += context.predicated(warpStart + lane, instr);
+		for (int lane = 0; lane < WARP_SZ; ++lane) participants += context.predicated(warpStart + lane, instr);
 		if (!participants) continue;
-		if (participants != 32)
+		if (participants != WARP_SZ)
 			throw RuntimeException("ldmatrix requires all warp lanes to participate", context.PC, instr);
 		ir::PTXU16 matrices[4][8][8];
 		// Build the matrix
@@ -6197,7 +6196,7 @@ void executive::CooperativeThreadArray::eval_Ldmatrix(CTAContext& context,
 				std::memcpy(matrices[matrix][row], shared + offset, 16);
 			}
 		}
-		for (int lane = 0; lane < 32; ++lane) {
+		for (int lane = 0; lane < WARP_SZ; ++lane) {
 			for (int matrix = 0; matrix < int(instr.vec); ++matrix) {
 				ir::PTXU32 packed = 0;
 				for (int half = 0; half < 2; ++half) {
@@ -6882,9 +6881,9 @@ void executive::CooperativeThreadArray::eval_Activemask(CTAContext& context,
 	trace();
 	const std::string error = instr.valid();
 	if (!error.empty()) throw RuntimeException(error, context.PC, instr);
-	for (int warpStart = 0; warpStart < threadCount; warpStart += 32) {
+	for (int warpStart = 0; warpStart < threadCount; warpStart += WARP_SZ) {
 		ir::PTXU32 mask = 0;
-		const int lanes = min(32, threadCount - warpStart);
+		const int lanes = min(WARP_SZ, threadCount - warpStart);
 		for (int lane = 0; lane < lanes; ++lane)
 			if (context.predicated(warpStart + lane, instr)) mask |= ir::PTXU32(1) << lane;
 		for (int lane = 0; lane < lanes; ++lane)
@@ -6897,18 +6896,18 @@ void executive::CooperativeThreadArray::eval_Movmatrix(CTAContext& context,
 	trace();
 	const std::string error = instr.valid();
 	if (!error.empty()) throw RuntimeException(error, context.PC, instr);
-	const int completeThreads = (threadCount / 32) * 32;
+	const int completeThreads = (threadCount / WARP_SZ) * WARP_SZ;
 	for (int threadID = completeThreads; threadID < threadCount; ++threadID) {
 		if (context.predicated(threadID, instr)) {
 			throw RuntimeException("movmatrix requires all warp lanes to participate",
 				context.PC, instr);
 		}
 	}
-	for (int warpStart = 0; warpStart < completeThreads; warpStart += 32) {
+	for (int warpStart = 0; warpStart < completeThreads; warpStart += WARP_SZ) {
 		int participants = 0;
-		for (int lane = 0; lane < 32; ++lane) participants += context.predicated(warpStart + lane, instr);
+		for (int lane = 0; lane < WARP_SZ; ++lane) participants += context.predicated(warpStart + lane, instr);
 		if (!participants) continue;
-		if (participants != 32)
+		if (participants != WARP_SZ)
 			throw RuntimeException("movmatrix requires all warp lanes to participate", context.PC, instr);
 		ir::PTXU16 matrix[8][8];
 		// Gather all source fragments before writing potentially aliased destinations.
@@ -6920,7 +6919,7 @@ void executive::CooperativeThreadArray::eval_Movmatrix(CTAContext& context,
 				matrix[row][col + 1] = ir::PTXU16(packed >> 16);
 			}
 		}
-		for (int lane = 0; lane < 32; ++lane) {
+		for (int lane = 0; lane < WARP_SZ; ++lane) {
 			ir::PTXU32 packed = 0;
 			for (int half = 0; half < 2; ++half) {
 				const int row = lane / 4, col = (lane % 4) * 2 + half;
@@ -11574,9 +11573,9 @@ void executive::CooperativeThreadArray::eval_WarpSync(CTAContext &context,
 void executive::CooperativeThreadArray::eval_Vote(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	std::vector<ir::PTXU32> results(threadCount);
-	for (int warpStart = 0; warpStart < threadCount; warpStart += 32) {
-		const int lanes = min(32, threadCount - warpStart);
-		ir::PTXU32 masks[32] = {}, ballot = 0, participants = 0;
+	for (int warpStart = 0; warpStart < threadCount; warpStart += WARP_SZ) {
+		const int lanes = min(WARP_SZ, threadCount - warpStart);
+		ir::PTXU32 masks[WARP_SZ] = {}, ballot = 0, participants = 0;
 		for (int lane = 0; lane < lanes; ++lane) {
 			if (!context.predicated(warpStart + lane, instr)) continue;
 			const ir::PTXU32 bit = ir::PTXU32(1) << lane;
@@ -11608,9 +11607,9 @@ void executive::CooperativeThreadArray::eval_Shfl(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	std::vector<ir::PTXU32> results(threadCount);
 	std::vector<bool> predicates(threadCount);
-	for (int warpStart = 0; warpStart < threadCount; warpStart += 32) {
-		const int lanes = min(32, threadCount - warpStart);
-		ir::PTXU32 values[32] = {};
+	for (int warpStart = 0; warpStart < threadCount; warpStart += WARP_SZ) {
+		const int lanes = min(WARP_SZ, threadCount - warpStart);
+		ir::PTXU32 values[WARP_SZ] = {};
 		for (int lane = 0; lane < lanes; ++lane)
 			if (context.predicated(warpStart + lane, instr)) values[lane] = operandAsB32(warpStart + lane, instr.a);
 		for (int lane = 0; lane < lanes; ++lane) {
@@ -11635,7 +11634,7 @@ void executive::CooperativeThreadArray::eval_Shfl(CTAContext &context,
 	// All data and controls are read before writing aliased data or predicate destinations.
 	for (int thread = 0; thread < threadCount; ++thread) {
 		if (!context.predicated(thread, instr)) continue;
-		if (instr.d.addressMode != ir::PTXOperand::BitBucket) setRegAsB32(thread, instr.d.reg, results[thread]);
+		setRegAsB32(thread, instr.d.reg, results[thread]);
 		if (instr.pq.addressMode == ir::PTXOperand::Register) setRegAsPredicate(thread, instr.pq.reg, predicates[thread]);
 	}
 }
@@ -11644,10 +11643,10 @@ void executive::CooperativeThreadArray::eval_Match(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	std::vector<ir::PTXU32> results(threadCount);
 	std::vector<bool> unanimous(threadCount);
-	for (int warpStart = 0; warpStart < threadCount; warpStart += 32) {
-		const int lanes = min(32, threadCount - warpStart);
-		ir::PTXU64 values[32] = {};
-		ir::PTXU32 masks[32] = {}, participants = 0;
+	for (int warpStart = 0; warpStart < threadCount; warpStart += WARP_SZ) {
+		const int lanes = min(WARP_SZ, threadCount - warpStart);
+		ir::PTXU64 values[WARP_SZ] = {};
+		ir::PTXU32 masks[WARP_SZ] = {}, participants = 0;
 		for (int lane = 0; lane < lanes; ++lane) {
 			if (!context.predicated(warpStart + lane, instr)) continue;
 			participants |= ir::PTXU32(1) << lane;
@@ -11680,9 +11679,9 @@ void executive::CooperativeThreadArray::eval_Match(CTAContext &context,
 void executive::CooperativeThreadArray::eval_Redux(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	std::vector<ir::PTXU32> results(threadCount);
-	for (int warpStart = 0; warpStart < threadCount; warpStart += 32) {
-		const int lanes = min(32, threadCount - warpStart);
-		ir::PTXU32 masks[32] = {}, values[32] = {}, participants = 0;
+	for (int warpStart = 0; warpStart < threadCount; warpStart += WARP_SZ) {
+		const int lanes = min(WARP_SZ, threadCount - warpStart);
+		ir::PTXU32 masks[WARP_SZ] = {}, values[WARP_SZ] = {}, participants = 0;
 		for (int lane = 0; lane < lanes; ++lane) {
 			if (!context.predicated(warpStart + lane, instr)) continue;
 			participants |= ir::PTXU32(1) << lane;
