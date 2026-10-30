@@ -454,6 +454,15 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case CpAsyncCommitGroup: return "cp.async.commit_group";
 		case CpAsyncWaitGroup: return "cp.async.wait_group";
 		case CpAsyncWaitAll: return "cp.async.wait_all";
+		case MbarrierInit: return "mbarrier.init";
+		case MbarrierInval: return "mbarrier.inval";
+		case MbarrierArrive: return "mbarrier.arrive";
+		case MbarrierArriveDrop: return "mbarrier.arrive_drop";
+		case MbarrierPendingCount: return "mbarrier.pending_count";
+		case MbarrierTestWait: return "mbarrier.test_wait";
+		case MbarrierTestWaitParity: return "mbarrier.test_wait.parity";
+		case CpAsyncMbarrierArrive: return "cp.async.mbarrier.arrive";
+		case CpAsyncMbarrierArriveNoInc: return "cp.async.mbarrier.arrive.noinc";
 		case Createpolicy: return "createpolicy";
 		case Prefetchu:  return "prefetchu";  break;
 		case Prmt:       return "prmt";       break;
@@ -543,6 +552,7 @@ ir::PTXInstruction::PTXInstruction( Opcode op, const PTXOperand& _d,
 	mmio = false;
 	cacheHint = false;
 	prefetchSize = 0;
+	mbarrierNoComplete = false;
 	policyMode = PolicyFractional;
 	primaryPriority = EvictNormal;
 	secondaryPriority = EvictUnchanged;
@@ -561,6 +571,33 @@ bool ir::PTXInstruction::operator==( const PTXInstruction& i ) const {
 }
 
 std::string ir::PTXInstruction::valid() const {
+	if (opcode == MbarrierPendingCount) {
+		if (type != PTXOperand::b64 || d.addressMode != PTXOperand::Register || d.vec != PTXOperand::v1 || !d.array.empty() ||
+			(!PTXOperand::isInt(d.type) && d.type != PTXOperand::b32) || d.bytes() != 4) return "mbarrier.pending_count needs a scalar 32-bit destination";
+		if (a.addressMode != PTXOperand::Register || a.vec != PTXOperand::v1 || !a.array.empty() || !PTXOperand::valid(PTXOperand::b64,a.type)) return "mbarrier.pending_count needs a scalar 64-bit state register";
+		return "";
+	}
+	if (opcode == MbarrierInit || opcode == MbarrierInval || opcode == MbarrierArrive || opcode == MbarrierArriveDrop || opcode == MbarrierTestWait || opcode == MbarrierTestWaitParity || opcode == CpAsyncMbarrierArrive || opcode == CpAsyncMbarrierArriveNoInc) {
+		if (type != PTXOperand::b64 || (addressSpace != Shared && addressSpace != Generic)) return "mbarrier requires shared or generic b64 addressing";
+		if (a.vec != PTXOperand::v1 || !a.array.empty()) return "mbarrier requires a scalar address";
+		if (a.addressMode != PTXOperand::Address &&
+			((a.addressMode != PTXOperand::Indirect && a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Immediate) ||
+			(!PTXOperand::isInt(a.type) && a.type != PTXOperand::b32 && a.type != PTXOperand::b64) || (a.bytes() != 4 && a.bytes() != 8))) return "invalid mbarrier address";
+		if (a.addressMode == PTXOperand::Immediate && a.imm_uint > 0xffffffffULL) return "mbarrier absolute address must fit in 32 bits";
+		if ((opcode == MbarrierInit || opcode == MbarrierArrive || opcode == MbarrierArriveDrop) && (b.vec != PTXOperand::v1 || !b.array.empty() ||
+			(b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) ||
+			(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32) || (b.addressMode == PTXOperand::Register && b.bytes() != 4))) return "mbarrier count must be a 32-bit integer";
+		if ((opcode == MbarrierArrive || opcode == MbarrierArriveDrop) && d.addressMode != PTXOperand::BitBucket &&
+			(d.addressMode != PTXOperand::Register || d.vec != PTXOperand::v1 || !d.array.empty() || !PTXOperand::valid(PTXOperand::b64,d.type))) return "mbarrier arrival state must be a scalar 64-bit register";
+		if (opcode == MbarrierTestWait || opcode == MbarrierTestWaitParity) {
+			if (d.addressMode != PTXOperand::Register || d.vec != PTXOperand::v1 || !d.array.empty() || d.type != PTXOperand::pred || d.condition != PTXOperand::Pred) return "mbarrier.test_wait needs a predicate destination";
+			if (b.vec != PTXOperand::v1 || !b.array.empty()) return "mbarrier.test_wait needs a scalar token or parity";
+			if (opcode == MbarrierTestWait && (b.addressMode != PTXOperand::Register || !PTXOperand::valid(PTXOperand::b64,b.type))) return "mbarrier.test_wait needs a 64-bit state register";
+			if (opcode == MbarrierTestWaitParity && ((b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) ||
+				(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32) || (b.addressMode == PTXOperand::Register && b.bytes() != 4))) return "mbarrier parity needs a 32-bit integer";
+		}
+		return "";
+	}
 	if (opcode == CpAsync) {
 		if (prefetchSize && prefetchSize != 64 && prefetchSize != 128 && prefetchSize != 256) return "invalid cp.async prefetch size";
 		if (q.addressMode != PTXOperand::Invalid && (!cacheHint || (q.addressMode != PTXOperand::Register && q.addressMode != PTXOperand::Immediate) ||
@@ -3436,6 +3473,20 @@ std::string ir::PTXInstruction::toString() const {
 			return guard() + "prefetch." + toString(addressSpace) + "." + 
 				PTXInstruction::toString(cacheLevel) + " [" + d.toString() + "]";
 		}
+		case MbarrierPendingCount: return guard() + toString(opcode) + ".b64 " + d.toString() + ", " + a.toString();
+		case MbarrierArrive:
+		case MbarrierArriveDrop:
+			return guard() + toString(opcode) + (mbarrierNoComplete ? ".noComplete" : "") + (addressSpace == Shared ? ".shared" : "") +
+				".b64 " + d.toString() + ", [" + a.toString() + "]" + (mbarrierNoComplete ? ", " + b.toString() : "");
+		case MbarrierTestWait:
+		case MbarrierTestWaitParity:
+			return guard() + toString(opcode) + (addressSpace == Shared ? ".shared" : "") + ".b64 " + d.toString() + ", [" + a.toString() + "], " + b.toString();
+		case CpAsyncMbarrierArrive:
+		case CpAsyncMbarrierArriveNoInc:
+		case MbarrierInit:
+		case MbarrierInval:
+			return guard() + toString(opcode) + (addressSpace == Shared ? ".shared" : "") + ".b64 [" + a.toString() + "]" +
+				(opcode == MbarrierInit ? ", " + b.toString() : "");
 		case CpAsync: {
 			std::string result = guard() + "cp.async." + (cacheOperation == Cg ? "cg" : "ca") + ".shared.global";
 			// Omit an unused hint to keep a folded source-size literal unambiguous.
@@ -3745,16 +3796,16 @@ bool ir::PTXInstruction::isCall() const {
 }
 
 bool ir::PTXInstruction::isLoad() const {
-	return opcode == Ld || opcode == Ldu || opcode == Ldmatrix;
+	return opcode == Ld || opcode == Ldu || opcode == Ldmatrix || opcode == WmmaLoadA || opcode == WmmaLoadB || opcode == WmmaLoadC;
 }
 
 bool ir::PTXInstruction::isStore() const {
-	return opcode == St || opcode == CpAsync;
+	return opcode == St || opcode == CpAsync || opcode == WmmaStoreD;
 }
 
 bool ir::PTXInstruction::mayHaveAddressableOperand() const {
-	return opcode == Mov || opcode == Ld || opcode == St || opcode == Cvta
-		|| opcode == Atom || opcode == Red || opcode == Ldu || opcode == Ldmatrix || opcode == Createpolicy || opcode == CpAsync;
+	return opcode == WmmaLoadA || opcode == WmmaLoadB || opcode == WmmaLoadC || opcode == WmmaStoreD || opcode == Mov || opcode == Ld || opcode == St || opcode == Cvta
+		|| opcode == Atom || opcode == Red || opcode == Ldu || opcode == Ldmatrix || opcode == Createpolicy || opcode == CpAsync || opcode == MbarrierInit || opcode == MbarrierInval || opcode == MbarrierArrive || opcode == MbarrierArriveDrop || opcode == MbarrierTestWait || opcode == MbarrierTestWaitParity || opcode == CpAsyncMbarrierArrive || opcode == CpAsyncMbarrierArriveNoInc;
 }
 
 bool ir::PTXInstruction::mayHaveRelaxedTypeDestination() const {
@@ -3763,7 +3814,7 @@ bool ir::PTXInstruction::mayHaveRelaxedTypeDestination() const {
 }
 
 bool ir::PTXInstruction::hasSideEffects() const {
-	return opcode == CpAsync || opcode == CpAsyncCommitGroup || opcode == CpAsyncWaitGroup || opcode == CpAsyncWaitAll
+	return opcode == WmmaStoreD || opcode == MbarrierInit || opcode == MbarrierInval || opcode == MbarrierArrive || opcode == MbarrierArriveDrop || opcode == MbarrierTestWait || opcode == MbarrierTestWaitParity || opcode == CpAsyncMbarrierArrive || opcode == CpAsyncMbarrierArriveNoInc || opcode == CpAsync || opcode == CpAsyncCommitGroup || opcode == CpAsyncWaitGroup || opcode == CpAsyncWaitAll
 		|| opcode == St || opcode == Atom || opcode == Red || opcode == BarWarp || opcode == Bar
 		|| opcode == Bra || opcode == Call || opcode == Exit || opcode == Ldu
 		|| opcode == Membar || opcode == Tex || opcode == Tld4
@@ -3773,6 +3824,8 @@ bool ir::PTXInstruction::hasSideEffects() const {
 
 bool ir::PTXInstruction::canObserveSideEffects() const {
 	if (opcode == ShflSync || opcode == BarWarp || opcode == Match || opcode == Redux || (opcode == Vote && voteSync)) return true;
+	if (opcode == WmmaMma || opcode == WmmaLoadA || opcode == WmmaLoadB || opcode == WmmaLoadC || opcode == WmmaStoreD) return true;
+	if (opcode == MbarrierInit || opcode == MbarrierInval || opcode == MbarrierArrive || opcode == MbarrierArriveDrop || opcode == MbarrierTestWait || opcode == MbarrierTestWaitParity || opcode == CpAsyncMbarrierArrive || opcode == CpAsyncMbarrierArriveNoInc) return true;
 	if (opcode == CpAsync || opcode == Atom || opcode == Red || opcode == Ldmatrix || opcode == Movmatrix || opcode == Activemask) return true;
 
 	if (opcode == Ld) {
@@ -3791,7 +3844,9 @@ bool ir::PTXInstruction::canObserveSideEffects() const {
 }
 
 bool ir::PTXInstruction::isMemoryInstruction() const {
-	return opcode == CpAsync || opcode == St || opcode == Atom || opcode == Red
+	return opcode == WmmaLoadA || opcode == WmmaLoadB || opcode == WmmaLoadC || opcode == WmmaStoreD
+		|| opcode == MbarrierInit || opcode == MbarrierInval || opcode == MbarrierArrive || opcode == MbarrierArriveDrop || opcode == MbarrierTestWait || opcode == MbarrierTestWaitParity || opcode == CpAsyncMbarrierArrive || opcode == CpAsyncMbarrierArriveNoInc
+		|| opcode == CpAsync || opcode == St || opcode == Atom || opcode == Red
 		|| opcode == Ldu
 		|| opcode == Tex || opcode == Tld4
 		|| opcode == Prefetch || opcode == Sust || opcode == Ld || opcode == Ldmatrix;

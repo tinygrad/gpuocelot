@@ -2817,6 +2817,15 @@ namespace parser
 		if( string == "copysign" ) return ir::PTXInstruction::CopySign;
 		if( string == "cos" ) return ir::PTXInstruction::Cos;
 		if( string == "cvt" ) return ir::PTXInstruction::Cvt;
+		if (string == "mbarrier.arrive") return ir::PTXInstruction::MbarrierArrive;
+		if (string == "mbarrier.arrive_drop") return ir::PTXInstruction::MbarrierArriveDrop;
+		if (string == "mbarrier.pending_count") return ir::PTXInstruction::MbarrierPendingCount;
+		if (string == "mbarrier.test_wait") return ir::PTXInstruction::MbarrierTestWait;
+		if (string == "mbarrier.test_wait.parity") return ir::PTXInstruction::MbarrierTestWaitParity;
+		if (string == "cp.async.mbarrier.arrive") return ir::PTXInstruction::CpAsyncMbarrierArrive;
+		if (string == "cp.async.mbarrier.arrive.noinc") return ir::PTXInstruction::CpAsyncMbarrierArriveNoInc;
+		if (string == "mbarrier.init") return ir::PTXInstruction::MbarrierInit;
+		if (string == "mbarrier.inval") return ir::PTXInstruction::MbarrierInval;
 		if (string == "cp.async") return ir::PTXInstruction::CpAsync;
 		if (string == "cp.async.commit_group") return ir::PTXInstruction::CpAsyncCommitGroup;
 		if (string == "cp.async.wait_group") return ir::PTXInstruction::CpAsyncWaitGroup;

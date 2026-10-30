@@ -1653,6 +1653,111 @@ public:
 	// red is atom minus the writeback of the pre-update value; it shares
 	// evalAtomicRMW with eval_Atom but resolves its operation from the
 	// distinct reductionOperation field/enum rather than atomicOperation.
+	bool test_MbarrierLifecycle() {
+		for (const std::string form : {"p32", "p64", "symbol"}) for (bool generic : {false,true}) for (bool invalidate : {false,true}) for (PTXU32 count : {1U,32U,0xfffffU}) {
+			const int width = form == "p32" ? 32 : 64;
+			const std::string addressOperand = form == "symbol" ? "storage+8" : "p";
+			const std::string space = generic ? "" : ".shared";
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry mb_life() { .shared .align 8 .b8 storage[24]; .reg .u" + std::to_string(width) +
+				" p; .reg .u32 n; mbarrier.init" + space + ".b64 [" + addressOperand + "],n; " + (invalidate ? "mbarrier.inval" + space + ".b64 [" + addressOperand + "]; " : "") + "ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("mb_life"), nullptr); kernel.setKernelShape(1,1,1);
+			CooperativeThreadArray local(&kernel, Dim3(), false); auto* shared = (unsigned char*)local.functionCallStack.sharedMemoryPointer();
+			std::memset(shared, 0xa5, 24);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::MbarrierInit) {
+				const PTXU64 address = generic ? (PTXU64)(shared + 8) : 8;
+				if (form != "symbol") { if (width == 32) local.setRegAsU32(0, ins.a.reg, PTXU32(address)); else local.setRegAsU64(0, ins.a.reg, address); }
+				local.setRegAsU32(0, ins.b.reg, count);
+			}
+			local.execute(); PTXU64 state = 0; std::memcpy(&state, shared + 8, sizeof(state));
+			if (invalidate ? state != 0 : state == 0xa5a5a5a5a5a5a5a5ULL) return false;
+			for (int i = 0; i < 24; ++i) if ((i < 8 || i >= 16) && shared[i] != 0xa5) return false;
+		}
+		return true;
+	}
+
+	bool test_CpAsyncMbarrier() {
+		for (bool noinc : {false,true}) for (int threads : {1,32,64}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry mb_copy() { .shared .align 8 .b64 barrier; .shared .align 16 .b8 data[256]; "
+				".reg .u32 id,d,base; .reg .u64 s,t; .reg .pred leader,done; mov.u32 id,%tid.x; setp.eq.u32 leader,id,0; "
+				"@leader mbarrier.init.shared.b64 [barrier]," + std::to_string(threads*(noinc ? 2 : 1)) + "; bar.sync 0; "
+				"mov.u32 base,data; mul.lo.u32 d,id,4; add.u32 d,d,base; cp.async.ca.shared.global [d],[s],4; cp.async.mbarrier.arrive" + (noinc ? std::string(".noinc") : "") +
+				".shared::cta.b64 [barrier]; mbarrier.arrive.shared.b64 t,[barrier]; mbarrier.test_wait.acquire.cta.shared.b64 done,[barrier],t; @leader mbarrier.inval.shared.b64 [barrier]; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("mb_copy"), nullptr); kernel.setKernelShape(threads,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			std::vector<PTXU32> values(threads); for (int lane = 0; lane < threads; ++lane) values[lane] = 0x43210000 + lane;
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::CpAsync)
+				for (int lane = 0; lane < threads; ++lane) local.setRegAsU64(lane,ins.a.reg,(PTXU64)&values[lane]);
+			local.execute();
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::MbarrierTestWait)
+				for (int lane = 0; lane < threads; ++lane) if (!local.getRegAsPredicate(lane,ins.d.reg)) return false;
+			PTXU32 copied[64]; PTXU32 dataOffset = 0;
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::CpAsync) dataOffset = local.getRegAsU32(0,ins.d.reg);
+			std::memcpy(copied,(const char*)local.functionCallStack.sharedMemoryPointer() + dataOffset,threads*4);
+			for (int lane = 0; lane < threads; ++lane) if (copied[lane] != values[lane]) return false;
+		}
+		return true;
+	}
+
+	bool test_MbarrierWaitFrontend() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry mb_wait() { .reg .b64 t; .reg .u32 a,n; .reg .pred p; ";
+		for (const std::string space : {"", ".shared", ".shared::cta"}) for (const std::string sem : {"", ".acquire.cta"})
+		for (const std::string suffix : {"", ".parity"}) {
+			std::stringstream source(prefix + "mbarrier.test_wait" + suffix + sem + space + ".b64 p,[a]," + (suffix.empty() ? "t" : "n") + "; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+		}
+		for (const char* body : {"test_wait.shared.b64 a,[a],t", "test_wait.shared.b64 p,[a],n", "test_wait.parity.shared.b64 p,[a],t", "test_wait.release.shared.b64 p,[a],t", "try_wait.shared.b64 p,[a],t"}) {
+			std::stringstream source(prefix + "mbarrier." + body + "; ret; }");
+			try { Module bad; bad.load(source); return false; } catch (const std::exception&) {}
+		}
+		return true;
+	}
+
+	bool test_MbarrierPendingCount() {
+		for (const std::string op : {"arrive", "arrive_drop"}) for (const PTXU32 initial : {2U,32U,0xfffffU}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry mb_count() { .shared .align 8 .b64 barrier; .reg .b64 t; .reg .u32 n; "
+				"mbarrier.init.shared.b64 [barrier]," + std::to_string(initial) + "; mbarrier." + op + ".noComplete.shared.b64 t,[barrier],1; mbarrier.pending_count.b64 n,t; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("mb_count"), nullptr); kernel.setKernelShape(1,1,1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			local.execute();
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::MbarrierPendingCount)
+				if (local.getRegAsU32(0,ins.d.reg) != initial) return false;
+		}
+		return true;
+	}
+
+	bool test_MbarrierArriveFrontend() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry mb_arr() { .reg .b64 t; .reg .u32 a,n; ";
+		for (const std::string op : {"arrive","arrive_drop"}) for (const std::string space : {"", ".shared", ".shared::cta"})
+		for (const std::string dest : {"t","_"}) for (const std::string count : {"", ",n", ",WARP_SZ"}) {
+			std::stringstream source(prefix + "mbarrier." + op + (count.empty() ? "" : ".noComplete") + ".release.cta" + space + ".b64 " + dest + ",[a]" + count + "; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("mb_arr"), nullptr);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::MbarrierArrive || ins.opcode == PTXInstruction::MbarrierArriveDrop)
+				if (ins.mbarrierNoComplete != !count.empty() || !ins.hasSideEffects()) return false;
+		}
+		for (const char* body : {"arrive.shared.b64 t,[a],1", "arrive.noComplete.shared.b64 t,[a]", "arrive.shared.b64 a,[a]", "arrive.acquire.shared.b64 t,[a]", "arrive.noComplete.shared.b64 t,[a],t"}) {
+			std::stringstream source(prefix + "mbarrier." + body + "; ret; }");
+			try { Module bad; bad.load(source); return false; } catch (const std::exception&) {}
+		}
+		return true;
+	}
+
+	bool test_MbarrierFrontend() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry mb() { .reg .u32 a,n; .reg .u64 p; .reg .v2 .u64 v; .reg .f32 f; ";
+		for (const char* space : {"", ".shared", ".shared::cta"}) for (const char* address : {"a", "p+8", "v.y", "0"}) {
+			std::stringstream source(prefix + "mbarrier.init" + space + ".b64 [" + address + "],WARP_SZ; mbarrier.inval" + space + ".b64 [" + address + "]; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
+			EmulatedKernel kernel(again.getKernel("mb"), nullptr);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::MbarrierInit)
+				if (ins.d.addressMode != PTXOperand::Invalid || ins.b.imm_uint != 32 || !ins.hasSideEffects()) return false;
+		}
+		for (const char* body : {"init.global.b64 [a],1", "init.shared.b64 [f],1", "init.shared.b64 [a],p", "init.shared.b64 [a],0.5", "inval.shared.b32 [a]"}) {
+			std::stringstream source(prefix + "mbarrier." + body + "; ret; }");
+			try { Module bad; bad.load(source); return false; } catch (const std::exception&) {}
+		}
+		return true;
+	}
+
 	bool test_CpAsyncHints() {
 		const std::string prefix = ".version 8.0\n.target sm_86\n.entry cp_hints() { .shared .align 16 .b8 storage[16]; .reg .u32 d,n; .reg .u64 s; .reg .b64 policy; .reg .pred p; ";
 		for (const char* prefetch : {"", ".L2::64B", ".L2::128B", ".L2::256B"}) for (const char* tail : {"", ",policy", ",n", ",p", ",n,policy", ",p,policy", ",0,policy"}) {
@@ -12149,6 +12254,14 @@ public:
 			result = (result && test_AtomicCacheHints());
 			result = (result && test_AtomicF32());
 			result = (result && test_AtomicF64());
+			result = (result && test_MbarrierLifecycle());
+			result = (result && test_MbarrierFrontend());
+			result = (result && test_MbarrierArriveFrontend());
+			result = (result && test_MbarrierArrivals());
+			result = (result && test_MbarrierPendingCount());
+			result = (result && test_MbarrierWaitFrontend());
+			result = (result && test_MbarrierPhases());
+			result = (result && test_CpAsyncMbarrier());
 			result = (result && test_CpAsyncHints());
 			result = (result && test_CpAsyncUndefinedBehavior());
 			result = (result && test_CpAsyncZeroFill());

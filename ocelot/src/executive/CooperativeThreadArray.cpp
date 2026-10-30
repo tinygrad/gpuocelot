@@ -776,6 +776,17 @@ void executive::CooperativeThreadArray::execute(int PC) {
 				eval_Popc(context, instr); break;
 			case ir::PTXInstruction::Prefetch:
 				eval_Prefetch(context, instr); break;
+			case ir::PTXInstruction::MbarrierPendingCount:
+				eval_MbarrierPendingCount(context, instr); break;
+			case ir::PTXInstruction::MbarrierInit:
+			case ir::PTXInstruction::MbarrierInval:
+			case ir::PTXInstruction::CpAsyncMbarrierArrive:
+			case ir::PTXInstruction::CpAsyncMbarrierArriveNoInc:
+			case ir::PTXInstruction::MbarrierTestWait:
+			case ir::PTXInstruction::MbarrierTestWaitParity:
+			case ir::PTXInstruction::MbarrierArrive:
+			case ir::PTXInstruction::MbarrierArriveDrop:
+				eval_Mbarrier(context, instr); break;
 			case ir::PTXInstruction::CpAsync:
 				eval_CpAsync(context, instr); break;
 			case ir::PTXInstruction::CpAsyncCommitGroup:
@@ -7716,6 +7727,104 @@ void executive::CooperativeThreadArray::eval_Popc(CTAContext &context,
 	}
 	else {
 		throw RuntimeException("unsupported data type", context.PC, instr);
+	}
+}
+
+// Emulator-owned encoding of the opaque 64-bit mbarrier object and arrival token.
+static constexpr ir::PTXU32 mbarrierCountMask = 0xfffff, mbarrierPhaseMask = 0x7fffff;
+static constexpr unsigned mbarrierExpectedShift = 20, mbarrierPhaseShift = 40, mbarrierInitializedShift = 63;
+
+void executive::CooperativeThreadArray::eval_MbarrierPendingCount(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	trace();
+	for (int thread = 0; thread < threadCount; ++thread)
+		if (context.predicated(thread, instr))
+			setRegAsU32(thread, instr.d.reg, operandAsU64(thread, instr.a) & mbarrierCountMask);
+}
+
+void executive::CooperativeThreadArray::eval_Mbarrier(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	trace();
+	auto* shared = (unsigned char*)functionCallStack.sharedMemoryPointer();
+	const ir::PTXU64 sharedSize = functionCallStack.sharedMemorySize();
+	for (int thread = 0; thread < threadCount; ++thread) {
+		if (!context.predicated(thread, instr)) continue;
+		const bool address32 = instr.a.bytes() == 4;
+		ir::PTXU64 offset;
+		if (address32) offset = operandAsU32(thread, instr.a);
+		else offset = operandAsU64(thread, instr.a);
+		if (instr.addressSpace == ir::PTXInstruction::Generic && instr.a.addressMode != ir::PTXOperand::Address) {
+			const ir::PTXU64 sharedAddress = (ir::PTXU64)shared;
+			offset -= sharedAddress;
+			// A 32-bit generic pointer uses the low 32 bits of the host address.
+			if (address32) offset = ir::PTXU32(offset);
+		}
+		if (offset % 8 || offset > sharedSize || sharedSize - offset < 8) {
+			report("warning: mbarrier address is misaligned or outside shared memory; undefined behavior");
+			continue;
+		}
+		ir::PTXU64 state = 0;
+		switch (instr.opcode) {
+		case ir::PTXInstruction::MbarrierInit: {
+			const ir::PTXU32 count = operandAsU32(thread, instr.b);
+			if (count == 0 || count > mbarrierCountMask) { report("warning: mbarrier.init count is outside 1..1048575; undefined behavior"); continue; }
+			// Opaque encoding: pending[19:0], expected[39:20], phase[62:40], initialized[63].
+			state = (ir::PTXU64(1) << mbarrierInitializedShift) | count | (ir::PTXU64(count) << mbarrierExpectedShift);
+			break;
+		}
+		case ir::PTXInstruction::MbarrierInval:
+			break; // Store zero to invalidate the object.
+		case ir::PTXInstruction::MbarrierTestWait:
+		case ir::PTXInstruction::MbarrierTestWaitParity: {
+			std::memcpy(&state, shared + offset, sizeof(state));
+			const bool parity = instr.opcode == ir::PTXInstruction::MbarrierTestWaitParity;
+			const ir::PTXU64 phase = (state >> mbarrierPhaseShift) & mbarrierPhaseMask;
+			const ir::PTXU64 requested = parity ? operandAsU32(thread,instr.b) : (operandAsU64(thread,instr.b) >> mbarrierPhaseShift) & mbarrierPhaseMask;
+			if (!(state >> mbarrierInitializedShift) || (parity ? requested > 1 : ((phase - requested) & mbarrierPhaseMask) > 1)) {
+				report("warning: mbarrier.test_wait has an invalid phase, parity or uninitialized object; undefined behavior");
+				continue;
+			}
+			bool complete;
+			if (parity) {
+				const ir::PTXU32 currentParity = phase & 1;
+				complete = currentParity != requested;
+			} else {
+				complete = phase != requested;
+			}
+			setRegAsPredicate(thread, instr.d.reg, complete);
+			continue; // test_wait never changes the barrier or blocks the executing thread.
+		}
+		case ir::PTXInstruction::CpAsyncMbarrierArrive:
+			std::memcpy(&state, shared + offset, sizeof(state));
+			// Copies complete immediately: increment plus completion has zero net effect.
+			if (!(state >> mbarrierInitializedShift) || (state & mbarrierCountMask) == mbarrierCountMask)
+				report("warning: cp.async.mbarrier.arrive on invalid object or overflowing count; undefined behavior");
+			continue;
+		case ir::PTXInstruction::MbarrierArrive:
+		case ir::PTXInstruction::MbarrierArriveDrop:
+		case ir::PTXInstruction::CpAsyncMbarrierArriveNoInc: {
+			std::memcpy(&state, shared + offset, sizeof(state));
+			const ir::PTXU64 token = state;
+			ir::PTXU32 pending = state & mbarrierCountMask;
+			ir::PTXU32 expected = (state >> mbarrierExpectedShift) & mbarrierCountMask;
+			const bool copyArrival = instr.opcode == ir::PTXInstruction::CpAsyncMbarrierArriveNoInc;
+			const ir::PTXU32 count = copyArrival ? 1 : operandAsU32(thread, instr.b);
+			const bool drop = instr.opcode == ir::PTXInstruction::MbarrierArriveDrop;
+			if (!(state >> mbarrierInitializedShift) || count == 0 || count > pending || (drop && count > expected) || (instr.mbarrierNoComplete && count == pending)) {
+				report("warning: invalid mbarrier arrival count, phase completion or uninitialized object; undefined behavior");
+				continue;
+			}
+			pending -= count;
+			if (drop) expected -= count;
+			ir::PTXU64 phase = (state >> mbarrierPhaseShift) & mbarrierPhaseMask;
+			if (pending == 0) { phase = (phase + 1) & mbarrierPhaseMask; pending = expected; }
+			state = (ir::PTXU64(1) << mbarrierInitializedShift) | (phase << mbarrierPhaseShift) | (ir::PTXU64(expected) << mbarrierExpectedShift) | pending;
+			if (!copyArrival && instr.d.addressMode != ir::PTXOperand::BitBucket) setRegAsB64(thread, instr.d.reg, token);
+			break;
+		}
+		default: assertM(false, "Invalid mbarrier opcode");
+		}
+		std::memcpy(shared + offset, &state, sizeof(state));
 	}
 }
 

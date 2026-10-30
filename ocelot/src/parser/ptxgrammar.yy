@@ -65,6 +65,13 @@
 %token<text> OPCODE_SHR OPCODE_SHL OPCODE_FMA OPCODE_MEMBAR OPCODE_PMEVENT
 %token<text> OPCODE_POPC OPCODE_PRMT OPCODE_CLZ OPCODE_BFIND OPCODE_BREV 
 %token<text> OPCODE_BFI OPCODE_BFE OPCODE_BMSK OPCODE_FNS OPCODE_TANH OPCODE_TESTP OPCODE_TLD4 OPCODE_BAR
+%token<text> OPCODE_WMMA_MMA
+%type<value> wmmaAlternateType
+%token<text> OPCODE_WMMA_MEMORY
+%token<value> TOKEN_M16N16K16 TOKEN_M8N32K16 TOKEN_M32N8K16 TOKEN_M16N16K8
+%type<value> wmmaType
+%token TOKEN_NO_COMPLETE
+%token<text> OPCODE_MBAR_INIT OPCODE_MBAR_INVAL OPCODE_MBAR_ARRIVE OPCODE_MBAR_PENDING OPCODE_MBAR_WAIT OPCODE_MBAR_CP
 %token<text> OPCODE_CP_ASYNC OPCODE_CP_COMMIT OPCODE_CP_WAIT_GROUP OPCODE_CP_WAIT_ALL
 %token<text> OPCODE_PREFETCH OPCODE_PREFETCHU OPCODE_SHFL OPCODE_SHF
 %token<text> OPCODE_MMA
@@ -705,7 +712,7 @@ opcode : OPCODE_COS | OPCODE_SQRT | OPCODE_ADD | OPCODE_RSQRT | OPCODE_ADDC
 	| OPCODE_PMEVENT | OPCODE_POPC | OPCODE_CLZ | OPCODE_BFIND | OPCODE_BREV
 	| OPCODE_BFI | OPCODE_BMSK | OPCODE_FNS | OPCODE_TANH | OPCODE_TESTP | OPCODE_TLD4
 	| OPCODE_PREFETCH | OPCODE_PREFETCHU | OPCODE_CREATEPOLICY
-	| OPCODE_CP_ASYNC | OPCODE_CP_COMMIT | OPCODE_CP_WAIT_GROUP | OPCODE_CP_WAIT_ALL;
+	| OPCODE_MBAR_INIT | OPCODE_MBAR_INVAL | OPCODE_MBAR_ARRIVE | OPCODE_MBAR_PENDING | OPCODE_MBAR_WAIT | OPCODE_MBAR_CP | OPCODE_CP_ASYNC | OPCODE_CP_COMMIT | OPCODE_CP_WAIT_GROUP | OPCODE_CP_WAIT_ALL;
 
 mma : OPCODE_MMA TOKEN_SP TOKEN_SYNC TOKEN_ALIGNED TOKEN_M16N8K8 TOKEN_ROW TOKEN_COL
 	TOKEN_F32 TOKEN_TF32 TOKEN_TF32 TOKEN_F32
@@ -951,7 +958,7 @@ instruction : activemask | ftzInstruction2 | ftzInstruction3 | approxInstruction
 	| basicInstruction3 | bfe | bfi | bfind | bmsk | brev | branch | addOrSub
 	| addCOrSubC | atom | bar | brkpt | clz | cvt | cvta | isspacep | div | dp2a | dp4a | exit
 	| fence | fns | ld | ldu | ldmatrix | lop3 | mad | mad24 | madc | mma | membar | mov | movmatrix | mul24 | mul | notInstruction
-	| cpAsync | cpAsyncWait | pmevent | popc | prefetch | prefetchu | createpolicy | prmt | rcpSqrtInstruction | red | redux | match
+	| wmmaMma | wmmaMemory | mbarrier | cpAsync | cpAsyncWait | pmevent | popc | prefetch | prefetchu | createpolicy | prmt | rcpSqrtInstruction | red | redux | match
 	| ret | sad | selp | set | setp | slct | st | suld | suq | sured | sust | szext
 	| testp | tex | tld4 | trap | txq | vote | shfl | shf;
 
@@ -1663,6 +1670,76 @@ createpolicy : OPCODE_CREATEPOLICY TOKEN_POLICY_RANGE optionalAddressSpace polic
 		if (size->addressMode == ir::PTXOperand::Special && size->special == ir::PTXOperand::warpSize) *size = ir::PTXOperand(32,ir::PTXOperand::u32);
 		else if (size->addressMode == ir::PTXOperand::Immediate && ir::PTXOperand::isInt(size->type)) size->type = ir::PTXOperand::u32;
 	}
+};
+
+wmmaMmaModifiers : wmmaShape mmaLayout mmaLayout { state.statement.instruction.mmaAColumnMajor = $2 == TOKEN_COL; state.statement.instruction.mmaBColumnMajor = $3 == TOKEN_COL; }
+ | mmaLayout mmaLayout wmmaShape { state.statement.instruction.mmaAColumnMajor = $1 == TOKEN_COL; state.statement.instruction.mmaBColumnMajor = $2 == TOKEN_COL; };
+wmmaAlternateType : TOKEN_BF16 | TOKEN_TF32;
+wmmaMmaTypes : mmaAccumulatorTypeId mmaAccumulatorTypeId {
+ auto& ins = state.statement.instruction; ins.type = parser::PTXParser::tokenToDataType($1); ins.c.type = parser::PTXParser::tokenToDataType($2); ins.a.type = ins.b.type = ir::PTXOperand::f16;
+} | TOKEN_F32 wmmaAlternateType wmmaAlternateType TOKEN_F32 {
+ auto& ins = state.statement.instruction; ins.type = ins.c.type = ir::PTXOperand::f32; ins.a.type = parser::PTXParser::tokenToDataType($2); ins.b.type = parser::PTXParser::tokenToDataType($3);
+} | TOKEN_S32 mmaIntTypeId mmaIntTypeId TOKEN_S32 {
+ auto& ins = state.statement.instruction; ins.type = ins.c.type = ir::PTXOperand::s32; ins.a.type = parser::PTXParser::tokenToDataType($2); ins.b.type = parser::PTXParser::tokenToDataType($3);
+} | TOKEN_S32 TOKEN_B1 TOKEN_B1 TOKEN_S32 {
+ auto& ins = state.statement.instruction; ins.type = ins.c.type = ir::PTXOperand::s32; ins.a.type = ins.b.type = ir::PTXOperand::b1;
+} | TOKEN_F64 TOKEN_F64 TOKEN_F64 TOKEN_F64 {
+ auto& ins = state.statement.instruction; ins.type = ins.c.type = ins.a.type = ins.b.type = ir::PTXOperand::f64;
+};
+wmmaMma : OPCODE_WMMA_MMA TOKEN_SYNC TOKEN_ALIGNED wmmaMmaModifiers optionalFloatRounding wmmaMmaTypes optionalSatfinite arrayOperand ',' arrayOperand ',' arrayOperand ',' arrayOperand ';' {
+ const auto format = state.statement.instruction; state.instruction($1,TOKEN_B32); auto& ins = state.statement.instruction;
+ ins.type = ins.d.type = format.type; ins.a.type = format.a.type; ins.b.type = format.b.type; ins.c.type = format.c.type;
+ ins.booleanOperator = std::string($1) == "wmma.mma.xor.popc" ? ir::PTXInstruction::BoolXor : std::string($1) == "wmma.mma.and.popc" ? ir::PTXInstruction::BoolAnd : ir::PTXInstruction::BoolNop;
+};
+
+wmmaShape : TOKEN_M16N16K16 { state.statement.instruction.mmaShape = ir::PTXInstruction::MmaM16N16K16; }
+ | TOKEN_M8N32K16 { state.statement.instruction.mmaShape = ir::PTXInstruction::MmaM8N32K16; }
+ | TOKEN_M32N8K16 { state.statement.instruction.mmaShape = ir::PTXInstruction::MmaM32N8K16; }
+ | TOKEN_M16N16K8 { state.statement.instruction.mmaShape = ir::PTXInstruction::MmaM16N16K8; }
+ | TOKEN_M8N8K4 { state.statement.instruction.mmaShape = ir::PTXInstruction::MmaM8N8K4; }
+ | TOKEN_M8N8K32 { state.statement.instruction.mmaShape = ir::PTXInstruction::MmaM8N8K32; }
+ | TOKEN_M8N8K128 { state.statement.instruction.mmaShape = ir::PTXInstruction::MmaM8N8K128; }
+;
+wmmaLayout : TOKEN_ROW { state.statement.instruction.mmaAColumnMajor = false; } | TOKEN_COL { state.statement.instruction.mmaAColumnMajor = true; };
+wmmaSpace : TOKEN_GLOBAL { state.addressSpace(TOKEN_GLOBAL); } | TOKEN_SHARED { state.addressSpace(TOKEN_SHARED); } | TOKEN_SHARED_CTA { state.addressSpace(TOKEN_SHARED); };
+wmmaOptionalSpace : wmmaSpace | /* empty */ { state.noAddressSpace(); };
+wmmaMemoryModifiers : wmmaShape wmmaLayout wmmaOptionalSpace | wmmaLayout wmmaShape wmmaOptionalSpace
+ | wmmaShape wmmaSpace wmmaLayout | wmmaLayout wmmaSpace wmmaShape | wmmaSpace wmmaShape wmmaLayout | wmmaSpace wmmaLayout wmmaShape;
+wmmaType : dataTypeId | TOKEN_TF32 | TOKEN_S4 | TOKEN_U4 | TOKEN_B1;
+wmmaStride : /* empty */ | ',' operand;
+wmmaMemory : OPCODE_WMMA_MEMORY TOKEN_SYNC TOKEN_ALIGNED wmmaMemoryModifiers wmmaType arrayOperand ',' '[' checkedAddress ']' wmmaStride ';' {
+ const auto address = state.operandVector[2].operand; auto stride = state.operandVector.size() == 4 ? state.operandVector[3].operand : ir::PTXOperand();
+ if (stride.addressMode == ir::PTXOperand::Special && stride.special == ir::PTXOperand::warpSize) stride = ir::PTXOperand(32,ir::PTXOperand::u32);
+ state.instruction($1,$5); state.statement.instruction.a = address; state.statement.instruction.b = stride;
+} | OPCODE_WMMA_MEMORY TOKEN_SYNC TOKEN_ALIGNED wmmaMemoryModifiers wmmaType '[' checkedAddress ']' ',' arrayOperand wmmaStride ';' {
+ const auto address = state.operandVector[1].operand; auto stride = state.operandVector.size() == 4 ? state.operandVector[3].operand : ir::PTXOperand();
+ if (stride.addressMode == ir::PTXOperand::Special && stride.special == ir::PTXOperand::warpSize) stride = ir::PTXOperand(32,ir::PTXOperand::u32);
+ state.instruction($1,$5); state.statement.instruction.d = address; state.statement.instruction.b = stride;
+};
+
+mbarrierAcquire : /* empty */ | TOKEN_ACQUIRE;
+mbarrierRelease : /* empty */ | TOKEN_RELEASE;
+mbarrierScope : /* empty */ | TOKEN_CTA;
+mbarrierArrival : mbarrierRelease mbarrierScope matrixSpace TOKEN_B64 operand ',' '[' checkedAddress ']'
+ | TOKEN_NO_COMPLETE mbarrierRelease mbarrierScope matrixSpace TOKEN_B64 operand ',' '[' checkedAddress ']' ',' operand { state.statement.instruction.mbarrierNoComplete = true; };
+mbarrier : OPCODE_MBAR_WAIT mbarrierAcquire mbarrierScope matrixSpace TOKEN_B64 operand ',' '[' checkedAddress ']' ',' operand ';' {
+ const auto address = state.operandVector[2].operand, token = state.operandVector[3].operand;
+ state.instruction($1,TOKEN_B64); state.statement.instruction.a = address; state.statement.instruction.b = token;
+} | OPCODE_MBAR_PENDING TOKEN_B64 operand ',' operand ';' { state.instruction($1,TOKEN_B64); }
+ | OPCODE_MBAR_ARRIVE mbarrierArrival ';' {
+ const auto address = state.operandVector[2].operand;
+ auto count = state.operandVector.size() == 4 ? state.operandVector[3].operand : ir::PTXOperand(1,ir::PTXOperand::u32);
+ if (count.addressMode == ir::PTXOperand::Special && count.special == ir::PTXOperand::warpSize) count = ir::PTXOperand(32,ir::PTXOperand::u32);
+ state.instruction($1,TOKEN_B64); state.statement.instruction.a = address; state.statement.instruction.b = count;
+} | OPCODE_MBAR_INIT matrixSpace TOKEN_B64 '[' checkedAddress ']' ',' operand ';' {
+	auto count = state.operandVector.back().operand;
+	if (count.addressMode == ir::PTXOperand::Special && count.special == ir::PTXOperand::warpSize) count = ir::PTXOperand(32,ir::PTXOperand::u32);
+	state.instruction($1, TOKEN_B64); auto& ins = state.statement.instruction;
+	ins.a = ins.d; ins.b = count; ins.d = ir::PTXOperand();
+} | OPCODE_MBAR_CP matrixSpace TOKEN_B64 '[' checkedAddress ']' ';' {
+ state.instruction($1,TOKEN_B64); state.statement.instruction.a = state.statement.instruction.d; state.statement.instruction.d = ir::PTXOperand();
+} | OPCODE_MBAR_INVAL matrixSpace TOKEN_B64 '[' checkedAddress ']' ';' {
+	state.instruction($1, TOKEN_B64); state.statement.instruction.a = state.statement.instruction.d; state.statement.instruction.d = ir::PTXOperand();
 };
 
 cpAsyncCache : TOKEN_CA { state.cacheOperation($1); } | TOKEN_CG { state.cacheOperation($1); };

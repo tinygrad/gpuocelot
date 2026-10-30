@@ -207,6 +207,13 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return OPCODE_OR; }
 "pmevent"                       { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_PMEVENT; }
+"mbarrier.arrive"|"mbarrier.arrive_drop" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_ARRIVE; }
+".noComplete" { return TOKEN_NO_COMPLETE; }
+"mbarrier.pending_count" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_PENDING; }
+"mbarrier.test_wait"|"mbarrier.test_wait.parity" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_WAIT; }
+"cp.async.mbarrier.arrive"|"cp.async.mbarrier.arrive.noinc" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_CP; }
+"mbarrier.init"                { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_INIT; }
+"mbarrier.inval"               { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_INVAL; }
 "cp.async"                      { sstrcpy(yylval->text, yytext, 1024); return OPCODE_CP_ASYNC; }
 "cp.async.commit_group"         { sstrcpy(yylval->text, yytext, 1024); return OPCODE_CP_COMMIT; }
 "cp.async.wait_group"           { sstrcpy(yylval->text, yytext, 1024); return OPCODE_CP_WAIT_GROUP; }

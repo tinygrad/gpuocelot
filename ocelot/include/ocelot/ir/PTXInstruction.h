@@ -92,6 +92,20 @@ namespace ir {
 			CpAsyncCommitGroup,
 			CpAsyncWaitGroup,
 			CpAsyncWaitAll,
+			WmmaLoadA,
+			WmmaLoadB,
+			WmmaLoadC,
+			WmmaStoreD,
+			WmmaMma,
+			MbarrierInit,
+			MbarrierInval,
+			MbarrierArrive,
+			MbarrierArriveDrop,
+			MbarrierPendingCount,
+			MbarrierTestWait,
+			MbarrierTestWaitParity,
+			CpAsyncMbarrierArrive,
+			CpAsyncMbarrierArriveNoInc,
 			Prefetchu,
 			Prmt,
 			Rcp,
@@ -194,6 +208,10 @@ namespace ir {
 			MmaM8N8K128,
 			MmaM16N8K128,
 			MmaM16N8K256,
+			MmaM16N16K16,
+			MmaM8N32K16,
+			MmaM32N8K16,
+			MmaM16N16K8,
 			MmaShape_Invalid
 		};
 		
@@ -458,6 +476,8 @@ namespace ir {
 		/*! \brief Is the instruction a branch */
 		bool isBranch() const;
 		/*! \brief Is the instruction a call */
+		void wmmaDimensions(unsigned int& m, unsigned int& n, unsigned int& k) const;
+		unsigned int wmmaFragmentRegisters(char matrix, PTXOperand::DataType element) const;
 		bool isCall() const;
 		/*! \brief Is the instruction a load */
 		bool isLoad() const;
@@ -564,6 +584,7 @@ namespace ir {
 			round-trip through the printer differently. */
 		bool mmio;
 		bool cacheHint; // .L2::cache_hint; policy operand is q.
+		bool mbarrierNoComplete;
 		unsigned int prefetchSize; // cp.async L2 prefetch hint in bytes; zero means absent.
 		PolicyMode policyMode;
 		CachePriority primaryPriority, secondaryPriority;
