@@ -105,6 +105,9 @@
 #define REPORT_VOTE       1
 #define REPORT_XOR        1
 
+// Physical warp width for the supported NVIDIA targets.
+static constexpr int WARP_SZ = 32;
+
 template <typename T>
 static T CTAAbs(T a) {
 	if (a < 0) {
@@ -328,7 +331,7 @@ ir::PTXU32 executive::CooperativeThreadArray::getSpecialValue(
 	assert( reg != ir::PTXOperand::gridId );
 
 	// PTX warp identity and lane masks describe 32 physical lane positions.
-	const int lane = threadId % 32;
+	const int lane = threadId % WARP_SZ;
 	const ir::PTXU32 laneBit = ir::PTXU32(1) << lane;
 
 	switch( reg ) {
@@ -371,7 +374,7 @@ ir::PTXU32 executive::CooperativeThreadArray::getSpecialValue(
 			break;
 		}
 		case ir::PTXOperand::warpId: return 0;
-		case ir::PTXOperand::warpSize: return 32;
+		case ir::PTXOperand::warpSize: return WARP_SZ;
 		case ir::PTXOperand::ctaId: {
 			switch( index ) {
 				case ir::PTXOperand::ix: {
@@ -776,6 +779,13 @@ void executive::CooperativeThreadArray::execute(int PC) {
 				eval_Popc(context, instr); break;
 			case ir::PTXInstruction::Prefetch:
 				eval_Prefetch(context, instr); break;
+			case ir::PTXInstruction::WmmaMma:
+				eval_WmmaMma(context, instr); break;
+			case ir::PTXInstruction::WmmaLoadA:
+			case ir::PTXInstruction::WmmaLoadB:
+			case ir::PTXInstruction::WmmaLoadC:
+			case ir::PTXInstruction::WmmaStoreD:
+				eval_WmmaMemory(context, instr); break;
 			case ir::PTXInstruction::MbarrierPendingCount:
 				eval_MbarrierPendingCount(context, instr); break;
 			case ir::PTXInstruction::MbarrierInit:
@@ -7727,6 +7737,273 @@ void executive::CooperativeThreadArray::eval_Popc(CTAContext &context,
 	}
 	else {
 		throw RuntimeException("unsupported data type", context.PC, instr);
+	}
+}
+
+static double wmmaElement(executive::CooperativeThreadArray& cta, int warpStart,
+	const ir::PTXOperand& fragment, unsigned int element) {
+	const auto type = fragment.type;
+	unsigned int elementBits = ir::PTXOperand::bytes(type) * 8;
+	if (type == ir::PTXOperand::b1) elementBits = 1;
+	else if (type == ir::PTXOperand::s4 || type == ir::PTXOperand::u4) elementBits = 4;
+
+	// FP64 uses one element per 64-bit register; all other containers are 32-bit.
+	unsigned int elementsPerRegister = 1;
+	if (elementBits != 64) elementsPerRegister = 32 / elementBits;
+	const unsigned int registerIndex = element / elementsPerRegister;
+	const unsigned int registersPerThread = fragment.array.size();
+	const int thread = warpStart + registerIndex / registersPerThread;
+	const auto& reg = fragment.array[registerIndex % registersPerThread];
+	if (type == ir::PTXOperand::f64) {
+		const ir::PTXU64 raw = cta.operandAsU64(thread, reg);
+		return hydrazine::bit_cast<double>(raw);
+	}
+
+	const unsigned int elementInRegister = element % elementsPerRegister;
+	const unsigned int shift = elementInRegister * elementBits;
+	const ir::PTXU64 mask = (ir::PTXU64(1) << elementBits) - 1;
+	const ir::PTXU64 raw = (cta.operandAsB32(thread, reg) >> shift) & mask;
+	switch (type) {
+	case ir::PTXOperand::f16:
+		return f16ToF32(raw);
+	case ir::PTXOperand::bf16:
+		return hydrazine::bit_cast<float>(ir::PTXU32(raw << 16));
+	case ir::PTXOperand::f32:
+		return hydrazine::bit_cast<float>(ir::PTXU32(raw));
+	case ir::PTXOperand::tf32:
+		return tf32FromF32(hydrazine::bit_cast<float>(ir::PTXU32(raw)));
+	case ir::PTXOperand::s4:
+	case ir::PTXOperand::s8:
+	case ir::PTXOperand::s32: {
+		const ir::PTXU64 signBit = ir::PTXU64(1) << (elementBits - 1);
+		ir::PTXS64 value = raw;
+		if (raw & signBit) value -= ir::PTXS64(1) << elementBits;
+		return value;
+	}
+	default:
+		return raw; // Unsigned integer or single-bit element.
+	}
+}
+
+void executive::CooperativeThreadArray::eval_WmmaMma(CTAContext &context, const ir::PTXInstruction &instr) {
+	trace();
+	constexpr unsigned int bitsPerByte = 8;
+	unsigned int m, n, k;
+	instr.wmmaDimensions(m, n, k);
+	const unsigned int elementBits = ir::PTXOperand::bytes(instr.type) * bitsPerByte;
+	unsigned int elementsPerRegister = 1;
+	if (instr.type != ir::PTXOperand::f64) {
+		elementsPerRegister = sizeof(ir::PTXU32) * bitsPerByte / elementBits;
+	}
+	const bool bitOperation = instr.a.type == ir::PTXOperand::b1;
+	auto rounding = instr.modifier;
+	if (!rounding) rounding = ir::PTXInstruction::rn;
+	for (int warp = 0; warp < threadCount; warp += WARP_SZ) {
+		int participants = 0;
+		for (int lane = 0; lane < min(WARP_SZ, threadCount - warp); ++lane) {
+			participants += context.predicated(warp+lane,instr);
+		}
+		if (!participants) continue;
+		if (participants != WARP_SZ) { report("warning: wmma.mma requires a complete participating warp; undefined behavior"); continue; }
+		std::vector<double> A(m*k), B(k*n), C(m*n);
+		for (unsigned int i = 0; i < A.size(); ++i) {
+			A[i] = wmmaElement(*this,warp,instr.a,i);
+		}
+		for (unsigned int i = 0; i < B.size(); ++i) {
+			B[i] = wmmaElement(*this,warp,instr.b,i);
+		}
+		for (unsigned int i = 0; i < C.size(); ++i) {
+			C[i] = wmmaElement(*this,warp,instr.c,i);
+		}
+		std::vector<ir::PTXU64> results(WARP_SZ * instr.d.array.size(), 0);
+		for (unsigned int row = 0; row < m; ++row) {
+			for (unsigned int col = 0; col < n; ++col) {
+				const unsigned int element = row * n + col;
+				ir::PTXU64 raw;
+				if (instr.type == ir::PTXOperand::s32) {
+					ir::PTXS64 sum = C[element];
+					for (unsigned int inner = 0; inner < k; ++inner) {
+						const ir::PTXS64 a = A[row * k + inner];
+						const ir::PTXS64 b = B[inner * n + col];
+						if (!bitOperation) {
+							sum += a * b;
+						} else if (instr.booleanOperator == ir::PTXInstruction::BoolXor) {
+							sum += a ^ b;
+						} else {
+							sum += a & b;
+						}
+					}
+					if (instr.modifier & ir::PTXInstruction::satfinite) {
+						if (sum > INT32_MAX) sum = INT32_MAX;
+						else if (sum < INT32_MIN) sum = INT32_MIN;
+					}
+					raw = ir::PTXU32(sum);
+				} else if (instr.type == ir::PTXOperand::f64) {
+					double sum = C[element];
+					for (unsigned int inner = 0; inner < k; ++inner) {
+						sum = roundedFma(A[row * k + inner], B[inner * n + col], sum, rounding);
+					}
+					raw = hydrazine::bit_cast<ir::PTXU64>(sum);
+				} else {
+					float sum = C[element];
+					for (unsigned int inner = 0; inner < k; ++inner) {
+						sum = roundedFma(float(A[row * k + inner]), float(B[inner * n + col]),
+							sum, ir::PTXInstruction::rn);
+					}
+					if (instr.type == ir::PTXOperand::f16) {
+						raw = toF16(sum, ir::PTXInstruction::rn);
+					} else {
+						raw = hydrazine::bit_cast<ir::PTXU32>(sum);
+					}
+				}
+				const unsigned int registerIndex = element / elementsPerRegister;
+				const unsigned int elementInRegister = element % elementsPerRegister;
+				const unsigned int shift = elementInRegister * elementBits;
+				results[registerIndex] |= raw << shift;
+			}
+		}
+		for (int lane = 0; lane < WARP_SZ; ++lane) {
+			for (unsigned int reg = 0; reg < instr.d.array.size(); ++reg) {
+				const auto value = results[lane*instr.d.array.size()+reg];
+				if (elementBits == 64) setRegAsB64(warp+lane,instr.d.array[reg].reg,value); else setRegAsB32(warp+lane,instr.d.array[reg].reg,value);
+			}
+		}
+	}
+}
+
+void executive::CooperativeThreadArray::eval_WmmaMemory(CTAContext &context, const ir::PTXInstruction &instr) {
+	trace();
+	constexpr unsigned int bitsPerByte = 8; // PTX bytes are 8 bits.
+	constexpr unsigned int registerBits = sizeof(ir::PTXU32) * bitsPerByte;
+	const bool wideRegisters = instr.type == ir::PTXOperand::f64;
+	const bool store = instr.opcode == ir::PTXInstruction::WmmaStoreD;
+	const auto& fragment = store ? instr.a : instr.d;
+	const auto& address = store ? instr.d : instr.a;
+	unsigned int m, n, k;
+	instr.wmmaDimensions(m, n, k);
+	unsigned int rows = m, cols = n; // C and D are M x N.
+	if (instr.opcode == ir::PTXInstruction::WmmaLoadA) cols = k;
+	else if (instr.opcode == ir::PTXInstruction::WmmaLoadB) rows = k;
+
+	unsigned int elementBits;
+	if (instr.type == ir::PTXOperand::b1) elementBits = 1;
+	else if (instr.type == ir::PTXOperand::s4 || instr.type == ir::PTXOperand::u4) elementBits = 4;
+	else elementBits = ir::PTXOperand::bytes(instr.type) * bitsPerByte;
+	unsigned int elementsPerRegister = 1;
+	if (!wideRegisters) elementsPerRegister = registerBits / elementBits;
+	const unsigned int registersPerThread = fragment.array.size();
+	const unsigned int leadingElements = instr.mmaAColumnMajor ? rows : cols;
+	const unsigned int leadingCount = instr.mmaAColumnMajor ? cols : rows;
+
+	auto* shared = (unsigned char*)functionCallStack.sharedMemoryPointer();
+	const ir::PTXU64 sharedSize = functionCallStack.sharedMemorySize();
+	const bool address32 = address.bytes() == sizeof(ir::PTXU32);
+	const auto pointer = [&](int thread) -> ir::PTXU64 {
+		if (address32) return operandAsU32(thread, address);
+		return operandAsU64(thread, address);
+	};
+	const auto readStride = [&](int thread) -> ir::PTXU32 {
+		if (instr.b.addressMode == ir::PTXOperand::Invalid) return leadingElements;
+		return operandAsU32(thread, instr.b);
+	};
+	for (int warp = 0; warp < threadCount; warp += WARP_SZ) {
+		const int lanes = min(WARP_SZ, threadCount - warp);
+		int participants = 0;
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (context.predicated(warp + lane, instr)) ++participants;
+		}
+		if (!participants) continue;
+		if (participants != WARP_SZ) {
+			report("warning: WMMA memory operation requires a complete participating warp; undefined behavior");
+			continue;
+		}
+		ir::PTXU64 base = pointer(warp);
+		const ir::PTXU64 stride = readStride(warp);
+		bool uniform = true;
+		for (int lane = 1; lane < WARP_SZ; ++lane) {
+			const int thread = warp + lane;
+			if (pointer(thread) != base || readStride(thread) != stride) {
+				uniform = false;
+				break;
+			}
+		}
+		if (!uniform || stride < leadingElements) {
+			report("warning: WMMA addresses/strides disagree or stride is too small; undefined behavior");
+			continue;
+		}
+		bool sharedAccess = instr.addressSpace == ir::PTXInstruction::Shared;
+		if (instr.addressSpace == ir::PTXInstruction::Generic) {
+			ir::PTXU64 offset = base - (ir::PTXU64)shared;
+			if (address32) offset = ir::PTXU32(offset);
+			if (address.addressMode == ir::PTXOperand::Address && base < sharedSize) {
+				sharedAccess = true; // Named shared symbols are already offsets.
+			} else if (offset < sharedSize) {
+				sharedAccess = true;
+				base = offset;
+			}
+		}
+		// The last row/column may be separated from its predecessor by padding.
+		const ir::PTXU64 extentElements = (leadingCount - 1) * stride + leadingElements;
+		const ir::PTXU64 extentBytes = (extentElements * elementBits + bitsPerByte - 1) / bitsPerByte;
+		if (sharedAccess && (base > sharedSize || extentBytes > sharedSize - base)) {
+			report("warning: WMMA matrix exceeds shared memory; undefined behavior");
+			continue;
+		}
+		unsigned char* memory;
+		if (sharedAccess) memory = shared + base;
+		else memory = (unsigned char*)base;
+		std::vector<ir::PTXU64> values(WARP_SZ * registersPerThread, 0);
+		if (store) { // Gather source registers before changing memory.
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
+				for (unsigned int reg = 0; reg < registersPerThread; ++reg) {
+					const int thread = warp + lane;
+					const auto& operand = fragment.array[reg];
+					if (wideRegisters) values[lane * registersPerThread + reg] = operandAsU64(thread, operand);
+					else values[lane * registersPerThread + reg] = operandAsB32(thread, operand);
+				}
+			}
+		}
+		// Emulator-owned row-major fragments; redundant FP16 slots repeat matrix elements.
+		for (int lane = 0; lane < WARP_SZ; ++lane) {
+			for (unsigned int reg = 0; reg < registersPerThread; ++reg) {
+				for (unsigned int part = 0; part < elementsPerRegister; ++part) {
+					const unsigned int registerIndex = lane * registersPerThread + reg;
+					const unsigned int index = (registerIndex * elementsPerRegister + part) % (rows * cols);
+					const unsigned int row = index / cols;
+					const unsigned int col = index % cols;
+					ir::PTXU64 position;
+					if (instr.mmaAColumnMajor) position = col * stride + row;
+					else position = row * stride + col;
+					position *= elementBits;
+					const ir::PTXU64 byteOffset = position / bitsPerByte;
+					const unsigned int elementBytes = elementBits / bitsPerByte;
+					const unsigned int registerShift = part * elementBits;
+					ir::PTXU64 value = 0;
+					if (store) {
+						value = values[registerIndex] >> registerShift;
+						std::memcpy(memory + byteOffset, &value, elementBytes);
+					} else {
+						if (elementBits < bitsPerByte) {
+							const unsigned int bitOffset = position % bitsPerByte;
+							const unsigned int elementMask = (1U << elementBits) - 1;
+							value = (memory[byteOffset] >> bitOffset) & elementMask;
+						} else std::memcpy(&value, memory + byteOffset, elementBytes);
+						values[registerIndex] |= value << registerShift;
+					}
+				}
+			}
+		}
+		if (!store) { // Write load results only after all memory reads finish.
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
+				for (unsigned int reg = 0; reg < registersPerThread; ++reg) {
+					const int thread = warp + lane;
+					const auto destination = fragment.array[reg].reg;
+					const auto value = values[lane * registersPerThread + reg];
+					if (wideRegisters) setRegAsB64(thread, destination, value);
+					else setRegAsB32(thread, destination, value);
+				}
+			}
+		}
 	}
 }
 

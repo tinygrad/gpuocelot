@@ -1675,6 +1675,202 @@ public:
 		return true;
 	}
 
+	bool test_WmmaRounding() {
+		for (const std::string rounding : {"", ".rn", ".rz", ".rm", ".rp"}) for (bool negative : {false,true}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry wm_round() { .reg .f64 a,b; .reg .f64 c<2>; wmma.mma.sync.aligned.m8n8k4.row.col" + rounding + ".f64.f64.f64.f64 {c0,c1},{a},{b},{c0,c1}; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed); EmulatedKernel kernel(again.getKernel("wm_round"),nullptr); kernel.setKernelShape(32,1,1);
+			for (int hostMode : {FE_TONEAREST,FE_TOWARDZERO,FE_UPWARD,FE_DOWNWARD}) {
+				CooperativeThreadArray local(&kernel,Dim3(),false);
+				for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::WmmaMma) {
+					const PTXU64 sign = negative ? 0x8000000000000000ULL : 0;
+					for (int lane = 0; lane < 32; ++lane) {
+						local.setRegAsB64(lane,ins.a.array[0].reg,lane%4 == 0 ? 0x3ff0000000000000ULL | sign : 0);
+						local.setRegAsB64(lane,ins.b.array[0].reg,lane < 8 ? 0x3ff0000000000000ULL : 0);
+						for (const auto& reg : ins.c.array) local.setRegAsB64(lane,reg.reg,0x3ca0000000000000ULL | sign); // +/-2^-53
+					}
+					const int previous = hydrazine::fegetround(); hydrazine::fesetround(hostMode);
+					local.execute(); const bool restored = hydrazine::fegetround() == hostMode; hydrazine::fesetround(previous);
+					if (!restored) return false;
+					const bool away = negative ? rounding == ".rm" : rounding == ".rp";
+					const PTXU64 expected = (0x3ff0000000000000ULL + away) | sign;
+					for (int lane = 0; lane < 32; ++lane) for (const auto& reg : ins.d.array) if (local.getRegAsB64(lane,reg.reg) != expected) return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_WmmaControls() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry wm_controls() { .reg .b32 r<8>; .reg .b64 p; ";
+		const std::string r8 = "{r0,r1,r2,r3,r4,r5,r6,r7}", r2 = "{r0,r1}";
+		for (const auto& body : std::vector<std::string>{
+			"wmma.load.a.sync.aligned.m16n16k16.row.global.f16 " + r2 + ",[p]",
+			"wmma.load.a.sync.aligned.m8n8k32.col.shared.s4 {r0},[p]",
+			"wmma.load.c.sync.aligned.m16n16k8.row.global.f16 " + r8 + ",[p]",
+			"wmma.store.d.sync.aligned.m16n16k16.row.shared.u8 [p]," + r8,
+			"wmma.mma.sync.aligned.m16n16k16.row.col.s32.s8.u8.s32 " + r8 + "," + r2 + "," + r2 + "," + r8,
+			"wmma.mma.sync.aligned.m16n16k16.row.col.f32.f32.satfinite " + r8 + "," + r8 + "," + r8 + "," + r8,
+			"wmma.mma.sync.aligned.m8n8k128.row.col.s32.b1.b1.s32 " + r2 + ",{r0},{r0}," + r2}) {
+			std::stringstream source(prefix + body + "; ret; }");
+			try { Module bad; bad.load(source); return false; } catch (const std::exception&) {}
+		}
+		for (bool saturate : {false,true}) for (bool negative : {false,true}) {
+			std::stringstream source(prefix + "wmma.mma.sync.aligned.m16n16k16.row.col.s32.s8.s8.s32" + (saturate ? ".satfinite" : "") + " " + r8 + ",{r0,r1},{r2,r3}," + r8 + "; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("wm_controls"),nullptr); kernel.setKernelShape(32,1,1); CooperativeThreadArray local(&kernel,Dim3(),false);
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::WmmaMma) {
+				for (int lane = 0; lane < 32; ++lane) {
+					for (const auto& reg : ins.c.array) local.setRegAsS32(lane,reg.reg,negative ? INT32_MIN : INT32_MAX);
+					for (const auto& reg : ins.a.array) local.setRegAsB32(lane,reg.reg,negative ? 0x80808080 : 0x7f7f7f7f);
+					for (const auto& reg : ins.b.array) local.setRegAsB32(lane,reg.reg,0x7f7f7f7f);
+				}
+				// D aliases A/B/C: each corresponding C slot contains the final initializer written above.
+				std::vector<PTXU32> expected(256);
+				for (int lane = 0; lane < 32; ++lane) for (int reg = 0; reg < 8; ++reg) {
+					const PTXS64 sum = PTXS64(local.getRegAsS32(lane,ins.c.array[reg].reg)) + 16*127*(negative ? -128 : 127);
+					expected[lane*8+reg] = saturate ? PTXU32(std::max<PTXS64>(INT32_MIN,std::min<PTXS64>(INT32_MAX,sum))) : PTXU32(sum);
+				}
+				local.execute();
+				for (int lane = 0; lane < 32; ++lane) for (int reg = 0; reg < 8; ++reg) if (local.getRegAsB32(lane,ins.d.array[reg].reg) != expected[lane*8+reg]) return false;
+			}
+		}
+		return true;
+	}
+
+	bool test_WmmaPipelines() {
+		unsigned int cases = 0, elements = 0;
+		const auto bits = [](PTXOperand::DataType t) { return t == PTXOperand::b1 ? 1U : (t == PTXOperand::s4 || t == PTXOperand::u4) ? 4U : PTXOperand::bytes(t)*8; };
+		const auto encode = [&](int value, PTXOperand::DataType t) -> PTXU64 {
+			if (t == PTXOperand::f64) return hydrazine::bit_cast<PTXU64>(double(value));
+			if (t == PTXOperand::f32 || t == PTXOperand::tf32) return hydrazine::bit_cast<PTXU32>(float(value));
+			if (t == PTXOperand::bf16) return hydrazine::bit_cast<PTXU32>(float(value)) >> 16;
+			if (t == PTXOperand::f16) {
+				if (!value) return 0;
+				const unsigned int magnitude = std::abs(value); unsigned int exponent = 0;
+				while ((2U << exponent) <= magnitude) ++exponent;
+				return (value < 0 ? 0x8000 : 0) | ((exponent+15) << 10) | ((magnitude-(1U << exponent)) << (10-exponent));
+			}
+			return PTXU32(value) & ((PTXU64(1) << bits(t))-1);
+		};
+		const auto regs = [](const std::string& name, int count) { std::string r = "{"; for (int i = 0; i < count; ++i) r += (i ? "," : "") + name + std::to_string(i); return r + "}"; };
+		for (auto shape : {PTXInstruction::MmaM16N16K16,PTXInstruction::MmaM8N32K16,PTXInstruction::MmaM32N8K16,PTXInstruction::MmaM16N16K8,PTXInstruction::MmaM8N8K4,PTXInstruction::MmaM8N8K32,PTXInstruction::MmaM8N8K128})
+		for (auto input : {PTXOperand::f16,PTXOperand::bf16,PTXOperand::tf32,PTXOperand::f64,PTXOperand::s8,PTXOperand::u8,PTXOperand::s4,PTXOperand::u4,PTXOperand::b1}) {
+			PTXInstruction spec; spec.mmaShape = shape; if (!spec.wmmaFragmentRegisters('a',input)) continue;
+			const bool binary = input == PTXOperand::b1, unsignedInput = input == PTXOperand::u8 || input == PTXOperand::u4;
+			const bool floating = input == PTXOperand::f16 || input == PTXOperand::bf16 || input == PTXOperand::tf32 || input == PTXOperand::f64;
+			const std::vector<PTXOperand::DataType> accumulators = input == PTXOperand::f16 ? std::vector<PTXOperand::DataType>{PTXOperand::f16,PTXOperand::f32} : std::vector<PTXOperand::DataType>{floating ? (input == PTXOperand::f64 ? PTXOperand::f64 : PTXOperand::f32) : PTXOperand::s32};
+			for (auto ctype : accumulators) for (auto dtype : accumulators) for (int layouts = 0; layouts < 16; ++layouts) for (bool alias : {false,true}) for (int bitop = 0; bitop < (binary ? 2 : 1); ++bitop) {
+				if ((alias && ctype != dtype) || ((bits(input) < 8) && (layouts & 3) != 2)) continue;
+				unsigned int m,n,k; spec.wmmaDimensions(m,n,k); const unsigned int rows[] = {m,k,m,m}, cols[] = {k,n,n,n};
+				const PTXOperand::DataType types[] = {input,input,ctype,dtype}; const std::string names[] = {"a","b","c",alias ? "c" : "d"};
+				const std::string shapeName = ".m" + std::to_string(m) + "n" + std::to_string(n) + "k" + std::to_string(k);
+				std::string fragments[4], body = ".version 8.0\n.target sm_86\n.entry wm_pipeline() { .reg .u64 pa,pb,pc,pd; ";
+				for (int matrix = 0; matrix < 4; ++matrix) {
+					body += ".reg .b" + std::to_string(input == PTXOperand::f64 ? 64 : 32) + " " + std::string(1,'a'+matrix) + "<8>; ";
+					fragments[matrix] = regs(names[matrix],spec.wmmaFragmentRegisters('a'+matrix,types[matrix]));
+				}
+				for (int matrix = 0; matrix < 3; ++matrix) body += "wmma.load." + std::string(1,'a'+matrix) + ".sync.aligned" + shapeName + (layouts & (1 << matrix) ? ".col" : ".row") + ".global." + PTXOperand::toString(types[matrix]) + " " + fragments[matrix] + ",[p" + std::string(1,'a'+matrix) + "]; ";
+				if (input == PTXOperand::f16) for (unsigned int reg = 0; reg < 8; ++reg) body += "add.f16x2 a" + std::to_string(reg) + ",a" + std::to_string(reg) + ",0x3c003c00; ";
+				body += std::string("wmma.mma") + (binary ? (bitop ? ".xor.popc" : ".and.popc") : "") + ".sync.aligned" + shapeName + (layouts & 1 ? ".col" : ".row") + (layouts & 2 ? ".col." : ".row.") + PTXOperand::toString(dtype) + (input == PTXOperand::f16 ? "" : "." + PTXOperand::toString(input) + "." + PTXOperand::toString(input)) + "." + PTXOperand::toString(ctype) + " " + fragments[3] + "," + fragments[0] + "," + fragments[1] + "," + fragments[2] + "; ";
+				body += "wmma.store.d.sync.aligned" + shapeName + (layouts & 8 ? ".col" : ".row") + ".global." + PTXOperand::toString(dtype) + " [pd]," + fragments[3] + "; ret; }";
+				std::vector<unsigned char> buffers[4]; std::vector<int> logical[3];
+				for (int matrix = 0; matrix < 4; ++matrix) {
+					buffers[matrix].assign(2*rows[matrix]*cols[matrix]*bits(types[matrix])/8,0);
+					if (matrix == 3) continue; logical[matrix].resize(2*rows[matrix]*cols[matrix]);
+					for (int warp = 0; warp < 2; ++warp) for (unsigned int row = 0; row < rows[matrix]; ++row) for (unsigned int col = 0; col < cols[matrix]; ++col) {
+						const int value = matrix == 2 ? int(row)-int(col)+warp : binary ? int((row+col+warp+matrix)%2) : int((row+col*(matrix+2)+warp)%5) - (unsignedInput ? 0 : 2);
+						logical[matrix][warp*rows[matrix]*cols[matrix]+row*cols[matrix]+col] = value;
+						const unsigned int position = (warp*rows[matrix]*cols[matrix] + (layouts & (1 << matrix) ? col*rows[matrix]+row : row*cols[matrix]+col))*bits(types[matrix]);
+						const PTXU64 raw = encode(value,types[matrix]);
+						if (bits(types[matrix]) < 8) buffers[matrix][position/8] |= raw << (position%8); else std::memcpy(buffers[matrix].data()+position/8,&raw,bits(types[matrix])/8);
+					}
+				}
+				std::stringstream source(body); Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("wm_pipeline"),nullptr); kernel.setKernelShape(64,1,1); CooperativeThreadArray local(&kernel,Dim3(),false);
+				for (const auto& ins : kernel.instructions) {
+					const int matrix = ins.opcode == PTXInstruction::WmmaLoadA ? 0 : ins.opcode == PTXInstruction::WmmaLoadB ? 1 : ins.opcode == PTXInstruction::WmmaLoadC ? 2 : ins.opcode == PTXInstruction::WmmaStoreD ? 3 : -1;
+					if (matrix < 0) continue; const auto& pointer = matrix == 3 ? ins.d : ins.a;
+					for (int lane = 0; lane < 64; ++lane) local.setRegAsU64(lane,pointer.reg,(PTXU64)(buffers[matrix].data() + (lane/32)*buffers[matrix].size()/2));
+				}
+				local.execute();
+				for (int warp = 0; warp < 2; ++warp) for (unsigned int row = 0; row < m; ++row) for (unsigned int col = 0; col < n; ++col) {
+					int expected = logical[2][warp*m*n+row*n+col];
+					for (unsigned int inner = 0; inner < k; ++inner) { const int a = logical[0][warp*m*k+row*k+inner] + (input == PTXOperand::f16 ? 1 : 0), b = logical[1][warp*k*n+inner*n+col]; expected += binary ? (bitop ? a ^ b : a & b) : a*b; }
+					const PTXU64 reference = encode(expected,dtype); PTXU64 actual = 0;
+					const unsigned int position = (warp*m*n + (layouts & 8 ? col*m+row : row*n+col))*bits(dtype)/8;
+					std::memcpy(&actual,buffers[3].data()+position,bits(dtype)/8);
+					if (actual != reference) { status << "WMMA pipeline mismatch " << shapeName << " " << PTXOperand::toString(input) << " row " << row << " col " << col << "\n"; return false; }
+				}
+				++cases; elements += 2*m*n;
+			}
+		}
+		status << "WMMA pipelines: " << cases << " kernels, " << elements << " matrix elements passed\n";
+		return true;
+	}
+
+	bool test_WmmaMmaExecution() {
+		std::stringstream source(".version 8.0\n.target sm_86\n.entry wm_calc() { .reg .b32 a<8>; .reg .b32 b<8>; .reg .f32 c<8>; "
+			"wmma.mma.sync.aligned.m16n16k16.row.col.f32.f32 {c0,c1,c2,c3,c4,c5,c6,c7},{a0,a1,a2,a3,a4,a5,a6,a7},{b0,b1,b2,b3,b4,b5,b6,b7},{c0,c1,c2,c3,c4,c5,c6,c7}; ret; }");
+		Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("wm_calc"),nullptr); kernel.setKernelShape(32,1,1); CooperativeThreadArray local(&kernel,Dim3(),false);
+		for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::WmmaMma) {
+			for (int lane = 0; lane < 32; ++lane) for (int reg = 0; reg < 8; ++reg) {
+				local.setRegAsB32(lane,ins.a.array[reg].reg,0x3c003c00); local.setRegAsB32(lane,ins.b.array[reg].reg,0x40004000); local.setRegAsF32(lane,ins.c.array[reg].reg,lane*8+reg);
+			}
+			local.execute();
+			for (int lane = 0; lane < 32; ++lane) for (int reg = 0; reg < 8; ++reg) if (local.getRegAsF32(lane,ins.d.array[reg].reg) != lane*8+reg+32) return false;
+		}
+		return true;
+	}
+
+	bool test_WmmaMmaFrontend() {
+		for (const std::string types : {"f16.f16","f16.f32","f32.f16","f32.f32","f32.bf16.bf16.f32","s32.s8.s8.s32","s32.u8.u8.s32.satfinite"}) {
+			const bool halfD = types.substr(0,3) == "f16", halfC = types.substr(types.size()-3) == "f16", integer = types.substr(0,3) == "s32";
+			const int inputs = integer ? 2 : types.find("bf16") != std::string::npos ? 4 : 8;
+			const auto regs = [](const std::string& name, int count) { std::string result = "{"; for (int i = 0; i < count; ++i) result += (i ? "," : "") + name + std::to_string(i); return result + "}"; };
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry wm_mma() { .reg .b32 a<8>; .reg .b32 b<8>; .reg .b32 c<8>; .reg .b32 d<8>; wmma.mma.sync.aligned.m16n16k16.row.col." + types + " " + regs("d",halfD ? 4 : 8) + "," + regs("a",inputs) + "," + regs("b",inputs) + "," + regs("c",halfC ? 4 : 8) + "; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed); EmulatedKernel kernel(again.getKernel("wm_mma"),nullptr);
+		}
+		return true;
+	}
+
+	bool test_WmmaMemoryTranspose() {
+		std::stringstream source(".version 8.0\n.target sm_86\n.entry wm_copy() { .reg .b32 r<8>; .reg .u64 p,q; "
+			"wmma.load.c.sync.aligned.m16n16k16.row.global.f32 {r0,r1,r2,r3,r4,r5,r6,r7},[p]; "
+			"wmma.store.d.sync.aligned.m16n16k16.col.global.f32 [q],{r0,r1,r2,r3,r4,r5,r6,r7}; ret; }");
+		Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("wm_copy"),nullptr); kernel.setKernelShape(32,1,1); CooperativeThreadArray local(&kernel,Dim3(),false);
+		PTXU32 input[256],output[256] = {}; for (int i = 0; i < 256; ++i) input[i] = 0x7fc00000+i;
+		for (const auto& ins : kernel.instructions) for (int lane = 0; lane < 32; ++lane) {
+			if (ins.opcode == PTXInstruction::WmmaLoadC) local.setRegAsU64(lane,ins.a.reg,(PTXU64)input);
+			if (ins.opcode == PTXInstruction::WmmaStoreD) local.setRegAsU64(lane,ins.d.reg,(PTXU64)output);
+		}
+		local.execute(); for (int row = 0; row < 16; ++row) for (int col = 0; col < 16; ++col) if (output[col*16+row] != input[row*16+col]) return false;
+		return true;
+	}
+
+	bool test_WmmaMemoryFrontend() {
+		for (const auto shape : {PTXInstruction::MmaM16N16K16,PTXInstruction::MmaM8N32K16,PTXInstruction::MmaM32N8K16,PTXInstruction::MmaM16N16K8,PTXInstruction::MmaM8N8K4,PTXInstruction::MmaM8N8K32,PTXInstruction::MmaM8N8K128})
+		for (char role : {'a','b','c','d'}) for (auto type : {PTXOperand::f16,PTXOperand::bf16,PTXOperand::tf32,PTXOperand::f32,PTXOperand::f64,PTXOperand::s8,PTXOperand::u8,PTXOperand::s4,PTXOperand::u4,PTXOperand::b1,PTXOperand::s32}) {
+			PTXInstruction ins; ins.mmaShape = shape; const int count = ins.wmmaFragmentRegisters(role,type); if (!count) continue;
+			unsigned int m,n,k; ins.wmmaDimensions(m,n,k); std::string regs;
+			for (int i = 0; i < count; ++i) regs += (i ? "," : "") + std::string(type == PTXOperand::f64 ? "q" : "r") + std::to_string(i);
+			const std::string op = std::string("wmma.") + (role == 'd' ? "store.d" : std::string("load.") + role);
+			const std::string layout = (type == PTXOperand::s4 || type == PTXOperand::u4 || type == PTXOperand::b1) && role == 'b' ? ".col" : ".row";
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry wm_mem() { .reg .b32 r<8>; .reg .b64 q<2>; .reg .u64 p; " + op + ".sync.aligned.m" + std::to_string(m) + "n" + std::to_string(n) + "k" + std::to_string(k) + layout + ".global." + PTXOperand::toString(type) + " " + (role == 'd' ? "[p],{" + regs + "}" : "{" + regs + "},[p]") + ",WARP_SZ; ret; }"), printed;
+			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed); EmulatedKernel kernel(again.getKernel("wm_mem"),nullptr);
+		}
+		return true;
+	}
+
+	bool test_WmmaFragmentCounts() {
+		for (auto shape : {PTXInstruction::MmaM16N16K16,PTXInstruction::MmaM8N32K16,PTXInstruction::MmaM32N8K16}) {
+			PTXInstruction ins; ins.mmaShape = shape; unsigned int m,n,k; ins.wmmaDimensions(m,n,k);
+			if (m*n != 256 || k != 16 || ins.wmmaFragmentRegisters('a',PTXOperand::f16) != 8 || ins.wmmaFragmentRegisters('b',PTXOperand::f16) != 8) return false;
+			if (ins.wmmaFragmentRegisters('c',PTXOperand::f32) != 8 || ins.wmmaFragmentRegisters('d',PTXOperand::f16) != 4) return false;
+			if (ins.wmmaFragmentRegisters('a',PTXOperand::bf16)*64 != m*k || ins.wmmaFragmentRegisters('b',PTXOperand::u8)*128 != k*n) return false;
+			if (ins.wmmaFragmentRegisters('a',PTXOperand::f32)) return false;
+		}
+		PTXInstruction ins; ins.mmaShape = PTXInstruction::MmaM8N8K4;
+		return ins.wmmaFragmentRegisters('a',PTXOperand::f64) == 1 && ins.wmmaFragmentRegisters('d',PTXOperand::f64) == 2;
+	}
+
 	bool test_CpAsyncMbarrier() {
 		for (bool noinc : {false,true}) for (int threads : {1,32,64}) {
 			std::stringstream source(".version 8.0\n.target sm_86\n.entry mb_copy() { .shared .align 8 .b64 barrier; .shared .align 16 .b8 data[256]; "
@@ -1694,6 +1890,30 @@ public:
 			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::CpAsync) dataOffset = local.getRegAsU32(0,ins.d.reg);
 			std::memcpy(copied,(const char*)local.functionCallStack.sharedMemoryPointer() + dataOffset,threads*4);
 			for (int lane = 0; lane < threads; ++lane) if (copied[lane] != values[lane]) return false;
+		}
+		return true;
+	}
+
+	bool test_MbarrierPhases() {
+		for (int threads : {1,31,32,64}) for (bool parity : {false,true}) {
+			const std::string wait = std::string("mbarrier.test_wait") + (parity ? ".parity" : "") + ".shared.b64 ";
+			const auto check = [&](int index, int phase) { return wait + "p" + std::to_string(index) + ",[barrier]," + (parity ? std::to_string(phase & 1) : "t") + "; "; };
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry mb_phases() { .shared .align 8 .b64 barrier; .reg .b64 t; .reg .u32 id; .reg .pred leader; .reg .pred p<6>; "
+				"mov.u32 id,%tid.x; setp.eq.u32 leader,id,0; @leader mbarrier.init.shared.b64 [barrier]," + std::to_string(threads*2) + "; bar.sync 0; "
+				"mbarrier.arrive.noComplete.shared.b64 t,[barrier],1; " + check(0,0) + "mbarrier.arrive.shared.b64 _,[barrier]; " + check(1,0) +
+				"mbarrier.arrive_drop.shared.b64 t,[barrier]; " + check(2,1) + "mbarrier.arrive.shared.b64 _,[barrier]; " + check(3,1) +
+				"mbarrier.arrive.shared.b64 t,[barrier]; " + check(4,2) + check(5,3) + "@leader mbarrier.inval.shared.b64 [barrier]; ret; }");
+			// The third phase has the reduced expected count, so a single arrival per thread completes it.
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("mb_phases"), nullptr); kernel.setKernelShape(threads,1,1);
+			CooperativeThreadArray local(&kernel, Dim3(), false);
+			for (int launch = 0; launch < 2; ++launch) {
+				local.execute(); int index = 0;
+				for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::MbarrierTestWait || ins.opcode == PTXInstruction::MbarrierTestWaitParity) {
+					const bool expected = index == 1 || index == 3 || index == 4 || (!parity && index == 5);
+					for (int lane = 0; lane < threads; ++lane) if (local.getRegAsPredicate(lane,ins.d.reg) != expected) return false;
+					++index;
+				}
+			}
 		}
 		return true;
 	}
@@ -1721,6 +1941,25 @@ public:
 			local.execute();
 			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::MbarrierPendingCount)
 				if (local.getRegAsU32(0,ins.d.reg) != initial) return false;
+		}
+		return true;
+	}
+
+	bool test_MbarrierArrivals() {
+		for (bool drop : {false,true}) for (bool noComplete : {false,true}) for (bool alias : {false,true}) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry mb_arrivals() { .shared .align 8 .b64 barrier; .reg .b64 t; .reg .u32 a; "
+				"mbarrier.init.shared.b64 [barrier],5; mbarrier." + std::string(drop ? "arrive_drop" : "arrive") + (noComplete ? ".noComplete" : "") +
+				".shared.b64 t,[" + (alias ? "t" : "a") + "]" + (noComplete ? ",2" : "") + "; ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("mb_arrivals"), nullptr); kernel.setKernelShape(1,1,1);
+			CooperativeThreadArray local(&kernel, Dim3(), false);
+			unsigned int tokenReg = 0;
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::MbarrierArrive || ins.opcode == PTXInstruction::MbarrierArriveDrop) {
+				tokenReg = ins.d.reg;
+				if (alias) local.setRegAsU64(0, ins.a.reg, 0); else local.setRegAsU32(0, ins.a.reg, 0);
+			}
+			local.execute(); PTXU64 state; std::memcpy(&state, local.functionCallStack.sharedMemoryPointer(), sizeof(state));
+			const PTXU32 decrement = noComplete ? 2 : 1;
+			if ((state & 0xfffff) != 5 - decrement || ((state >> 20) & 0xfffff) != 5 - (drop ? decrement : 0) || (local.getRegAsB64(0,tokenReg) & 0xfffff) != 5) return false;
 		}
 		return true;
 	}
@@ -12262,6 +12501,14 @@ public:
 			result = (result && test_MbarrierWaitFrontend());
 			result = (result && test_MbarrierPhases());
 			result = (result && test_CpAsyncMbarrier());
+			result = (result && test_WmmaFragmentCounts());
+			result = (result && test_WmmaMemoryFrontend());
+			result = (result && test_WmmaMemoryTranspose());
+			result = (result && test_WmmaMmaFrontend());
+			result = (result && test_WmmaMmaExecution());
+			result = (result && test_WmmaPipelines());
+			result = (result && test_WmmaControls());
+			result = (result && test_WmmaRounding());
 			result = (result && test_CpAsyncHints());
 			result = (result && test_CpAsyncUndefinedBehavior());
 			result = (result && test_CpAsyncZeroFill());

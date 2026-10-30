@@ -2824,6 +2824,11 @@ namespace parser
 		if (string == "mbarrier.test_wait.parity") return ir::PTXInstruction::MbarrierTestWaitParity;
 		if (string == "cp.async.mbarrier.arrive") return ir::PTXInstruction::CpAsyncMbarrierArrive;
 		if (string == "cp.async.mbarrier.arrive.noinc") return ir::PTXInstruction::CpAsyncMbarrierArriveNoInc;
+		if (string == "wmma.mma" || string == "wmma.mma.xor.popc" || string == "wmma.mma.and.popc") return ir::PTXInstruction::WmmaMma;
+		if (string == "wmma.load.a") return ir::PTXInstruction::WmmaLoadA;
+		if (string == "wmma.load.b") return ir::PTXInstruction::WmmaLoadB;
+		if (string == "wmma.load.c") return ir::PTXInstruction::WmmaLoadC;
+		if (string == "wmma.store.d") return ir::PTXInstruction::WmmaStoreD;
 		if (string == "mbarrier.init") return ir::PTXInstruction::MbarrierInit;
 		if (string == "mbarrier.inval") return ir::PTXInstruction::MbarrierInval;
 		if (string == "cp.async") return ir::PTXInstruction::CpAsync;

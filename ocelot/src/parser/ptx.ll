@@ -212,6 +212,15 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
 "mbarrier.pending_count" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_PENDING; }
 "mbarrier.test_wait"|"mbarrier.test_wait.parity" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_WAIT; }
 "cp.async.mbarrier.arrive"|"cp.async.mbarrier.arrive.noinc" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_CP; }
+"wmma.mma"|"wmma.mma.xor.popc"|"wmma.mma.and.popc" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_WMMA_MMA; }
+"wmma.load.a" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_WMMA_MEMORY; }
+"wmma.load.b" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_WMMA_MEMORY; }
+"wmma.load.c" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_WMMA_MEMORY; }
+"wmma.store.d" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_WMMA_MEMORY; }
+".m16n16k16" { yylval->value = TOKEN_M16N16K16; return TOKEN_M16N16K16; }
+".m8n32k16" { yylval->value = TOKEN_M8N32K16; return TOKEN_M8N32K16; }
+".m32n8k16" { yylval->value = TOKEN_M32N8K16; return TOKEN_M32N8K16; }
+".m16n16k8" { yylval->value = TOKEN_M16N16K8; return TOKEN_M16N16K8; }
 "mbarrier.init"                { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_INIT; }
 "mbarrier.inval"               { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_INVAL; }
 "cp.async"                      { sstrcpy(yylval->text, yytext, 1024); return OPCODE_CP_ASYNC; }

@@ -454,6 +454,11 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case CpAsyncCommitGroup: return "cp.async.commit_group";
 		case CpAsyncWaitGroup: return "cp.async.wait_group";
 		case CpAsyncWaitAll: return "cp.async.wait_all";
+		case WmmaLoadA: return "wmma.load.a";
+		case WmmaLoadB: return "wmma.load.b";
+		case WmmaLoadC: return "wmma.load.c";
+		case WmmaStoreD: return "wmma.store.d";
+		case WmmaMma: return "wmma.mma";
 		case MbarrierInit: return "mbarrier.init";
 		case MbarrierInval: return "mbarrier.inval";
 		case MbarrierArrive: return "mbarrier.arrive";
@@ -570,7 +575,76 @@ bool ir::PTXInstruction::operator==( const PTXInstruction& i ) const {
 	return opcode == i.opcode;
 }
 
+void ir::PTXInstruction::wmmaDimensions(unsigned int& m, unsigned int& n, unsigned int& k) const {
+	m = n = k = 0;
+	switch (mmaShape) {
+		case MmaM16N16K16: m = n = k = 16; break;
+		case MmaM8N32K16: m = 8; n = 32; k = 16; break;
+		case MmaM32N8K16: m = 32; n = 8; k = 16; break;
+		case MmaM16N16K8: m = n = 16; k = 8; break;
+		case MmaM8N8K4: m = n = 8; k = 4; break;
+		case MmaM8N8K32: m = n = 8; k = 32; break;
+		case MmaM8N8K128: m = n = 8; k = 128; break;
+		default: break;
+	}
+}
+
+unsigned int ir::PTXInstruction::wmmaFragmentRegisters(char matrix, PTXOperand::DataType element) const {
+	unsigned int m, n, k; wmmaDimensions(m,n,k);
+	if (!m || (matrix != 'a' && matrix != 'b' && matrix != 'c' && matrix != 'd')) return 0;
+	const bool accumulator = matrix == 'c' || matrix == 'd';
+	const unsigned int elements = accumulator ? m*n : matrix == 'a' ? m*k : k*n;
+	if (k == 16) {
+		if (accumulator) return element == PTXOperand::f16 ? 4 : (element == PTXOperand::f32 || element == PTXOperand::s32) ? 8 : 0;
+		if (element == PTXOperand::f16) return 8; // FP16 multiplicands have redundant slots.
+		if (element == PTXOperand::bf16) return elements / 64;
+		return element == PTXOperand::s8 || element == PTXOperand::u8 ? elements / 128 : 0;
+	}
+	if (k == 8) return element == (accumulator ? PTXOperand::f32 : PTXOperand::tf32) ? (accumulator ? 8 : 4) : 0;
+	if (k == 4) return element == PTXOperand::f64 ? (accumulator ? 2 : 1) : 0;
+	if (accumulator) return element == PTXOperand::s32 ? 2 : 0;
+	return k == 32 ? (element == PTXOperand::s4 || element == PTXOperand::u4 ? 1 : 0) : (element == PTXOperand::b1 ? 1 : 0);
+}
+
 std::string ir::PTXInstruction::valid() const {
+	if (opcode == WmmaMma) {
+		if (a.type != b.type) return "WMMA multiplicands must have identical element types";
+		const PTXOperand* fragments[] = {&a,&b,&c,&d}; const char roles[] = {'a','b','c','d'};
+		for (int i = 0; i < 4; ++i) {
+			const unsigned int count = wmmaFragmentRegisters(roles[i],fragments[i]->type);
+			if (!count || fragments[i]->array.size() != count) return "invalid WMMA MMA fragment shape, type or length";
+			for (const auto& reg : fragments[i]->array) {
+				if (reg.addressMode != PTXOperand::Register || reg.vec != PTXOperand::v1 || !reg.array.empty() || reg.bytes() != (fragments[i]->type == PTXOperand::f64 ? 8 : 4)) return "invalid WMMA MMA register container";
+			}
+		}
+		const bool integer = a.type == PTXOperand::s8 || a.type == PTXOperand::u8 || a.type == PTXOperand::s4 || a.type == PTXOperand::u4 || a.type == PTXOperand::b1;
+		if (integer ? (type != PTXOperand::s32 || c.type != PTXOperand::s32) : a.type == PTXOperand::f16 ?
+			((type != PTXOperand::f16 && type != PTXOperand::f32) || (c.type != PTXOperand::f16 && c.type != PTXOperand::f32)) :
+			(type != (a.type == PTXOperand::f64 ? PTXOperand::f64 : PTXOperand::f32) || c.type != type)) return "invalid WMMA accumulator types";
+		if ((a.type == PTXOperand::s4 || a.type == PTXOperand::u4 || a.type == PTXOperand::b1) && (mmaAColumnMajor || !mmaBColumnMajor)) return "sub-byte WMMA requires row/column multiplicands";
+		if (a.type == PTXOperand::b1 ? (booleanOperator != BoolAnd && booleanOperator != BoolXor) : booleanOperator != BoolNop) return "invalid WMMA bit operation";
+		if (a.type == PTXOperand::f64 ? (modifier && modifier != rn && modifier != rz && modifier != rm && modifier != rp) :
+			(modifier && (!integer || a.type == PTXOperand::b1 || modifier != satfinite))) return "invalid WMMA rounding or saturation modifier";
+		return "";
+	}
+	if (opcode == WmmaLoadA || opcode == WmmaLoadB || opcode == WmmaLoadC || opcode == WmmaStoreD) {
+		const bool store = opcode == WmmaStoreD;
+		const char matrix = store ? 'd' : opcode == WmmaLoadA ? 'a' : opcode == WmmaLoadB ? 'b' : 'c';
+		const auto& fragment = store ? a : d; const auto& address = store ? d : a;
+		const unsigned int count = wmmaFragmentRegisters(matrix,type);
+		if (!count || fragment.array.size() != count || modifier) return "invalid WMMA memory shape, type or fragment length";
+		for (const auto& reg : fragment.array) {
+			if (reg.addressMode != PTXOperand::Register || reg.vec != PTXOperand::v1 || !reg.array.empty() || reg.bytes() != (type == PTXOperand::f64 ? 8 : 4)) return "invalid WMMA fragment register";
+		}
+		if ((type == PTXOperand::s4 || type == PTXOperand::u4 || type == PTXOperand::b1) && mmaAColumnMajor != (matrix == 'b')) return "sub-byte WMMA multiplicands require A row and B column layouts";
+		if (addressSpace != Global && addressSpace != Shared && addressSpace != Generic) return "invalid WMMA memory space";
+		if (address.vec != PTXOperand::v1 || !address.array.empty() || (address.addressMode != PTXOperand::Address &&
+			((address.addressMode != PTXOperand::Indirect && address.addressMode != PTXOperand::Register && address.addressMode != PTXOperand::Immediate) ||
+			(!PTXOperand::isInt(address.type) && address.type != PTXOperand::b32 && address.type != PTXOperand::b64) || (address.bytes() != 4 && address.bytes() != 8)))) return "invalid WMMA address";
+		if (b.addressMode != PTXOperand::Invalid && ((b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) || b.vec != PTXOperand::v1 || !b.array.empty() ||
+			(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32) || (b.addressMode == PTXOperand::Register && b.bytes() != 4))) return "WMMA stride must be a scalar 32-bit integer";
+		return "";
+	}
 	if (opcode == MbarrierPendingCount) {
 		if (type != PTXOperand::b64 || d.addressMode != PTXOperand::Register || d.vec != PTXOperand::v1 || !d.array.empty() ||
 			(!PTXOperand::isInt(d.type) && d.type != PTXOperand::b32) || d.bytes() != 4) return "mbarrier.pending_count needs a scalar 32-bit destination";
@@ -3472,6 +3546,21 @@ std::string ir::PTXInstruction::toString() const {
 		case Prefetch: {
 			return guard() + "prefetch." + toString(addressSpace) + "." + 
 				PTXInstruction::toString(cacheLevel) + " [" + d.toString() + "]";
+		}
+		case WmmaMma: {
+			unsigned int m,n,k; wmmaDimensions(m,n,k);
+			std::string result = guard() + "wmma.mma" + (a.type == PTXOperand::b1 ? "." + toString(booleanOperator) + ".popc" : "") +
+				".sync.aligned.m" + std::to_string(m) + "n" + std::to_string(n) + "k" + std::to_string(k) + (mmaAColumnMajor ? ".col" : ".row") + (mmaBColumnMajor ? ".col" : ".row");
+			if (a.type == PTXOperand::f64 && modifier) result += "." + toString((Modifier)modifier);
+			result += "." + PTXOperand::toString(type) + (a.type == PTXOperand::f16 ? "" : "." + PTXOperand::toString(a.type) + "." + PTXOperand::toString(b.type)) + "." + PTXOperand::toString(c.type);
+			if (modifier & satfinite) result += ".satfinite";
+			return result + " " + d.toString() + ", " + a.toString() + ", " + b.toString() + ", " + c.toString();
+		}
+		case WmmaLoadA: case WmmaLoadB: case WmmaLoadC: case WmmaStoreD: {
+			unsigned int m,n,k; wmmaDimensions(m,n,k);
+			return guard() + toString(opcode) + ".sync.aligned.m" + std::to_string(m) + "n" + std::to_string(n) + "k" + std::to_string(k) +
+				(mmaAColumnMajor ? ".col" : ".row") + (addressSpace == Generic ? "" : "." + toString(addressSpace)) + "." + PTXOperand::toString(type) + " " +
+				(opcode == WmmaStoreD ? "[" + d.toString() + "], " + a.toString() : d.toString() + ", [" + a.toString() + "]") + (b.addressMode == PTXOperand::Invalid ? "" : ", " + b.toString());
 		}
 		case MbarrierPendingCount: return guard() + toString(opcode) + ".b64 " + d.toString() + ", " + a.toString();
 		case MbarrierArrive:
