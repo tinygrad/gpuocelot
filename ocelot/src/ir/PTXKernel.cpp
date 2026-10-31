@@ -350,9 +350,12 @@ void PTXKernel::constructCFG( ControlFlowGraph &cfg,
 				if (edge.type != ControlFlowGraph::Edge::Invalid) {
 					cfg.insert_edge(edge);
 				}
+				// A predicated exit/ret leaves only some threads: it branches to the
+				// exit block and the remaining threads fall through to the next block.
+				const bool partial = statement.instruction.pg.condition != ir::PTXOperand::PT;
 				edge.head = block;
 				edge.tail = cfg.get_exit_block();
-				if (hasExit)
+				if (hasExit || partial)
 				{
 					edge.type = ControlFlowGraph::Edge::Branch;
 				}
@@ -365,7 +368,13 @@ void PTXKernel::constructCFG( ControlFlowGraph &cfg,
 				
 				block = cfg.insert_block(
 					ControlFlowGraph::BasicBlock(cfg.newId()));
-				edge.type = ControlFlowGraph::Edge::Invalid;
+				if (partial) {
+					edge.tail = block;
+					edge.type = ControlFlowGraph::Edge::FallThrough;
+				}
+				else {
+					edge.type = ControlFlowGraph::Edge::Invalid;
+				}
 			}
 		}
 		else if( statement.directive == PTXStatement::Param )

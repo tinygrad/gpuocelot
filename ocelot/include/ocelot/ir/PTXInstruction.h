@@ -585,7 +585,11 @@ namespace ir {
 		bool mmio;
 		bool cacheHint; // .L2::cache_hint; policy operand is q.
 		bool mbarrierNoComplete;
-		unsigned int prefetchSize; // cp.async L2 prefetch hint in bytes; zero means absent.
+		unsigned int prefetchSize; // cp.async/ld .L2::{64,128,256}B prefetch hint in bytes; zero means absent.
+		/*! ld/st .L1::eviction_priority (performance hint only): -1 absent, else
+			0 evict_normal, 1 evict_unchanged, 2 evict_first, 3 evict_last, 4 no_allocate.
+			prefetch.global uses l2Evict instead: -1 absent, 0 evict_normal, 1 evict_last. */
+		int l1Evict, l2Evict;
 		PolicyMode policyMode;
 		CachePriority primaryPriority, secondaryPriority;
 	

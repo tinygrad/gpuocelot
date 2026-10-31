@@ -177,7 +177,7 @@ void executive::ReconvergenceIPDOM::initialize() {
 	runtimeStack.clear();
 	pcStack.clear();
 	tokenStack.clear();
-	voteYielded = false;
+	yielded = false;
 	pendingVote.clear();
 	runtimeStack.push_back(context);
 	pcStack.push_back(0);
@@ -329,8 +329,33 @@ void executive::ReconvergenceIPDOM::eval_Reconverge(
 
 void executive::ReconvergenceIPDOM::eval_Exit(executive::CTAContext &context, 
 	const ir::PTXInstruction &instr) {
-	eval_Bar(context, instr);
-	context.executionState = CTAContext::Exit;
+	// Exiting threads (guard true) leave the kernel: drop them from this context
+	// and from every suspended context in this call frame, so they never resume
+	// at a reconvergence point. The remaining threads continue.
+	const boost::dynamic_bitset<> exiting = context.predicateMask(instr);
+	auto token = tokenStack.rbegin();
+	for (auto suspended = runtimeStack.rbegin(); suspended != runtimeStack.rend()
+		&& token != tokenStack.rend(); ++suspended, ++token) {
+		suspended->active -= exiting;
+		if (*token == Call) break;
+	}
+	if (context.active.any()) {
+		// nextInstruction() advances the PC after exit but not after ret.
+		if (instr.opcode == ir::PTXInstruction::Ret) context.PC++;
+		return;
+	}
+	// This context is finished. If other threads are still suspended, resume
+	// them (yield) instead of ending the kernel.
+	bool live = false;
+	for (const auto& suspended : runtimeStack) live |= suspended.active.any();
+	if (!live || runtimeStack.size() == 1) {
+		context.executionState = CTAContext::Exit;
+		return;
+	}
+	runtimeStack.pop_back();
+	pcStack.pop_back();
+	tokenStack.pop_back();
+	yielded = true;
 }
 
 void executive::ReconvergenceIPDOM::eval_WarpSync(CTAContext& context,
@@ -382,7 +407,7 @@ void executive::ReconvergenceIPDOM::eval_WarpSync(CTAContext& context,
 	runtimeStack.pop_back();
 	pcStack.pop_back();
 	tokenStack.pop_back();
-	voteYielded = true;
+	yielded = true;
 	if (runtimeStack.empty() || (runtimeStack.back().active & combined.active).any())
 		throw RuntimeException("vote.sync has no runnable sibling context", combined.PC, instr);
 }
@@ -391,8 +416,8 @@ bool executive::ReconvergenceIPDOM::nextInstruction(
 	executive::CTAContext &context, 
 	const ir::PTXInstruction &instr, const ir::PTXInstruction::Opcode &opcode) {
 
-	if (voteYielded) {
-		voteYielded = false;
+	if (yielded) {
+		yielded = false;
 		return context.running();
 	}
 	// advance to next instruction if the current instruction wasn't a branch

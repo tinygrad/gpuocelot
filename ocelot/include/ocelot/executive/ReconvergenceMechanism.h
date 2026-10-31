@@ -176,7 +176,7 @@ private:
 	PCStack pcStack;
 	TokenStack tokenStack;
 	unsigned int reconvergeEvents;
-	bool voteYielded = false;
+	bool yielded = false;
 	RuntimeStack pendingVote;
 	int voteBoundary = 0;
 };

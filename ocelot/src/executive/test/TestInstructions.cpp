@@ -24,6 +24,7 @@
 
 #include <cmath>
 #include <limits>
+#include <functional>
 
 using namespace std;
 using namespace ir;
@@ -6543,6 +6544,39 @@ public:
 		return printed.str().find("shfl.up.b32") != std::string::npos;
 	}
 
+	// Kernel-level predicated exit/ret leaves only the guarded lanes (PTX 8.0:
+	// exit ends the thread). Survivors keep running and reconverge; outputs are
+	// per lane, 0xdeadbeef = not written. Device-function exit is not covered.
+	bool test_PartialExit() {
+		std::vector<std::pair<std::string, std::function<PTXU32(int)>>> cases = {
+			{"setp.eq.u32 p, lane, 3; @p exit; st.global.u32 [out], lane;", [](int l) { return l == 3 ? 0xdeadbeefu : PTXU32(l); }},
+			{"setp.eq.u32 p, lane, 3; @p ret; st.global.u32 [out], lane;", [](int l) { return l == 3 ? 0xdeadbeefu : PTXU32(l); }},
+			{"setp.eq.u32 p, lane, 3; @!p exit; st.global.u32 [out], lane;", [](int l) { return l == 3 ? 3u : 0xdeadbeefu; }},
+			{"setp.lt.u32 p, lane, 30; @p exit; st.global.u32 [out], lane;", [](int l) { return l < 30 ? 0xdeadbeefu : PTXU32(l); }},
+			// Divergent: even lanes exit lane 4, odd lanes ret lane 5; survivors reconverge.
+			{"and.b32 t, lane, 1; setp.eq.u32 p, t, 1; @p bra odd; setp.eq.u32 q, lane, 4; @q exit; bra done;"
+				" odd: setp.eq.u32 q, lane, 5; @q ret; done: st.global.u32 [out], lane;", [](int l) { return l == 4 || l == 5 ? 0xdeadbeefu : PTXU32(l); }},
+			// Exit inside a loop: lane t leaves on iteration t (t < 4); others finish 4 iterations.
+			{"mov.u32 t, 0; loop: setp.eq.u32 p, t, lane; @p exit; add.u32 t, t, 1; setp.lt.u32 q, t, 4; @q bra loop; st.global.u32 [out], t;",
+				[](int l) { return l < 4 ? 0xdeadbeefu : 4u; }},
+			{"setp.eq.u32 p, lane, 3; @p exit; activemask.b32 t; st.global.u32 [out], t;", [](int l) { return l == 3 ? 0xdeadbeefu : 0xfffffff7u; }}};
+		for (const auto& c : cases) {
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry partial_exit() { .reg .u64 out, base; .reg .u32 lane, t; .reg .pred p, q;"
+				" mov.u32 lane, %tid.x; add.u64 out, 0, base; " + c.first + " ret; }");
+			Module parsed; parsed.load(source); EmulatedKernel kernel(parsed.getKernel("partial_exit"), nullptr);
+			kernel.setKernelShape(32, 1, 1); CooperativeThreadArray local(&kernel, Dim3(), false);
+			local.reset(); PTXU32 output[32]; for (auto& word : output) word = 0xdeadbeef;
+			// out = 0 + per-lane address: seed the add's second operand register.
+			for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Add && ins.type == PTXOperand::u64)
+				for (int lane = 0; lane < 32; ++lane) local.setRegAsU64(lane, ins.b.reg, (PTXU64)&output[lane]);
+			try { local.execute(); }
+			catch (const std::exception& error) { status << "partial exit threw: " << c.first << ": " << error.what() << "\n"; return false; }
+			for (int lane = 0; lane < 32; ++lane) if (output[lane] != c.second(lane)) {
+				status << "partial exit lane " << lane << " got " << std::hex << output[lane] << std::dec << ": " << c.first << "\n"; return false; }
+		}
+		return true;
+	}
+
 	bool test_WarpRegisters() {
 		for (const auto shape : {Dim3(1,1,1), Dim3(31,1,1), Dim3(32,1,1), Dim3(33,1,1), Dim3(8,4,2), Dim3(7,5,2)})
 		for (const char* name : {"WARP_SZ", "%laneid", "%lanemask_eq", "%lanemask_lt", "%lanemask_le", "%lanemask_gt", "%lanemask_ge"}) {
@@ -12750,6 +12784,7 @@ public:
 			result = (result && test_ShflSyncExecution());
 			result = (result && test_ShflSyncSynchronization());
 			result = (result && test_WarpRegisters());
+			result = (result && test_PartialExit());
 			result = (result && test_BarWarpParser());
 			result = (result && test_BarWarpSynchronization());
 			result = (result && test_MatchParser());
