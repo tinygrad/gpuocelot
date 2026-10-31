@@ -606,6 +606,13 @@ unsigned int ir::PTXInstruction::wmmaFragmentRegisters(char matrix, PTXOperand::
 	return k == 32 ? (element == PTXOperand::s4 || element == PTXOperand::u4 ? 1 : 0) : (element == PTXOperand::b1 ? 1 : 0);
 }
 
+// Half-precision comparisons accept only the floating-point CmpOps (no lo/ls/hi/hs).
+static bool halfComparison( ir::PTXInstruction::CmpOp op ) {
+	return op != ir::PTXInstruction::Lo && op != ir::PTXInstruction::Ls
+		&& op != ir::PTXInstruction::Hi && op != ir::PTXInstruction::Hs
+		&& op != ir::PTXInstruction::CmpOp_Invalid;
+}
+
 std::string ir::PTXInstruction::valid() const {
 	if (opcode == WmmaMma) {
 		if (a.type != b.type) return "WMMA multiplicands must have identical element types";
@@ -1425,7 +1432,8 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case Ex2: {
-			if( !( type == PTXOperand::f32 || type == PTXOperand::f16 ) ) {
+			if( !( type == PTXOperand::f32 || type == PTXOperand::f16
+				|| type == PTXOperand::f16x2 ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
@@ -1460,6 +1468,9 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			if (type == PTXOperand::f64 && (modifier & (ftz | sat))) {
 				return "ftz and sat modifiers are invalid for fma.f64";
+			}
+			if ((type == PTXOperand::f32 || type == PTXOperand::f64) && (modifier & relu)) {
+				return "relu is only valid for fma.{f16,f16x2,bf16,bf16x2}";
 			}
 			if ((type == PTXOperand::f16 || type == PTXOperand::f16x2)
 				&& rounding != rn) {
@@ -2547,6 +2558,15 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case Set: {
+			if( a.type == PTXOperand::f16x2 ) {
+				// set.CmpOp{.BoolOp}{.ftz}.{f16x2,u32,s32}.f16x2: one 16-bit result per half.
+				if( type != PTXOperand::f16x2 && type != PTXOperand::u32 && type != PTXOperand::s32 )
+					return "set with .f16x2 source requires .f16x2, .u32 or .s32 destination";
+				if( !halfComparison( comparisonOperator ) )
+					return "invalid comparison " + toString( comparisonOperator ) + " for set.f16x2";
+				if( d.bytes() != 4 || b.bytes() != 4 ) return "set.f16x2 operands must be 32-bit";
+				break;
+			}
 			if( type != PTXOperand::s16 && type != PTXOperand::s32 
 				&& type != PTXOperand::s64 && type != PTXOperand::u16 
 				&& type != PTXOperand::u32 && type != PTXOperand::u64
@@ -2598,9 +2618,19 @@ std::string ir::PTXInstruction::valid() const {
 				&& type != PTXOperand::u32 && type != PTXOperand::u64
 				&& type != PTXOperand::b16 && type != PTXOperand::b32 
 				&& type != PTXOperand::b64 && type != PTXOperand::f32
-				&& type != PTXOperand::f64 && type != PTXOperand::f16 ) {
+				&& type != PTXOperand::f64 && type != PTXOperand::f16
+				&& type != PTXOperand::f16x2 ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
+			}
+			if( type == PTXOperand::f16x2 ) {
+				// PTX 8.0: setp.CmpOp{.BoolOp}{.ftz}.f16x2 p|q, a, b; p gets the low half,
+				// q the high half. Either destination may be a sink, but q must be present.
+				if( pq.addressMode == PTXOperand::Invalid ) return "setp.f16x2 requires two destinations p|q";
+				if( !halfComparison( comparisonOperator ) )
+					return "invalid comparison " + toString( comparisonOperator ) + " for setp.f16x2";
+				if( a.bytes() != 4 || b.bytes() != 4 ) return "setp.f16x2 operands must be 32-bit";
+				break;
 			}
 			if( !PTXOperand::valid( type, a.type )  ) {
 				return "operand A type " + PTXOperand::toString( a.type ) 
@@ -2622,7 +2652,8 @@ std::string ir::PTXInstruction::valid() const {
 			if (type != PTXOperand::b32 || modifier || vec != PTXOperand::v1 || shuffleMode < Up || shuffleMode > Idx) return "invalid shfl.sync mode/type/modifier";
 			for (const auto* operand : {&d, &a, &b, &c, &q, &pq})
 				if (operand->vec != PTXOperand::v1 || !operand->array.empty()) return "shfl.sync requires scalar operands";
-			if (!(d.addressMode == PTXOperand::BitBucket || (d.addressMode == PTXOperand::Register && d.bytes() == 4)) ||
+			// PTX 8.0 syntax is d[|p]: only the predicate destination may be a sink.
+			if (!(d.addressMode == PTXOperand::Register && d.bytes() == 4) ||
 				(a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Immediate &&
 				!(a.addressMode == PTXOperand::Special && a.special == PTXOperand::warpSize)) || a.bytes() != 4) return "shfl.sync requires 32-bit data operands";
 			for (const auto* control : {&b, &c, &q})
@@ -3686,6 +3717,7 @@ std::string ir::PTXInstruction::toString() const {
 			if( c.addressMode != PTXOperand::Invalid ) {
 				result += toString( booleanOperator ) + ".";
 			}
+			if( ftz & modifier ) result += "ftz.";
 			result += PTXOperand::toString( type ) + " " + d.toString();
 			if( pq.addressMode != PTXOperand::Invalid && !isPt( pq ) ) {
 				result += "|" + pq.toString();

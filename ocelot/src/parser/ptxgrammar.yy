@@ -1499,12 +1499,19 @@ mulModifier : optionalFtz optionalSaturate
 	state.carry( false );
 };
 
-madOpcode : OPCODE_MAD | OPCODE_FMA;
-
-mad : madOpcode mulModifier dataType operand ',' operand 
+mad : OPCODE_MAD mulModifier dataType operand ',' operand
 	',' operand ',' operand ';'
 {
 	state.instruction( $<text>1, $<value>3 );
+};
+
+/* fma also takes .relu (f16/f16x2/bf16/bf16x2) and the .bf16x2 type (PTX 7.0, sm_80). */
+fmaDataTypeId : dataTypeId | TOKEN_BF16X2;
+
+mad : OPCODE_FMA mulModifier optionalRelu fmaDataTypeId operand ',' operand
+	',' operand ',' operand ';'
+{
+	state.instruction( $<text>1, $<value>4 );
 };
 
 mad24Modifier : optionalSaturate;

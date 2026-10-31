@@ -329,6 +329,21 @@ public:
 			}
 		}
 
+		// Signed zero: abs(-0) is +0 for f32, f32.ftz and f64 (A100/H100 verified).
+		if (result) {
+			for (int f64 = 0; f64 < 2 && result; ++f64) for (int ftz = 0; ftz < 2 - f64 && result; ++ftz) {
+				ins.type = f64 ? PTXOperand::f64 : PTXOperand::f32;
+				ins.modifier = ftz ? PTXInstruction::ftz : 0;
+				ins.d = reg("r2", ins.type, 0);
+				ins.a = reg("r1", ins.type, 1);
+				if (f64) cta->setRegAsF64(0, 1, -0.0); else cta->setRegAsF32(0, 1, -0.0f);
+				cta->eval_Abs(cta->getActiveContext(), ins);
+				const bool negative = f64 ? std::signbit(cta->getRegAsF64(0, 0)) : std::signbit(cta->getRegAsF32(0, 0));
+				if (negative) { result = false; status << "abs of -0 kept the sign bit\n"; }
+			}
+			ins.modifier = 0;
+		}
+
 		std::stringstream ptx;
 		ptx << ".version 8.0\n.target sm_86\n.address_size 64\n"
 			<< ".visible .entry test_abs() { .reg .b16 d16, a16; "
@@ -5689,6 +5704,23 @@ public:
 		cta->eval_Ex2(cta->getActiveContext(), ins);
 		if (hydrazine::bit_cast<PTXU32>(cta->getRegAsF32(0, 2)) != 0) return false;
 
+		// ex2.approx.f16x2 (sm_75; A100/H100 verified): parses and computes each half.
+		{
+			std::stringstream source(".version 8.0\n.target sm_86\n.entry e() { .reg .b32 r; ex2.approx.f16x2 r, r; ret; }"), printed;
+			try { Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed); }
+			catch (const std::exception& error) { status << "ex2.approx.f16x2 rejected: " << error.what() << "\n"; return false; }
+			ins.type = PTXOperand::f16x2;
+			ins.modifier = PTXInstruction::approx;
+			ins.a = reg("a", PTXOperand::b32, 0);
+			ins.d = reg("d", PTXOperand::b32, 2);
+			cta->setRegAsU32(0, 0, 0x4000bc00);  // high = 2.0, low = -1.0
+			cta->eval_Ex2(cta->getActiveContext(), ins);
+			if (cta->getRegAsU32(0, 2) != 0x44003800) {  // high = 4.0, low = 0.5
+				status << "ex2.approx.f16x2 incorrect\n";
+				return false;
+			}
+		}
+
 		return result;
 	}
 
@@ -6051,6 +6083,20 @@ public:
 			status << "fma.rn.ftz.relu.f16 rejected\n";
 			return false;
 		}
+		// Parser: .relu and .bf16x2 forms (sm_80, A100/H100 verified) parse, print and reparse.
+		for (const char* form : {"fma.rn.relu.f16 h,h,h,h", "fma.rn.ftz.relu.f16 h,h,h,h", "fma.rn.relu.f16x2 r,r,r,r",
+			"fma.rn.relu.bf16 h,h,h,h", "fma.rn.bf16x2 r,r,r,r", "fma.rn.relu.bf16x2 r,r,r,r"}) {
+			std::stringstream source(std::string(".version 8.0\n.target sm_86\n.entry f() { .reg .b16 h; .reg .b32 r; ") + form + "; ret; }"), printed;
+			try { Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed); }
+			catch (const std::exception& error) { status << form << " rejected: " << error.what() << "\n"; return false; }
+			if (printed.str().find(std::string(form).substr(0, std::string(form).find(' '))) == std::string::npos) { status << form << " printed incorrectly\n"; return false; }
+		}
+		for (const char* form : {"fma.rn.relu.f32 f,f,f,f", "fma.rn.relu.f64 g,g,g,g", "fma.rz.relu.f16 h,h,h,h", "mad.rn.relu.f32 f,f,f,f"}) {
+			std::stringstream source(std::string(".version 8.0\n.target sm_86\n.entry f() { .reg .b16 h; .reg .f32 f; .reg .f64 g; ") + form + "; ret; }");
+			bool rejected = false;
+			try { Module bad; bad.load(source); } catch (const std::exception&) { rejected = true; }
+			if (!rejected) { status << form << " accepted\n"; return false; }
+		}
 		ins.modifier = PTXInstruction::rn;
 
 		ins.type = PTXOperand::f16x2;
@@ -6346,9 +6392,9 @@ public:
 
 	bool test_ShflSyncSynchronization() {
 		for (const char* mode : {"up", "down", "bfly", "idx"}) for (int size : {1, 31, 32})
-		for (const char* destination : {"result", "a", "b", "c", "m", "_", "sinkp", "nonep"}) {
+		for (const char* destination : {"result", "a", "b", "c", "m", "sinkp", "nonep"}) {
 			const std::string name = mode, dest = destination;
-			const std::string data = dest == "_" || dest == "sinkp" || dest == "nonep" ? "result" : dest;
+			const std::string data = dest == "sinkp" || dest == "nonep" ? "result" : dest;
 			const std::string operands = dest == "sinkp" ? "result|_" : dest == "nonep" ? "result" : dest + "|q";
 			const int offset = size == 1 ? 0 : 16, clamp = size == 1 || name == "up" ? 0 : 30;
 			std::stringstream source;
@@ -6376,7 +6422,7 @@ public:
 						if (name == "bfly") { valid = lane != 15; if (valid) from = lane ^ 16; }
 						if (name == "idx") from = 16;
 					}
-					const PTXU32 expected = lane == 31 || dest == "_" ? 0xdeadbeef : (2 - round) * 100 + from;
+					const PTXU32 expected = lane == 31 ? 0xdeadbeef : (2 - round) * 100 + from;
 					const PTXU32 predicate = lane == 31 || dest == "sinkp" || dest == "nonep" ? 0xdeadbeef : valid;
 					if (output[lane][round * 2] != expected || output[lane][round * 2 + 1] != predicate) { status << "shfl.sync waiting mismatch " << name << " " << dest << " CTA " << size << " lane " << lane << " round " << round << "\n"; return false; }
 				}
@@ -6436,7 +6482,7 @@ public:
 	bool test_ShflSyncParser() {
 		const std::string prefix = ".version 8.0\n.target sm_86\n.entry shuffle() { .reg .b32 d,a,b,c,m; .reg .b64 w; .reg .f16x2 h; .reg .pred p; .reg .v2 .b32 v; mov.b32 m,0xffffffff; ";
 		for (const char* mode : {"up", "down", "bfly", "idx"}) for (const char* guard : {"", "@!p "})
-		for (const char* dest : {"d", "d|p", "d|_", "_|p"}) for (const char* inputs : {"a,b,c,m", "h,1,31,0xffffffff", "v.x,33,0x1807,-1", "7,WARP_SZ,31,WARP_SZ", "WARP_SZ,b,c,m"}) {
+		for (const char* dest : {"d", "d|p", "d|_"}) for (const char* inputs : {"a,b,c,m", "h,1,31,0xffffffff", "v.x,33,0x1807,-1", "7,WARP_SZ,31,WARP_SZ", "WARP_SZ,b,c,m"}) {
 			const std::string operation = "shfl.sync." + std::string(mode) + ".b32 ";
 			std::stringstream source(prefix + guard + operation + dest + "," + inputs + "; ret; }"), printed;
 			Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed);
@@ -6450,7 +6496,7 @@ public:
 			}
 			if (found != 1) return false;
 		}
-		for (const char* operands : {"w,a,b,c,m", "d,w,b,c,m", "d,a,w,c,m", "d,a,b,w,m", "d,a,b,c,w", "d,a,b,c,0f3f800000", "d,a,0f3f800000,c,m", "d,a,b,0f3f800000,m", "d|!p,a,b,c,m", "d|w,a,b,c,m", "d,v,b,c,m"}) {
+		for (const char* operands : {"w,a,b,c,m", "d,w,b,c,m", "d,a,w,c,m", "d,a,b,w,m", "d,a,b,c,w", "d,a,b,c,0f3f800000", "d,a,0f3f800000,c,m", "d,a,b,0f3f800000,m", "d|!p,a,b,c,m", "d|w,a,b,c,m", "d,v,b,c,m", "_|p,a,b,c,m", "_,a,b,c,m"}) {
 			std::stringstream source(prefix + "shfl.sync.idx.b32 " + operands + "; ret; }"); bool rejected = false;
 			try { Module bad; bad.load(source); } catch (const std::exception&) { rejected = true; }
 			if (!rejected) { status << "accepted malformed shfl.sync\n"; return false; }
@@ -11183,6 +11229,32 @@ public:
 			}
 		}
 
+		// NaN to integer, HARDWARE-OBSERVED (A100/H100), not PTX 8.0 text (which says 0):
+		// 0 unless the source is f64 or the destination is 64-bit, else 1 << (width - 1).
+		if (result) {
+			const struct { PTXOperand::DataType dst, src; PTXU64 expected; } nanCases[] = {
+				{PTXOperand::s32, PTXOperand::f32, 0}, {PTXOperand::u16, PTXOperand::f32, 0},
+				{PTXOperand::s64, PTXOperand::f32, 1ull << 63}, {PTXOperand::u64, PTXOperand::f32, 1ull << 63},
+				{PTXOperand::s32, PTXOperand::f64, 0x80000000ull}, {PTXOperand::u32, PTXOperand::f64, 0x80000000ull},
+				{PTXOperand::u16, PTXOperand::f64, 0x8000ull}, {PTXOperand::s64, PTXOperand::f64, 1ull << 63}};
+			for (const auto& c : nanCases) {
+				ins.type = c.dst;
+				ins.modifier = PTXInstruction::rzi;
+				ins.d = reg("d", c.dst, 0);
+				ins.a = reg("a", c.src, 1);
+				if (c.src == PTXOperand::f64) cta->setRegAsF64(0, 1, std::numeric_limits<PTXF64>::quiet_NaN());
+				else cta->setRegAsF32(0, 1, std::numeric_limits<PTXF32>::quiet_NaN());
+				cta->setRegAsU64(0, 0, 0x1234);
+				cta->eval_Cvt(cta->getActiveContext(), ins);
+				const PTXU64 bits = PTXOperand::bytes(c.dst) == 8 ? cta->getRegAsU64(0, 0)
+					: cta->getRegAsU64(0, 0) & ((1ull << (PTXOperand::bytes(c.dst) * 8)) - 1);
+				if (bits != c.expected) {
+					status << "cvt NaN to " << PTXOperand::toString(c.dst) << " from " << PTXOperand::toString(c.src) << " failed\n";
+					result = false;
+				}
+			}
+		}
+
 		if (result) {
 			ins.type = PTXOperand::f32;
 			ins.modifier = PTXInstruction::rn;
@@ -11565,6 +11637,56 @@ public:
 		}
 
 		return result;
+	}
+
+	// setp/set on .f16x2 (PTX 8.0 half-precision comparisons; A100/H100 verified).
+	// Expected values follow the PTX pseudocode: p = BoolOp(t[low], c), q = BoolOp(t[high], c).
+	// Halves are {high, low}: x = {1.0, NaN}, y = {2.0, 1.0}; s = {1.0, +min subnormal},
+	// n = {2.0, -min subnormal}, e = {1.0, -min subnormal}. c is true.
+	bool test_SetF16x2() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.entry h() { .reg .b32 x, y, s, n, e, d, t; .reg .pred p, q, c;"
+			" mov.b32 x, 0x3c007e00; mov.b32 y, 0x40003c00; mov.b32 s, 0x3c000001; mov.b32 n, 0x40008001;"
+			" mov.b32 e, 0x3c008001; setp.eq.u32 c, 0, 0; ";
+		const std::string pq = " selp.u32 d, 1, 0, p; selp.u32 t, 2, 0, q; or.b32 d, d, t;";
+		const struct { std::string code; PTXU32 expected; } cases[] = {
+			{"setp.lt.f16x2 p|q, x, y;" + pq, 2},             // low has NaN: ordered false
+			{"setp.ltu.f16x2 p|q, x, y;" + pq, 3},            // unordered true with NaN
+			{"setp.lt.and.f16x2 p|q, x, y, !c;" + pq, 0},     // inverted c = false
+			{"setp.lt.or.f16x2 p|q, x, y, c;" + pq, 3},
+			{"setp.lt.xor.f16x2 p|q, x, y, !c;" + pq, 2},
+			{"setp.ltu.xor.f16x2 p|q, x, y, c;" + pq, 0},
+			{"setp.gt.f16x2 p|q, s, n;" + pq, 1},             // +sub > -sub without .ftz
+			{"setp.gt.ftz.f16x2 p|q, s, n;" + pq, 0},         // both flush to zero
+			{"setp.eq.ftz.f16x2 p|q, s, e;" + pq, 3},         // +0 == -0 after flush
+			{"mov.b32 d, 0; setp.lt.f16x2 p|_, x, y; selp.u32 d, 1, 0, p; or.b32 d, d, d;", 0},
+			{"set.lt.f16x2.f16x2 d, x, y;", 0x3c000000},
+			{"set.ltu.u32.f16x2 d, x, y;", 0xffffffff},
+			{"set.lt.and.u32.f16x2 d, x, y, !c;", 0},
+			{"set.lt.xor.s32.f16x2 d, x, y, !c;", 0xffff0000},
+			{"set.gt.ftz.u32.f16x2 d, s, n;", 0},
+			{"set.gt.u32.f16x2 d, s, n;", 0x0000ffff}};
+		for (const auto& c : cases) {
+			std::stringstream source(prefix + c.code + " ret; }"), printed;
+			try {
+				Module parsed; parsed.load(source); parsed.write(printed);
+				Module again; again.load(printed);
+				EmulatedKernel kernel(again.getKernel("h"), nullptr); kernel.setKernelShape(1, 1, 1);
+				CooperativeThreadArray local(&kernel, Dim3(), false); local.execute();
+				PTXU32 output = 0xdeadbeef;  // d is written last by or.b32 / set
+				for (const auto& ins : kernel.instructions)
+					if (ins.opcode == PTXInstruction::Or || ins.opcode == PTXInstruction::Set) output = local.getRegAsU32(0, ins.d.reg);
+				if (output != c.expected) { status << c.code << " gave " << std::hex << output << std::dec << "\n"; return false; }
+			} catch (const std::exception& error) { status << c.code << " rejected: " << error.what() << "\n"; return false; }
+		}
+		// Invalid forms: q is required, and lo/ls/hi/hs are not floating-point comparisons.
+		for (const char* code : {"setp.lt.f16x2 p, x, y;", "setp.lo.f16x2 p|q, x, y;", "setp.hs.f16x2 p|q, x, y;",
+			"set.lo.u32.f16x2 d, x, y;", "set.hi.f16x2.f16x2 d, x, y;", "setp.lt.f16x2 _|_, x, y;"}) {
+			std::stringstream source(prefix + code + " ret; }");
+			bool rejected = false;
+			try { Module bad; bad.load(source); } catch (const std::exception&) { rejected = true; }
+			if (!rejected) { status << code << " accepted\n"; return false; }
+		}
+		return true;
 	}
 
 	bool test_SetP() {
@@ -12068,24 +12190,50 @@ public:
 				cta->setRegAsF32(1, 1, -0.0f);
 				cta->setRegAsF32(2, 1, std::numeric_limits<PTXF32>::denorm_min());
 				cta->setRegAsF32(3, 1, 1.0f);
+				cta->setRegAsF32(4, 1, std::numeric_limits<PTXF32>::infinity());
+				cta->setRegAsF32(5, 1, std::numeric_limits<PTXF32>::quiet_NaN());
+				cta->setRegAsF32(6, 1, -std::numeric_limits<PTXF32>::denorm_min());
 			} else {
 				cta->setRegAsF64(0, 1, 0.0);
 				cta->setRegAsF64(1, 1, -0.0);
 				cta->setRegAsF64(2, 1, std::numeric_limits<PTXF64>::denorm_min());
 				cta->setRegAsF64(3, 1, 1.0);
+				cta->setRegAsF64(4, 1, std::numeric_limits<PTXF64>::infinity());
+				cta->setRegAsF64(5, 1, std::numeric_limits<PTXF64>::quiet_NaN());
+				cta->setRegAsF64(6, 1, -std::numeric_limits<PTXF64>::denorm_min());
 			}
 			for (int mode = 0; mode < 2; ++mode) {
 				const bool normal = mode == 0;
 				ins.floatingPointMode = normal
 					? PTXInstruction::Normal : PTXInstruction::SubNormal;
 				cta->eval_TestP(cta->getActiveContext(), ins);
-				if (cta->getRegAsPredicate(0, 0)
-					|| cta->getRegAsPredicate(1, 0)
+				// PTX explicitly classifies both signed zeros as normal, not subnormal.
+				if (cta->getRegAsPredicate(0, 0) != normal
+					|| cta->getRegAsPredicate(1, 0) != normal
 					|| cta->getRegAsPredicate(2, 0) != !normal
-					|| cta->getRegAsPredicate(3, 0) != normal) {
+					|| cta->getRegAsPredicate(3, 0) != normal
+					|| cta->getRegAsPredicate(4, 0)
+					|| cta->getRegAsPredicate(5, 0)
+					|| cta->getRegAsPredicate(6, 0) != !normal) {
 					status << "testp normal/subnormal classification failed\n";
 					return false;
 				}
+			}
+		}
+		// f64 values outside the f32 range must keep their f64 class (A100/H100 verified).
+		ins.type = PTXOperand::f64;
+		ins.a = reg("a", PTXOperand::f64, 1);
+		const PTXF64 values[] = {std::numeric_limits<PTXF64>::max(), -std::numeric_limits<PTXF64>::max(),
+			std::numeric_limits<PTXF64>::min(), -std::numeric_limits<PTXF64>::min(), 1e-310};
+		const bool finite[] = {true, true, true, true, true}, normal[] = {true, true, true, true, false};
+		for (int lane = 0; lane < 5; ++lane) cta->setRegAsF64(lane, 1, values[lane]);
+		for (auto mode : {PTXInstruction::Finite, PTXInstruction::Infinite, PTXInstruction::Normal, PTXInstruction::SubNormal}) {
+			ins.floatingPointMode = mode;
+			cta->eval_TestP(cta->getActiveContext(), ins);
+			for (int lane = 0; lane < 5; ++lane) {
+				const bool expected = mode == PTXInstruction::Finite ? finite[lane] : mode == PTXInstruction::Infinite ? !finite[lane]
+					: mode == PTXInstruction::Normal ? normal[lane] : !normal[lane];
+				if (cta->getRegAsPredicate(lane, 0) != expected) { status << "testp f64 classification failed for lane " << lane << "\n"; return false; }
 			}
 		}
 		return true;
@@ -12639,6 +12787,7 @@ public:
 			// predicate and comparison operators
 			result = (result && test_Set());
 			result = (result && test_SetP());
+			result = (result && test_SetF16x2());
 			result = (result && test_SelP());
 			result = (result && test_SlCt());
 			if (prolix && result) {

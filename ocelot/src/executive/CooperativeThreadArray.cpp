@@ -129,11 +129,11 @@ static T CTARemainder(T a, T b) {
 	return a % b;
 }
 
+// hydrazine's classifiers take float only; std::fpclassify keeps f64 exact.
 template<typename T>
 bool issubnormal_(T r0)
 {
-	return !hydrazine::isnormal(r0) && !hydrazine::isnan(r0)
-		&& !hydrazine::isinf(r0) && r0 != (T)0;
+	return std::fpclassify(r0) == FP_SUBNORMAL;
 }
 
 static int setRoundingMode(int modifier)
@@ -1955,7 +1955,7 @@ void executive::CooperativeThreadArray::eval_Abs(CTAContext &context,
 
 			if (!context.predicated(threadID, instr)) continue;
 			ir::PTXF32 d, a = operandAsF32(threadID, instr.a);
-			d = ftz(instr.modifier, CTAAbs(a));
+			d = ftz(instr.modifier, std::fabs(a));  // abs(-0) is +0
 			setRegAsF32(threadID, instr.d.reg, d);
 		}
 	}
@@ -1963,7 +1963,8 @@ void executive::CooperativeThreadArray::eval_Abs(CTAContext &context,
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
 			ir::PTXF64 d, a = operandAsF64(threadID, instr.a);
-			d = CTAAbs(a);
+			// abs(-0) is +0; PTX passes f64 NaN inputs through unchanged.
+			d = std::isnan(a) ? a : std::fabs(a);
 			setRegAsF64(threadID, instr.d.reg, d);
 		}
 	}
@@ -3555,7 +3556,12 @@ static Float roundToInt(Float a, int modifier, executive::CTAContext &,
 
 template< typename Destination, typename Float >
 static Destination cvtFloatToInteger(Float value, int modifier) {
-	if (value != value) return 0;
+	// Match PTX 9.3: NaN converts to 0, except f64 sources or
+	// 64-bit destinations produce the destination's high bit. PTX 8.0 says 0.
+	if (value != value) {
+		if (sizeof(Float) < 8 && sizeof(Destination) < 8) return 0;
+		return static_cast<Destination>(1ull << (sizeof(Destination) * CHAR_BIT - 1));
+	}
 	const Float rounded = roundToInt(value, modifier);
 	const int bits = sizeof(Destination) * CHAR_BIT;
 	const int magnitudeBits = std::numeric_limits<Destination>::is_signed
@@ -4949,6 +4955,16 @@ void executive::CooperativeThreadArray::eval_Ex2(CTAContext &context,
 				operandAsU16(threadID, instr.a)));
 			setRegAsB16(threadID, instr.d.reg,
 				toF16(hydrazine::exp2f(a), instr.modifier));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f16x2) {
+		// Each half is computed independently, like ex2.approx.f16.
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			const ir::PTXU32 a = operandAsU32(threadID, instr.a);
+			const ir::PTXU16 low = toF16(hydrazine::exp2f(f16ToF32(a & 0xffff)), instr.modifier);
+			const ir::PTXU16 high = toF16(hydrazine::exp2f(f16ToF32(a >> 16)), instr.modifier);
+			setRegAsU32(threadID, instr.d.reg, low | (static_cast<ir::PTXU32>(high) << 16));
 		}
 	}
 	else {
@@ -8781,9 +8797,64 @@ setp.CmpOp.BoolOp.type p[|q], a, b, [!]c;
 	.f32, .f64 };
 
 */
+// PTX floating-point CmpOp: ordered comparisons are false with a NaN operand,
+// unordered (equ..geu) are true, num/nan test for NaN.
+static bool floatCompare(ir::PTXInstruction::CmpOp op, ir::PTXF32 a, ir::PTXF32 b) {
+	const bool nan = std::isnan(a) || std::isnan(b);
+	switch (op) {
+		case ir::PTXInstruction::Eq:  return !nan && a == b;
+		case ir::PTXInstruction::Ne:  return !nan && a != b;
+		case ir::PTXInstruction::Lt:  return !nan && a < b;
+		case ir::PTXInstruction::Le:  return !nan && a <= b;
+		case ir::PTXInstruction::Gt:  return !nan && a > b;
+		case ir::PTXInstruction::Ge:  return !nan && a >= b;
+		case ir::PTXInstruction::Equ: return nan || a == b;
+		case ir::PTXInstruction::Neu: return nan || a != b;
+		case ir::PTXInstruction::Ltu: return nan || a < b;
+		case ir::PTXInstruction::Leu: return nan || a <= b;
+		case ir::PTXInstruction::Gtu: return nan || a > b;
+		case ir::PTXInstruction::Geu: return nan || a >= b;
+		case ir::PTXInstruction::Num: return !nan;
+		case ir::PTXInstruction::Nan: return nan;
+		default: throw std::runtime_error("invalid floating-point comparison");
+	}
+}
+
+static bool applyBoolOp(ir::PTXInstruction::BoolOp op, bool t, bool c) {
+	switch (op) {
+		case ir::PTXInstruction::BoolAnd: return t && c;
+		case ir::PTXInstruction::BoolOr:  return t || c;
+		case ir::PTXInstruction::BoolXor: return t != c;
+		default: return t;
+	}
+}
+
 void executive::CooperativeThreadArray::eval_SetP(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
+
+	if (instr.type == ir::PTXOperand::f16x2) {
+		// PTX: p = BoolOp(low-half compare, c), q = BoolOp(high-half compare, c).
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			const ir::PTXU32 a = operandAsU32(threadID, instr.a);
+			const ir::PTXU32 b = operandAsU32(threadID, instr.b);
+			const bool c = instr.c.addressMode != ir::PTXOperand::Register
+				|| operandAsPredicate(threadID, instr.c);
+			bool half[2];
+			for (int i = 0; i < 2; ++i) {
+				const ir::PTXU16 ha = ftzF16(instr.modifier, a >> (16 * i));
+				const ir::PTXU16 hb = ftzF16(instr.modifier, b >> (16 * i));
+				half[i] = applyBoolOp(instr.booleanOperator,
+					floatCompare(instr.comparisonOperator, f16ToF32(ha), f16ToF32(hb)), c);
+			}
+			if (instr.d.addressMode != ir::PTXOperand::BitBucket)
+				setRegAsPredicate(threadID, instr.d.reg, half[0]);
+			if (instr.pq.addressMode == ir::PTXOperand::Register)
+				setRegAsPredicate(threadID, instr.pq.reg, half[1]);
+		}
+		return;
+	}
 
 	switch (instr.type) {
 
@@ -9151,6 +9222,28 @@ void executive::CooperativeThreadArray::eval_SetP(CTAContext &context,
 void executive::CooperativeThreadArray::eval_Set(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
+
+	if (instr.a.type == ir::PTXOperand::f16x2) {
+		// Each half: true -> 1.0 (f16x2 dtype) or 0xffff (u32/s32 dtype), false -> 0.
+		const ir::PTXU32 trueHalf = instr.type == ir::PTXOperand::f16x2 ? 0x3c00 : 0xffff;
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			const ir::PTXU32 a = operandAsU32(threadID, instr.a);
+			const ir::PTXU32 b = operandAsU32(threadID, instr.b);
+			const bool c = instr.c.addressMode != ir::PTXOperand::Register
+				|| operandAsPredicate(threadID, instr.c);
+			ir::PTXU32 d = 0;
+			for (int i = 0; i < 2; ++i) {
+				const ir::PTXU16 ha = ftzF16(instr.modifier, a >> (16 * i));
+				const ir::PTXU16 hb = ftzF16(instr.modifier, b >> (16 * i));
+				if (applyBoolOp(instr.booleanOperator,
+					floatCompare(instr.comparisonOperator, f16ToF32(ha), f16ToF32(hb)), c))
+					d |= trueHalf << (16 * i);
+			}
+			setRegAsU32(threadID, instr.d.reg, d);
+		}
+		return;
+	}
 
 	switch (instr.a.type) {
 
@@ -10828,7 +10921,7 @@ void executive::CooperativeThreadArray::eval_TestP(CTAContext &context,
 			break;
 			case ir::PTXInstruction::Normal:
 			{
-				d = hydrazine::isnormal(a);
+				d = a == 0 || hydrazine::isnormal(a);
 			}
 			break;
 			case ir::PTXInstruction::SubNormal:
@@ -10854,27 +10947,27 @@ void executive::CooperativeThreadArray::eval_TestP(CTAContext &context,
 			{
 			case ir::PTXInstruction::Finite:
 			{
-				d = !hydrazine::isinf(a) && !hydrazine::isnan(a);
+				d = std::isfinite(a);
 			}
 			break;
 			case ir::PTXInstruction::Infinite:
 			{
-				d = hydrazine::isinf(a);
+				d = std::isinf(a);
 			}
 			break;
 			case ir::PTXInstruction::Number:
 			{
-				d = !hydrazine::isnan(a);
+				d = !std::isnan(a);
 			}
 			break;
 			case ir::PTXInstruction::NotANumber:
 			{
-				d = hydrazine::isnan(a);
+				d = std::isnan(a);
 			}
 			break;
 			case ir::PTXInstruction::Normal:
 			{
-				d = hydrazine::isnormal(a);
+				d = a == 0 || std::isnormal(a);
 			}
 			break;
 			case ir::PTXInstruction::SubNormal:
