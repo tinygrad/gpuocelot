@@ -1570,6 +1570,38 @@ public:
 		return true;
 	}
 
+	// PTX 8.0 ld/st/prefetch cache hints (A100/H100 verified): .L1::eviction_priority,
+	// ld .L2::{64,128,256}B and prefetch.global.L2::{evict_last,evict_normal}.
+	// Forms must print in PTX order and reparse to the same text.
+	bool test_CacheHints() {
+		const std::string prefix = ".version 8.0\n.target sm_86\n.address_size 64\n.entry h() { .reg .u64 p; .reg .b32 r; ";
+		for (const char* form : {"ld.global.L1::evict_last.b32 r, [p];", "ld.global.L2::256B.b32 r, [p];",
+			"ld.global.L1::evict_first.L2::128B.b32 r, [p];", "ld.global.nc.L2::64B.b32 r, [p];",
+			"ld.global.cg.b32 r, [p];", "ld.relaxed.gpu.global.L1::evict_unchanged.b32 r, [p];",
+			"st.global.L1::no_allocate.b32 [p], r;", "st.global.cs.b32 [p], r;",
+			"prefetch.global.L2::evict_last [p];", "prefetch.global.L2::evict_normal [p];"}) {
+			std::stringstream source(prefix + form + " ret; }"), printed, reprinted;
+			try {
+				Module parsed; parsed.load(source); parsed.write(printed);
+				std::stringstream copy(printed.str()); Module again; again.load(copy); again.write(reprinted);
+			} catch (const std::exception& error) { status << form << " rejected: " << error.what() << "\n"; return false; }
+			const std::string text = std::string(form).substr(0, std::string(form).find(' '));
+			if (printed.str().find(text) == std::string::npos || reprinted.str().find(text) == std::string::npos) {
+				status << form << " did not round-trip\n"; return false;
+			}
+		}
+		for (const char* form : {"ld.global.cg.L1::evict_last.b32 r, [p];", "ld.volatile.global.L1::evict_last.b32 r, [p];",
+			"ld.global.L1::evict_last.L2::evict_first.b32 r, [p];", "st.global.wt.L1::no_allocate.b32 [p], r;",
+			"st.global.L2::64B.b32 [p], r;", "prefetch.local.L2::evict_last [p];", "prefetch.global.L2::evict_first [p];",
+			"ld.global.L2::32B.b32 r, [p];"}) {
+			std::stringstream source(prefix + form + " ret; }");
+			bool rejected = false;
+			try { Module bad; bad.load(source); } catch (const std::exception&) { rejected = true; }
+			if (!rejected) { status << form << " accepted\n"; return false; }
+		}
+		return true;
+	}
+
 	// Bison only attaches a rule's trailing { action } to its LAST
 	// alternative, not all of them (rule : A | B | C { action } only runs
 	// action for C). Several grammar productions shared one action across
@@ -12631,6 +12663,7 @@ public:
 			result = (result && test_LdLu());
 			result = (result && test_SuldSustCacheOperator());
 			result = (result && test_StCacheOperator());
+			result = (result && test_CacheHints());
 			result = (result && test_GrammarSharedActionFix());
 			result = (result && test_PrefetchOpcode());
 			result = (result && test_RedGenericParser());

@@ -138,6 +138,7 @@
 %token<value> TOKEN_L1 TOKEN_L2 TOKEN_L2_CACHE_HINT TOKEN_L2_PREFETCH
 %token<text> OPCODE_CREATEPOLICY
 %token TOKEN_FRACTIONAL TOKEN_EVICT_NORMAL TOKEN_EVICT_LAST TOKEN_EVICT_FIRST TOKEN_EVICT_UNCHANGED
+%token<value> TOKEN_L1_EVICT
 %token TOKEN_POLICY_RANGE TOKEN_POLICY_CVT
 %type<value> policyPriority
 
@@ -1429,10 +1430,19 @@ stOrdering : volatileModifier { state.semantics( TOKEN_WEAK ); }
 	| /* empty */ { state.semantics( TOKEN_WEAK ); state.volatileFlag( false ); }
 	;
 
-ldModifier : ldOrdering optionalAddressSpace optionalCacheOperation
+/* PTX 8.0 ld/st: {.cop} or {.L1::eviction_priority}, then ld's {.L2::{64,128,256}B}.
+   Cache hints only affect performance; the emulator records them for printing. */
+l1Evict : TOKEN_L1_EVICT { state.statement.instruction.l1Evict = $1; };
+ldPrefetchSize : /* empty */ | TOKEN_L2_PREFETCH { state.statement.instruction.prefetchSize = $1; };
+
+ldModifier : ldOrdering optionalAddressSpace optionalCacheOperation ldPrefetchSize
+	optionalInstructionVectorType { state.finalizeMmioAddressSpace(); }
+	| ldOrdering optionalAddressSpace l1Evict ldPrefetchSize
 	optionalInstructionVectorType { state.finalizeMmioAddressSpace(); };
 
 stModifier : stOrdering optionalAddressSpace optionalStoreCacheOperation
+	optionalInstructionVectorType { state.finalizeMmioAddressSpace(); }
+	| stOrdering optionalAddressSpace l1Evict
 	optionalInstructionVectorType { state.finalizeMmioAddressSpace(); };
 
 ld : OPCODE_LD ldModifier dataType arrayOperand ',' '[' memoryOperand ']' ';'
@@ -1780,6 +1790,16 @@ prefetch : OPCODE_PREFETCH addressSpace cacheLevel '[' memoryOperand ']' ';'
 {
 	state.instruction( $<text>1 );
 };
+
+/* prefetch.global.L2::{evict_last,evict_normal} [a] (PTX 7.4, sm_80). */
+prefetch : OPCODE_PREFETCH addressSpace prefetchEvict '[' memoryOperand ']' ';'
+{
+	state.instruction( $<text>1 );
+	state.statement.instruction.cacheLevel = ir::PTXInstruction::L2;
+};
+
+prefetchEvict : TOKEN_EVICT_NORMAL { state.statement.instruction.l2Evict = 0; }
+	| TOKEN_EVICT_LAST { state.statement.instruction.l2Evict = 1; };
 
 prefetchu : OPCODE_PREFETCHU cacheLevel '[' memoryOperand ']' ';'
 {

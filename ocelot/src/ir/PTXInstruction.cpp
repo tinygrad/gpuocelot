@@ -557,6 +557,8 @@ ir::PTXInstruction::PTXInstruction( Opcode op, const PTXOperand& _d,
 	mmio = false;
 	cacheHint = false;
 	prefetchSize = 0;
+	l1Evict = -1;
+	l2Evict = -1;
 	mbarrierNoComplete = false;
 	policyMode = PolicyFractional;
 	primaryPriority = EvictNormal;
@@ -604,6 +606,12 @@ unsigned int ir::PTXInstruction::wmmaFragmentRegisters(char matrix, PTXOperand::
 	if (k == 4) return element == PTXOperand::f64 ? (accumulator ? 2 : 1) : 0;
 	if (accumulator) return element == PTXOperand::s32 ? 2 : 0;
 	return k == 32 ? (element == PTXOperand::s4 || element == PTXOperand::u4 ? 1 : 0) : (element == PTXOperand::b1 ? 1 : 0);
+}
+
+static std::string l1EvictString( int priority ) {
+	static const char* names[] = {"L1::evict_normal", "L1::evict_unchanged",
+		"L1::evict_first", "L1::evict_last", "L1::no_allocate"};
+	return names[priority];
 }
 
 // Half-precision comparisons accept only the floating-point CmpOps (no lo/ls/hi/hs).
@@ -1579,6 +1587,12 @@ std::string ir::PTXInstruction::valid() const {
 			if( cacheOperation == Lu && volatility == Volatile ) {
 				return "ld.lu cannot be combined with .volatile";
 			}
+			if( l1Evict >= 0 && ( volatility == Volatile || mmio || cacheOperation != Ca ) ) {
+				return "ld .L1::eviction_priority excludes .volatile, .mmio and cache operators";
+			}
+			if( prefetchSize && ( mmio || volatility == Volatile ) ) {
+				return "ld .L2 prefetch size excludes .mmio and .volatile";
+			}
 			if( d.addressMode != PTXOperand::Register ) {
 				return "operand D must be a register not a " 
 					+ PTXOperand::toString( d.addressMode );
@@ -2302,6 +2316,9 @@ std::string ir::PTXInstruction::valid() const {
 			if (!(addressSpace == Local || addressSpace == Global)) {
 				return "address space must be .local or .global, not " + toString(addressSpace);
 			}
+			if (l2Evict >= 0 && addressSpace != Global) {
+				return "prefetch .L2::eviction_priority requires .global";
+			}
 			if (!(d.addressMode == PTXOperand::Indirect || d.addressMode == PTXOperand::Address ||
 				d.addressMode == PTXOperand::Immediate)) {
 				
@@ -2882,6 +2899,9 @@ std::string ir::PTXInstruction::valid() const {
 					+ " cannot be assigned to " + PTXOperand::toString( type ) 
 					+ ", not even for relaxed typed instructions.";
 			}
+			if( l1Evict >= 0 && ( volatility == Volatile || mmio || cacheOperation != Wb ) ) {
+				return "st .L1::eviction_priority excludes .volatile, .mmio and cache operators";
+			}
 			break;
 		}
 		case Sub: {
@@ -3415,12 +3435,14 @@ std::string ir::PTXInstruction::toString() const {
 						+ std::string( "." );
 				}
 			}
-			if( cacheOperation != Ca ) {
-				result += toStringLoad(cacheOperation) + ".";
-			}
 			if( addressSpace != Generic ) {
 				result += toString(addressSpace) + ".";
 			}
+			if( cacheOperation != Ca ) {
+				result += toStringLoad(cacheOperation) + ".";
+			}
+			if( l1Evict >= 0 ) result += l1EvictString( l1Evict ) + ".";
+			if( prefetchSize ) result += "L2::" + std::to_string( prefetchSize ) + "B.";
 			if( d.vec != PTXOperand::v1 ) {
 				result += toString( d.vec ) + ".";
 			}
@@ -3575,6 +3597,8 @@ std::string ir::PTXInstruction::toString() const {
 				+ d.toString() + ", " + a.toString();
 		}
 		case Prefetch: {
+			if (l2Evict >= 0) return guard() + "prefetch." + toString(addressSpace)
+				+ (l2Evict == 1 ? ".L2::evict_last" : ".L2::evict_normal") + " [" + d.toString() + "]";
 			return guard() + "prefetch." + toString(addressSpace) + "." + 
 				PTXInstruction::toString(cacheLevel) + " [" + d.toString() + "]";
 		}
@@ -3791,12 +3815,13 @@ std::string ir::PTXInstruction::toString() const {
 						+ std::string( "." );
 				}
 			}
-			if( cacheOperation != Wb ) {
-				result += toStringStore(cacheOperation) + ".";
-			}
 			if( addressSpace != Generic ) {
 				result += toString(addressSpace) + ".";
 			}
+			if( cacheOperation != Wb ) {
+				result += toStringStore(cacheOperation) + ".";
+			}
+			if( l1Evict >= 0 ) result += l1EvictString( l1Evict ) + ".";
 			if( a.vec != PTXOperand::v1 ) {
 				result += toString( a.vec ) + ".";
 			}

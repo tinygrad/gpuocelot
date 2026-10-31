@@ -551,6 +551,11 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
 ".L2::evict_last"               { return TOKEN_EVICT_LAST; }
 ".L2::evict_first"              { return TOKEN_EVICT_FIRST; }
 ".L2::evict_unchanged"          { return TOKEN_EVICT_UNCHANGED; }
+".L1::evict_normal"             { yylval->value = 0; return TOKEN_L1_EVICT; }
+".L1::evict_unchanged"          { yylval->value = 1; return TOKEN_L1_EVICT; }
+".L1::evict_first"              { yylval->value = 2; return TOKEN_L1_EVICT; }
+".L1::evict_last"               { yylval->value = 3; return TOKEN_L1_EVICT; }
+".L1::no_allocate"              { yylval->value = 4; return TOKEN_L1_EVICT; }
 
 ".width"                        { yylval->value = TOKEN_WIDTH; \
                                     return TOKEN_WIDTH; }
