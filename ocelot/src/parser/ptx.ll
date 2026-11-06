@@ -652,9 +652,11 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return TOKEN_DECIMAL_CONSTANT; }
 {HEX_CONSTANT}                  { std::stringstream stream; \
                                     stream << std::hex; stream << yytext; \
-                                    stream >> yylval->value; \
+                                    unsigned long long hexValue = 0; \
+                                    stream >> hexValue; \
+                                    yylval->value = (long long int) hexValue; \
                                     return TOKEN_DECIMAL_CONSTANT; }
-{OCT_CONSTANT}                  { std::stringstream stream; \
+{OCT_CONSTANT}                { std::stringstream stream; \
                                     stream << std::oct; stream << yytext; \
                                     stream >> yylval->value; \
                                     return TOKEN_DECIMAL_CONSTANT; }

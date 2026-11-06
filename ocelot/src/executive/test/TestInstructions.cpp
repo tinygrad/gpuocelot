@@ -385,6 +385,44 @@ public:
 		return result;
 	}
 
+	// Hex literals without a U suffix must keep all 64 bits (2^63 and up used
+	// to clamp to LLONG_MAX in the lexer).
+	bool test_HexLiteral64() {
+		const struct { const char* text; PTXU64 expected; } cases[] = {
+			{"0x0000000000001234", 0x1234ull},
+			{"0x7FFFFFFFFFFFFFFF", 0x7fffffffffffffffull},
+			{"0x8000000000000000", 0x8000000000000000ull},
+			{"0xFFFFFFFFFFFFFFFF", 0xffffffffffffffffull}};
+		std::stringstream ptx;
+		ptx << ".version 8.0\n.target sm_86\n.address_size 64\n"
+			<< ".visible .entry hex_literals() { .reg .u64 rd0;";
+		for (const auto& c : cases) ptx << " mov.u64 rd0, " << c.text << ";";
+		ptx << " ret; }\n";
+		Module module;
+		try { module.load(ptx); }
+		catch (const std::exception& error) {
+			status << "hex literal parse failed: " << error.what() << "\n";
+			return false;
+		}
+		EmulatedKernel kernel(module.getKernel("hex_literals"), nullptr);
+		size_t next = 0;
+		for (const auto& ins : kernel.instructions) {
+			if (ins.opcode != PTXInstruction::Mov) continue;
+			if (next < 4 && ins.a.imm_uint != cases[next].expected) {
+				status << "hex literal " << cases[next].text << " parsed as 0x"
+					<< std::hex << ins.a.imm_uint << std::dec << "\n";
+				return false;
+			}
+			++next;
+		}
+		if (next != 4) {
+			status << "hex literal test found " << next << " movs, expected 4\n";
+			return false;
+		}
+		status << "Hex literal 64-bit test passed.\n";
+		return true;
+	}
+
 	bool test_Add() {
 		bool result = true;
 
@@ -12802,6 +12840,7 @@ public:
 
 			// arithmetic instructions
 			result = (result && test_Abs());
+			result = (result && test_HexLiteral64());
 			result = (result && test_Add());
 			result = (result && test_Sub());
 			result = (result && test_AddSubRounding());
