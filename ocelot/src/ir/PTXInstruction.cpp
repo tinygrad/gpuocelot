@@ -2062,6 +2062,9 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case Fence: {
+			if( semantics != Sc && semantics != AcqRel ) {
+				return "fence semantics must be .sc or .acq_rel";
+			}
 			break;
 		}
 		case Min: {

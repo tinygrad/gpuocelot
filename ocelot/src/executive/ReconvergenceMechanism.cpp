@@ -179,6 +179,7 @@ void executive::ReconvergenceIPDOM::initialize() {
 	tokenStack.clear();
 	yielded = false;
 	pendingVote.clear();
+	pendingBar.clear();
 	runtimeStack.push_back(context);
 	pcStack.push_back(0);
 	tokenStack.push_back(Branch);
@@ -236,6 +237,7 @@ bool executive::ReconvergenceIPDOM::eval_Bra(executive::CTAContext &context,
 			for(auto si = runtimeStack.rbegin(); 
 				si != runtimeStack.rend(); ++si, ++ti) {
 				assert(ti != tokenStack.rend());
+				if (*ti == BarrierContinuation) break;
 			
 				if(si->PC == reconvergeContext.PC) {
 					reconvergeContextAlreadyExists = true;
@@ -282,28 +284,20 @@ bool executive::ReconvergenceIPDOM::eval_Bra(executive::CTAContext &context,
 
 void executive::ReconvergenceIPDOM::eval_Bar(executive::CTAContext &context, 
 	const ir::PTXInstruction &instr) {
-	
-	if (context.active.count() < context.active.size()) {
-		// deadlock - not all threads reach synchronization barrier
-#if REPORT_BAR
-		report(" Bar called - " << context.active.count() << " of " 
-			<< context.active.size() << " threads active");
-#endif
-		std::stringstream message;
-		
-		message << "barrier deadlock:\n";
-
-		for(RuntimeStack::const_iterator
-			suspendedContext = runtimeStack.begin();
-			suspendedContext != runtimeStack.end(); ++suspendedContext)
-		{
-			message << "context at: [PC: " << suspendedContext->PC << "] "
-				<< context.kernel->location(suspendedContext->PC) << " "
-				<< suspendedContext->active << "\n";
-		}
-		
-		throw RuntimeException(message.str(), context.PC, instr);
-	}
+	const auto arrived = context.predicateMask(instr);
+	if (arrived.none()) return;
+	bool otherLive = false;
+	for (const auto& suspended : runtimeStack) 
+		otherLive |= (suspended.active - arrived).any();
+	if (!otherLive && pendingBar.empty() && pendingVote.empty() &&
+		instr.barrierOperation == ir::PTXInstruction::BarSync) return;
+	if (instr.barrierOperation != ir::PTXInstruction::BarSync || arrived != context.active ||
+		!pendingVote.empty() || std::find(tokenStack.begin(), tokenStack.end(), Call) != tokenStack.end())
+		throw RuntimeException("CTA barrier waiting requires call-free bar.sync contexts", context.PC, instr);
+	// Save each path's own continuation, including barriers at different PCs.
+	pendingBar.push_back(context);
+	for (auto& suspended : runtimeStack) suspended.active -= arrived;
+	yielded = true;
 }
 
 void executive::ReconvergenceIPDOM::eval_Reconverge(
@@ -372,13 +366,18 @@ void executive::ReconvergenceIPDOM::eval_WarpSync(CTAContext& context,
 	const auto arrived = combined.predicateMask(instr);
 	const ir::PTXU32 firstMask = arrived.any() ?
 		cta->operandAsU32(arrived.find_first(), memberMask) : 0;
+	// A thread still in any context has not exited; exited threads are not
+	// waited for (PTX: wait for all non-exited threads in membermask).
+	boost::dynamic_bitset<> live = combined.active;
+	for (const auto& suspended : runtimeStack) live |= suspended.active;
+	for (const auto& waiting : pendingBar) live |= waiting.active;
 	bool ready = true, sameGroup = true;
 	for (int start = 0; start < cta->threadCount; start += ir::WARP_SZ) {
 		const int lanes = std::min(ir::WARP_SZ, cta->threadCount - start);
 		ir::PTXU32 arrivedMask = 0, existingMask = 0;
 		for (int lane = 0; lane < lanes; ++lane) {
 			const ir::PTXU32 bit = ir::PTXU32(1) << lane;
-			existingMask |= bit;
+			if (live[start + lane]) existingMask |= bit;
 			if (arrived[start + lane]) arrivedMask |= bit;
 		}
 		for (int lane = 0; lane < lanes; ++lane) {
@@ -416,9 +415,28 @@ bool executive::ReconvergenceIPDOM::nextInstruction(
 	executive::CTAContext &context, 
 	const ir::PTXInstruction &instr, const ir::PTXInstruction::Opcode &opcode) {
 
+	while (!pendingBar.empty() && runtimeStack.size() > 1 && getContext().active.none()) {
+		runtimeStack.pop_back();
+		pcStack.pop_back();
+		tokenStack.pop_back();
+	}
+	if (!pendingBar.empty() && getContext().active.none()) {
+		const auto& barrier = cta->kernel->instructions[pendingBar.front().PC];
+		for (const auto& waiting : pendingBar) {
+			if (cta->kernel->instructions[waiting.PC].d.imm_uint != barrier.d.imm_uint)
+				throw RuntimeException("barrier deadlock: no runnable threads and different barrier IDs", waiting.PC, barrier);
+		}
+		runtimeStack.swap(pendingBar);
+		pendingBar.clear();
+		pcStack.assign(runtimeStack.size(), -1);
+		tokenStack.assign(runtimeStack.size(), BarrierContinuation);
+		for (auto& resumed : runtimeStack) ++resumed.PC;
+		yielded = true;
+	}
+
 	if (yielded) {
 		yielded = false;
-		return context.running();
+		return getContext().running();
 	}
 	// advance to next instruction if the current instruction wasn't a branch
 	if (opcode != ir::PTXInstruction::Bra
@@ -461,6 +479,8 @@ std::string executive::ReconvergenceIPDOM::toString(Token t) {
 	switch(t) {
 	case Call:
 		return "Call";
+	case BarrierContinuation:
+		return "BarrierContinuation";
 	case Branch:
 		return "Branch";
 	}

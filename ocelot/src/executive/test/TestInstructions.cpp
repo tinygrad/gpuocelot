@@ -330,7 +330,7 @@ public:
 			}
 		}
 
-		// Signed zero: abs(-0) is +0 for f32, f32.ftz and f64 (A100/H100 verified).
+		// Signed zero: abs(-0) is +0 for f32, f32.ftz and f64.
 		if (result) {
 			for (int f64 = 0; f64 < 2 && result; ++f64) for (int ftz = 0; ftz < 2 - f64 && result; ++ftz) {
 				ins.type = f64 ? PTXOperand::f64 : PTXOperand::f32;
@@ -1514,10 +1514,10 @@ public:
 		return result;
 	}
 
-	// st only supports .cop = {.wb, .cg, .cs, .wt}; it previously shared
-	// ld's grammar production, which wrongly accepted .ca/.cv/.nc/.lu and
-	// couldn't parse .wb/.wt at all (tokens declared but never wired into
-	// any rule). st now has its own storeCacheOperation production.
+	// st only supports .cop = {.wb, .cg, .cs, .wt}. Its grammar production
+	// must not share ld's, which accepts .ca/.cv/.nc/.lu and lacks .wb/.wt
+	// (tokens declared but never wired into any rule). st has its own
+	// storeCacheOperation production.
 	bool test_StCacheOperator() {
 		std::stringstream ptx;
 		ptx << ".version 8.0\n.target sm_86\n.address_size 64\n"
@@ -1571,7 +1571,7 @@ public:
 		return true;
 	}
 
-	// PTX 8.0 ld/st/prefetch cache hints (A100/H100 verified): .L1::eviction_priority,
+	// PTX 8.0 ld/st/prefetch cache hints: .L1::eviction_priority,
 	// ld .L2::{64,128,256}B and prefetch.global.L2::{evict_last,evict_normal}.
 	// Forms must print in PTX order and reparse to the same text.
 	bool test_CacheHints() {
@@ -1609,7 +1609,7 @@ public:
 	// multiple alternatives, so only the last-listed modifier actually got
 	// recorded; every other modifier silently kept the instruction's
 	// previous/default field value. This checks the first-listed
-	// (previously-broken) alternative of each affected production parses
+	// alternative of each affected production parses
 	// with the correct field, not just the last one.
 	bool test_GrammarSharedActionFix() {
 		std::stringstream ptx;
@@ -1661,7 +1661,7 @@ public:
 	// stringToOpcode() had no entries for "prefetch"/"prefetchu" at all,
 	// so both silently fell through to Nop and failed to parse with
 	// "NOP is not a valid instruction" -- unrelated to the shared-action
-	// grammar bug, found while regression-testing it.
+	// grammar bug above.
 	bool test_PrefetchOpcode() {
 		std::stringstream ptx;
 		ptx << ".version 8.0\n.target sm_86\n.address_size 64\n"
@@ -2632,8 +2632,7 @@ public:
 		return true;
 	}
 
-	// fence was entirely unimplemented -- no lexer token, no grammar rule,
-	// no Opcode value. Verifies parsing of the basic thread-fence form
+	// Verifies parsing of the basic thread-fence form
 	// (sem optional, defaulting to acq_rel) and that execution is a no-op,
 	// mirroring the already-implemented membar.
 	bool test_Fence() {
@@ -2641,7 +2640,7 @@ public:
 		ptx << ".version 8.0\n.target sm_86\n.address_size 64\n"
 			<< ".visible .entry test_fence() {\n"
 			<< "  fence.sc.gpu;\n"
-			<< "  fence.acquire.cta;\n"
+			<< "  fence.acq_rel.cta;\n"
 			<< "  fence.sys;\n"
 			<< "  ret;\n}\n";
 		Module parsed;
@@ -2667,9 +2666,9 @@ public:
 				<< " level=" << fences[0]->level << "\n";
 			return false;
 		}
-		if (fences[1]->semantics != PTXInstruction::Acquire
+		if (fences[1]->semantics != PTXInstruction::AcqRel
 			|| fences[1]->level != PTXInstruction::CtaLevel) {
-			status << "fence.acquire.cta: semantics=" << fences[1]->semantics
+			status << "fence.acq_rel.cta: semantics=" << fences[1]->semantics
 				<< " level=" << fences[1]->level << "\n";
 			return false;
 		}
@@ -2679,6 +2678,35 @@ public:
 				<< fences[2]->semantics << " level=" << fences[2]->level << "\n";
 			return false;
 		}
+
+		// Ordinary PTX 8.0 fences allow only .sc or .acq_rel.
+		for (const char* sem : {"acquire", "release"}) {
+			std::stringstream bad(std::string(".version 8.0\n.target sm_86\n.entry f() { fence.")
+				+ sem + ".gpu; ret; }");
+			Module rejected;
+			try {
+				rejected.load(bad);
+				status << "fence." << sem << ".gpu was accepted\n";
+				return false;
+			}
+			catch (const std::exception&) {}
+		}
+		for (auto sem : {PTXInstruction::Acquire, PTXInstruction::Release}) {
+			PTXInstruction invalid;
+			invalid.opcode = PTXInstruction::Fence;
+			invalid.semantics = sem;
+			if (invalid.valid().empty()) {
+				status << "invalid Fence IR semantics validated\n";
+				return false;
+			}
+		}
+
+		std::stringstream printed; parsed.write(printed);
+		Module reparsed; reparsed.load(printed);
+		EmulatedKernel kernel(reparsed.getKernel("test_fence"), nullptr);
+		kernel.setKernelShape(32, 1, 1);
+		CooperativeThreadArray local(&kernel, Dim3(), false);
+		local.reset(); local.execute();
 
 		// trivial no-op check
 		PTXInstruction ins;
@@ -2692,8 +2720,8 @@ public:
 		return true;
 	}
 
-	// atom/red previously could not parse the optional {.sem}{.scope}
-	// memory-ordering prefix at all. Verifies parsing of all legal atom
+	// atom/red accept the optional {.sem}{.scope}
+	// memory-ordering prefix. Verifies parsing of all legal atom
 	// .sem forms (relaxed/acquire/release/acq_rel, no .sc), all legal red
 	// .sem forms (relaxed/release only), optional .scope, and that .sem
 	// defaults to .relaxed when omitted, per PTX ISA 9.7.14.5/9.7.14.6.
@@ -5737,7 +5765,7 @@ public:
 		cta->eval_Ex2(cta->getActiveContext(), ins);
 		if (hydrazine::bit_cast<PTXU32>(cta->getRegAsF32(0, 2)) != 0) return false;
 
-		// ex2.approx.f16x2 (sm_75; A100/H100 verified): parses and computes each half.
+		// ex2.approx.f16x2 (sm_75): parses and computes each half.
 		{
 			std::stringstream source(".version 8.0\n.target sm_86\n.entry e() { .reg .b32 r; ex2.approx.f16x2 r, r; ret; }"), printed;
 			try { Module parsed; parsed.load(source); parsed.write(printed); Module again; again.load(printed); }
@@ -6116,7 +6144,7 @@ public:
 			status << "fma.rn.ftz.relu.f16 rejected\n";
 			return false;
 		}
-		// Parser: .relu and .bf16x2 forms (sm_80, A100/H100 verified) parse, print and reparse.
+		// Parser: .relu and .bf16x2 forms (sm_80) parse, print and reparse.
 		for (const char* form : {"fma.rn.relu.f16 h,h,h,h", "fma.rn.ftz.relu.f16 h,h,h,h", "fma.rn.relu.f16x2 r,r,r,r",
 			"fma.rn.relu.bf16 h,h,h,h", "fma.rn.bf16x2 r,r,r,r", "fma.rn.relu.bf16x2 r,r,r,r"}) {
 			std::stringstream source(std::string(".version 8.0\n.target sm_86\n.entry f() { .reg .b16 h; .reg .b32 r; ") + form + "; ret; }"), printed;
@@ -6547,6 +6575,7 @@ public:
 	// Kernel-level predicated exit/ret leaves only the guarded lanes (PTX 8.0:
 	// exit ends the thread). Survivors keep running and reconverge; outputs are
 	// per lane, 0xdeadbeef = not written. Device-function exit is not covered.
+	// Barriers and *.sync ops wait only for non-exited threads.
 	bool test_PartialExit() {
 		std::vector<std::pair<std::string, std::function<PTXU32(int)>>> cases = {
 			{"setp.eq.u32 p, lane, 3; @p exit; st.global.u32 [out], lane;", [](int l) { return l == 3 ? 0xdeadbeefu : PTXU32(l); }},
@@ -6559,7 +6588,17 @@ public:
 			// Exit inside a loop: lane t leaves on iteration t (t < 4); others finish 4 iterations.
 			{"mov.u32 t, 0; loop: setp.eq.u32 p, t, lane; @p exit; add.u32 t, t, 1; setp.lt.u32 q, t, 4; @q bra loop; st.global.u32 [out], t;",
 				[](int l) { return l < 4 ? 0xdeadbeefu : 4u; }},
-			{"setp.eq.u32 p, lane, 3; @p exit; activemask.b32 t; st.global.u32 [out], t;", [](int l) { return l == 3 ? 0xdeadbeefu : 0xfffffff7u; }}};
+			{"setp.eq.u32 p, lane, 3; @p exit; activemask.b32 t; st.global.u32 [out], t;", [](int l) { return l == 3 ? 0xdeadbeefu : 0xfffffff7u; }},
+			// Every executing lane belongs to the member mask; lane 3 has exited.
+			{"setp.eq.u32 p, lane, 3; @p exit; setp.ge.u32 q, lane, 2; vote.sync.ballot.b32 t, q, 0xffffffff; st.global.u32 [out], t;",
+				[](int l) { return l == 3 ? 0xdeadbeefu : 0xfffffff4u; }},
+			{"setp.eq.u32 p, lane, 3; @p ret; match.any.sync.b32 t, 7, 0xffffffff; st.global.u32 [out], t;",
+				[](int l) { return l == 3 ? 0xdeadbeefu : 0xfffffff7u; }},
+			{"setp.eq.u32 p, lane, 3; @p exit; redux.sync.add.u32 t, lane, 0xffffffff; st.global.u32 [out], t;",
+				[](int l) { return l == 3 ? 0xdeadbeefu : 493u; }},
+			{"setp.eq.u32 p, lane, 3; @p exit; shfl.sync.idx.b32 t, lane, 2, 31, 0xffffffff; st.global.u32 [out], t;",
+				[](int l) { return l == 3 ? 0xdeadbeefu : 2u; }},
+			{"setp.eq.u32 p, lane, 3; @p exit; bar.sync 0; st.global.u32 [out], lane;", [](int l) { return l == 3 ? 0xdeadbeefu : PTXU32(l); }}};
 		for (const auto& c : cases) {
 			std::stringstream source(".version 8.0\n.target sm_86\n.entry partial_exit() { .reg .u64 out, base; .reg .u32 lane, t; .reg .pred p, q;"
 				" mov.u32 lane, %tid.x; add.u64 out, 0, base; " + c.first + " ret; }");
@@ -6574,6 +6613,23 @@ public:
 			for (int lane = 0; lane < 32; ++lane) if (output[lane] != c.second(lane)) {
 				status << "partial exit lane " << lane << " got " << std::hex << output[lane] << std::dec << ": " << c.first << "\n"; return false; }
 		}
+		std::stringstream divergent(".version 8.0\n.target sm_86\n.entry live_barrier() {"
+			" .shared .u32 flag; .reg .u32 lane, value; .reg .pred p; mov.u32 lane, %tid.x;"
+			" setp.lt.u32 p, lane, 32; @p bra delayed; bar.sync 0; bra check;"
+			" delayed: setp.eq.u32 p, lane, 0; @p st.shared.u32 [flag], 123; bar.sync 0;"
+			" check: ld.shared.u32 value, [flag]; bar.sync 1; bar.sync 1; ret; }");
+		Module parsed; parsed.load(divergent);
+		EmulatedKernel kernel(parsed.getKernel("live_barrier"), nullptr);
+		kernel.setKernelShape(64, 1, 1); CooperativeThreadArray local(&kernel, Dim3(), false);
+		local.reset();
+		std::memset(local.functionCallStack.sharedMemoryPointer(), 0, 4);
+		try { local.execute(); }
+		catch (const RuntimeException& error) {
+			status << "delayed barrier threw: " << error.message << "\n";
+			return false;
+		}
+		for (const auto& ins : kernel.instructions) if (ins.opcode == PTXInstruction::Ld)
+			for (int lane = 0; lane < 64; ++lane) if (local.getRegAsU32(lane, ins.d.reg) != 123) return false;
 		return true;
 	}
 
@@ -11295,7 +11351,7 @@ public:
 			}
 		}
 
-		// NaN to integer, HARDWARE-OBSERVED (A100/H100), not PTX 8.0 text (which says 0):
+		// NaN to integer, HARDWARE-OBSERVED, not PTX 8.0 text (which says 0):
 		// 0 unless the source is f64 or the destination is 64-bit, else 1 << (width - 1).
 		if (result) {
 			const struct { PTXOperand::DataType dst, src; PTXU64 expected; } nanCases[] = {
@@ -11705,7 +11761,7 @@ public:
 		return result;
 	}
 
-	// setp/set on .f16x2 (PTX 8.0 half-precision comparisons; A100/H100 verified).
+	// setp/set on .f16x2 (PTX 8.0 half-precision comparisons).
 	// Expected values follow the PTX pseudocode: p = BoolOp(t[low], c), q = BoolOp(t[high], c).
 	// Halves are {high, low}: x = {1.0, NaN}, y = {2.0, 1.0}; s = {1.0, +min subnormal},
 	// n = {2.0, -min subnormal}, e = {1.0, -min subnormal}. c is true.
@@ -12286,7 +12342,7 @@ public:
 				}
 			}
 		}
-		// f64 values outside the f32 range must keep their f64 class (A100/H100 verified).
+		// f64 values outside the f32 range must keep their f64 class.
 		ins.type = PTXOperand::f64;
 		ins.a = reg("a", PTXOperand::f64, 1);
 		const PTXF64 values[] = {std::numeric_limits<PTXF64>::max(), -std::numeric_limits<PTXF64>::max(),

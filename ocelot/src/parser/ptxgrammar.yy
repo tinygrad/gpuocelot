@@ -1560,7 +1560,7 @@ membar : OPCODE_MEMBAR membarSpace ';'
 	state.instruction( $<text>1 );
 };
 
-fenceSemanticsType : TOKEN_SC | TOKEN_ACQ_REL | TOKEN_ACQUIRE | TOKEN_RELEASE;
+fenceSemanticsType : TOKEN_SC | TOKEN_ACQ_REL;
 
 fenceSemantics : fenceSemanticsType
 {

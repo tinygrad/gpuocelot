@@ -159,6 +159,7 @@ private:
 	enum Token
 	{
 		Call,
+		BarrierContinuation,
 		Branch
 	};
 
@@ -177,6 +178,7 @@ private:
 	TokenStack tokenStack;
 	unsigned int reconvergeEvents;
 	bool yielded = false;
+	RuntimeStack pendingBar;
 	RuntimeStack pendingVote;
 	int voteBoundary = 0;
 };
