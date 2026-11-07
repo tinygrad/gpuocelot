@@ -495,6 +495,8 @@ namespace executive {
 		void eval_Lop3(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Mad24(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Mad(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_MadC(CTAContext &context, const ir::PTXInstruction &instr);
+		void madWithCarry(CTAContext &context, const ir::PTXInstruction &instr, bool carryIn);
 		void eval_Max(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Membar(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Fence(CTAContext &context, const ir::PTXInstruction &instr);

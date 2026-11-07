@@ -85,6 +85,9 @@ namespace ir {
 			Not,
 			Or,
 			Pmevent,
+			Nanosleep,
+			Discard,
+			Applypriority,
 			Popc,
 			Prefetch,
 			Createpolicy,
@@ -583,6 +586,8 @@ namespace ir {
 			semantics/scope pair but are syntactically distinct and must
 			round-trip through the printer differently. */
 		bool mmio;
+		/*! For pmevent, indicates the .mask form (operand is a 16-bit event mask). */
+		bool pmeventMask;
 		bool cacheHint; // .L2::cache_hint; policy operand is q.
 		bool mbarrierNoComplete;
 		unsigned int prefetchSize; // cp.async/ld .L2::{64,128,256}B prefetch hint in bytes; zero means absent.

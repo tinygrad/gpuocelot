@@ -268,6 +268,7 @@ namespace parser
 					void semantics( int token );
 					void scope( int token );
 					void mmio( bool condition );
+					void pmeventMask( bool condition );
 					void finalizeMmioAddressSpace();
 					void permute( int token );
 					void floatingPointMode( int token );
@@ -287,6 +288,7 @@ namespace parser
 					void call( const std::string& identifier,
 						YYLTYPE& location );
 					void carryIn();
+					void madcCarryIn();
 					void relaxedConvert( int token, YYLTYPE& location );
 					void cvtaTo();
 					void convert( int token, YYLTYPE& location );

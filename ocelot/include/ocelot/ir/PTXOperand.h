@@ -135,6 +135,9 @@ namespace ir {
 			envreg29,
 			envreg30,
 			envreg31,
+			globalTimer,
+			totalSmemSize,
+			dynamicSmemSize,
 			SpecialRegister_invalid
 		};
 		
