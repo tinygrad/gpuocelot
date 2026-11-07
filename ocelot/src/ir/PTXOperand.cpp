@@ -121,6 +121,9 @@ std::string ir::PTXOperand::toString( SpecialRegister reg ) {
 		case envreg29:     return "%envreg29";     break;
 		case envreg30:     return "%envreg30";     break;
 		case envreg31:     return "%envreg31";     break;
+		case globalTimer:  return "%globaltimer";  break;
+		case totalSmemSize: return "%total_smem_size"; break;
+		case dynamicSmemSize: return "%dynamic_smem_size"; break;
 		default: break;
 	}
 	return "SpecialRegister_invalid";

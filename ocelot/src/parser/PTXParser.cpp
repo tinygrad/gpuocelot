@@ -377,8 +377,20 @@ namespace parser
 			ir::PTXOperand( ir::PTXOperand::smId, ir::PTXOperand::ix ) ) ) );
 		operands.insert( std::make_pair( "%nsmid", OperandWrapper( 
 			ir::PTXOperand( ir::PTXOperand::nsmId, ir::PTXOperand::ix ) ) ) );
-		operands.insert( std::make_pair( "%gridId", OperandWrapper( 
-			ir::PTXOperand( ir::PTXOperand::gridId, ir::PTXOperand::ix ) ) ) );
+		operands.insert( std::make_pair( "%warpid", OperandWrapper( 
+			ir::PTXOperand( ir::PTXOperand::warpId, ir::PTXOperand::ix ) ) ) );
+		operands.insert( std::make_pair( "%gridid", OperandWrapper( 
+			ir::PTXOperand( ir::PTXOperand::gridId, ir::PTXOperand::ix,
+			ir::PTXOperand::u64 ) ) ) );
+		operands.insert( std::make_pair( "%globaltimer", OperandWrapper( 
+			ir::PTXOperand( ir::PTXOperand::globalTimer, ir::PTXOperand::ix,
+			ir::PTXOperand::u64 ) ) ) );
+		operands.insert( std::make_pair( "%total_smem_size", OperandWrapper( 
+			ir::PTXOperand( ir::PTXOperand::totalSmemSize,
+			ir::PTXOperand::ix ) ) ) );
+		operands.insert( std::make_pair( "%dynamic_smem_size", OperandWrapper( 
+			ir::PTXOperand( ir::PTXOperand::dynamicSmemSize,
+			ir::PTXOperand::ix ) ) ) );
 
 		operands.insert( std::make_pair( "%lanemask_eq", OperandWrapper( 
 			ir::PTXOperand( ir::PTXOperand::lanemask_eq,
@@ -1954,6 +1966,11 @@ namespace parser
 		statement.instruction.mmio = condition;
 	}
 
+	void PTXParser::State::pmeventMask( bool condition )
+	{
+		statement.instruction.pmeventMask = condition;
+	}
+
 	void PTXParser::State::finalizeMmioAddressSpace()
 	{
 		if( statement.instruction.mmio )
@@ -2300,6 +2317,14 @@ namespace parser
 		prototype.clear();
 	}
 		
+	void PTXParser::State::madcCarryIn()
+	{
+		ir::PTXOperand& conditionCode = statement.instruction.q;
+		conditionCode = ir::PTXOperand( ir::PTXOperand::Register,
+			ir::PTXOperand::u32 );
+		conditionCode.identifier = "%_ZconditionCode";
+	}
+
 	void PTXParser::State::carryIn()
 	{
 		ir::PTXOperand conditionCode( ir::PTXOperand::Register, 
@@ -2868,6 +2893,9 @@ namespace parser
 		if( string == "neg" ) return ir::PTXInstruction::Neg;
 		if( string == "not" ) return ir::PTXInstruction::Not;
 		if( string == "pmevent" ) return ir::PTXInstruction::Pmevent;
+		if( string == "nanosleep" ) return ir::PTXInstruction::Nanosleep;
+		if( string == "discard" ) return ir::PTXInstruction::Discard;
+		if( string == "applypriority" ) return ir::PTXInstruction::Applypriority;
 		if( string == "popc" ) return ir::PTXInstruction::Popc;
 		if( string == "prefetch" ) return ir::PTXInstruction::Prefetch;
 		if( string == "prefetchu" ) return ir::PTXInstruction::Prefetchu;

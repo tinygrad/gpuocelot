@@ -207,6 +207,14 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return OPCODE_OR; }
 "pmevent"                       { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_PMEVENT; }
+"pmevent.mask"                  { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_PMEVENT_MASK; }
+"nanosleep"                    { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_NANOSLEEP; }
+"discard"                      { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_DISCARD; }
+"applypriority"                { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_APPLYPRIORITY; }
 "mbarrier.arrive"|"mbarrier.arrive_drop" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_ARRIVE; }
 ".noComplete" { return TOKEN_NO_COMPLETE; }
 "mbarrier.pending_count" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_PENDING; }
@@ -658,7 +666,9 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return TOKEN_DECIMAL_CONSTANT; }
 {OCT_CONSTANT}                { std::stringstream stream; \
                                     stream << std::oct; stream << yytext; \
-                                    stream >> yylval->value; \
+                                    unsigned long long octValue = 0; \
+                                    stream >> octValue; \
+                                    yylval->value = (long long int) octValue; \
                                     return TOKEN_DECIMAL_CONSTANT; }
 
 {UNSIGNED_DECIMAL_CONSTANT}     { std::stringstream stream; stream << yytext; \

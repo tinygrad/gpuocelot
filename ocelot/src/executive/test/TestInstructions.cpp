@@ -385,14 +385,19 @@ public:
 		return result;
 	}
 
-	// Hex literals without a U suffix must keep all 64 bits (2^63 and up used
-	// to clamp to LLONG_MAX in the lexer).
+	// Hex and octal literals without a U suffix must keep all 64 bits (2^63 and
+	// up used to clamp to LLONG_MAX in the lexer).
 	bool test_HexLiteral64() {
 		const struct { const char* text; PTXU64 expected; } cases[] = {
 			{"0x0000000000001234", 0x1234ull},
 			{"0x7FFFFFFFFFFFFFFF", 0x7fffffffffffffffull},
 			{"0x8000000000000000", 0x8000000000000000ull},
-			{"0xFFFFFFFFFFFFFFFF", 0xffffffffffffffffull}};
+			{"0xFFFFFFFFFFFFFFFF", 0xffffffffffffffffull},
+			{"0777", 0777ull},
+			{"0777777777777777777777", 0x7fffffffffffffffull},
+			{"01000000000000000000000", 0x8000000000000000ull},
+			{"01777777777777777777777", 0xffffffffffffffffull}};
+		const size_t caseCount = sizeof(cases) / sizeof(cases[0]);
 		std::stringstream ptx;
 		ptx << ".version 8.0\n.target sm_86\n.address_size 64\n"
 			<< ".visible .entry hex_literals() { .reg .u64 rd0;";
@@ -401,25 +406,451 @@ public:
 		Module module;
 		try { module.load(ptx); }
 		catch (const std::exception& error) {
-			status << "hex literal parse failed: " << error.what() << "\n";
+			status << "literal parse failed: " << error.what() << "\n";
 			return false;
 		}
 		EmulatedKernel kernel(module.getKernel("hex_literals"), nullptr);
 		size_t next = 0;
 		for (const auto& ins : kernel.instructions) {
 			if (ins.opcode != PTXInstruction::Mov) continue;
-			if (next < 4 && ins.a.imm_uint != cases[next].expected) {
-				status << "hex literal " << cases[next].text << " parsed as 0x"
+			if (next < caseCount && ins.a.imm_uint != cases[next].expected) {
+				status << "literal " << cases[next].text << " parsed as 0x"
 					<< std::hex << ins.a.imm_uint << std::dec << "\n";
 				return false;
 			}
 			++next;
 		}
-		if (next != 4) {
-			status << "hex literal test found " << next << " movs, expected 4\n";
+		if (next != caseCount) {
+			status << "literal test found " << next << " movs, expected " << caseCount << "\n";
 			return false;
 		}
 		status << "Hex literal 64-bit test passed.\n";
+		return true;
+	}
+
+	// Extended-precision add/sub/mad chains (PTX 9.7.2): CC.CF holds the carry or
+	// borrow; subc computes a - (b + CF). Every arithmetic result is checked in
+	// program order for 32- and 64-bit limbs.
+	bool test_ExtendedPrecision() {
+		struct Chain { const char* name; const char* body; std::vector<PTXU64> expected; };
+		const Chain chains[] = {
+			{"sub.cc u32 with b=0 reports no borrow",
+				"mov.u32 a, 5; mov.u32 z, 0; sub.cc.u32 d0, a, z; mov.u32 h, 10; subc.u32 d1, h, z;",
+				{5, 10}},
+			{"subc without a prior .cc sees no borrow",
+				"mov.u32 h, 10; mov.u32 z, 0; subc.u32 d0, h, z;", {10}},
+			{"sub.cc u32 borrow into subc",
+				"mov.u32 a, 3; mov.u32 b, 5; sub.cc.u32 d0, a, b; mov.u32 h, 10; mov.u32 i, 2; subc.u32 d1, h, i;",
+				{0xfffffffeull, 7}},
+			{"subc.cc u32 propagates borrow across three limbs",
+				"mov.u32 z, 0; mov.u32 one, 1; sub.cc.u32 d0, z, one; subc.cc.u32 d1, z, z; subc.u32 d2, one, z;",
+				{0xffffffffull, 0xffffffffull, 0}},
+			{"sub.cc s32 equal operands do not borrow",
+				"mov.s32 a, 7; sub.cc.s32 d0, a, a; mov.s32 h, 10; mov.s32 z, 0; subc.s32 d1, h, z;",
+				{0, 10}},
+			{"add.cc u64 carry into addc",
+				"mov.u64 a, 0xFFFFFFFFFFFFFFFF; mov.u64 one, 1; add.cc.u64 d0, a, one; mov.u64 h, 5; mov.u64 i, 6; addc.u64 d1, h, i;",
+				{0, 12}},
+			{"add.cc u64 without carry",
+				"mov.u64 a, 3; mov.u64 b, 4; add.cc.u64 d0, a, b; mov.u64 h, 5; mov.u64 i, 6; addc.u64 d1, h, i;",
+				{7, 11}},
+			{"addc.cc u64 carry from the incoming flag",
+				"mov.u64 a, 0xFFFFFFFFFFFFFFFF; mov.u64 one, 1; mov.u64 z, 0; add.cc.u64 d0, a, one; addc.cc.u64 d1, z, z; addc.u64 d2, z, z;",
+				{0, 1, 0}},
+			{"add.cc s64 signed values wrap without carry",
+				"mov.s64 a, 0x7FFFFFFFFFFFFFFF; mov.s64 one, 1; add.cc.s64 d0, a, one; mov.s64 h, 1; mov.s64 i, 1; addc.s64 d1, h, i;",
+				{0x8000000000000000ull, 2}},
+			{"sub.cc u64 borrow into subc",
+				"mov.u64 a, 3; mov.u64 b, 5; sub.cc.u64 d0, a, b; mov.u64 h, 10; mov.u64 i, 2; subc.u64 d1, h, i;",
+				{0xfffffffffffffffeull, 7}},
+			{"sub.cc u64 with b=0 reports no borrow",
+				"mov.u64 a, 5; mov.u64 z, 0; sub.cc.u64 d0, a, z; mov.u64 h, 10; subc.u64 d1, h, z;",
+				{5, 10}},
+			{"subc.cc s64 propagates borrow",
+				"mov.s64 z, 0; mov.s64 one, 1; sub.cc.s64 d0, z, one; subc.cc.s64 d1, z, z; subc.s64 d2, one, z;",
+				{0xffffffffffffffffull, 0xffffffffffffffffull, 0}},
+			// Carry-in 1 with both operands all ones must still carry out.
+			{"addc.cc u32 max + max + carry-in carries out",
+				"mov.u32 a, 0xFFFFFFFF; mov.u32 z, 0; add.cc.u32 d0, a, a; addc.cc.u32 d1, a, a; addc.u32 d2, z, z;",
+				{0xfffffffeull, 0xffffffffull, 1}},
+			{"addc.cc s32 max + max + carry-in carries out",
+				"mov.s32 a, -1; mov.s32 z, 0; add.cc.s32 d0, a, a; addc.cc.s32 d1, a, a; addc.s32 d2, z, z;",
+				{0xfffffffeull, 0xffffffffull, 1}},
+			// mad.cc / madc: d = t<hi or lo> + c (+ CC.CF); carry-out to CC.CF.
+			{"mad.lo.cc then madc.hi carries a word",
+				"mov.u32 a, 0xFFFFFFFF; mov.u32 b, 0xFFFFFFFF; mov.u32 c, 0xFFFFFFFF; mov.u32 z, 0; "
+				"mad.lo.cc.u32 d0, a, b, c; madc.hi.u32 d1, a, b, z;",
+				{0, 0xffffffffull}},
+			{"mad.lo.cc without carry",
+				"mov.u32 a, 0xFFFFFFFF; mov.u32 b, 0xFFFFFFFF; mov.u32 c, 1; mov.u32 z, 0; "
+				"mad.lo.cc.u32 d0, a, b, c; madc.hi.u32 d1, a, b, z;",
+				{2, 0xfffffffeull}},
+			{"mad.hi.cc keeps .hi and chains madc.lo.cc then madc.lo",
+				"mov.u32 a, 0xFFFFFFFF; mov.u32 one, 1; mov.u32 z, 0; "
+				"mad.hi.cc.u32 d0, a, a, a; madc.lo.cc.u32 d1, one, one, z; madc.lo.u32 d2, one, one, z;",
+				{0xfffffffdull, 2, 1}},
+			{"mad.lo.cc.s32 carries on the unsigned wrap",
+				"mov.s32 a, -1; mov.s32 b, 1; mov.s32 c, 1; mov.s32 z, 0; "
+				"mad.lo.cc.s32 d0, a, b, c; madc.hi.s32 d1, a, b, z;",
+				{0, 0}},
+			{"mad.lo.cc.u64 carry into madc.hi.u64",
+				"mov.u64 a, 3; mov.u64 b, 1; mov.u64 c, 0xFFFFFFFFFFFFFFFF; mov.u64 z, 0; "
+				"mad.lo.cc.u64 d0, a, b, c; madc.hi.u64 d1, a, b, z;",
+				{2, 1}},
+			{"mad.lo.cc.s64 carry into madc.hi.s64",
+				"mov.s64 a, 3; mov.s64 b, 1; mov.s64 c, -1; mov.s64 z, 0; "
+				"mad.lo.cc.s64 d0, a, b, c; madc.hi.s64 d1, a, b, z;",
+				{2, 1}}};
+		for (const auto& chain : chains) {
+			// Registers are typed per chain: width and sign come from the body.
+			std::string body = chain.body;
+			const bool wide = body.find("64") != std::string::npos;
+			const bool isSigned = body.find(".s32") != std::string::npos || body.find(".s64") != std::string::npos;
+			const std::string type = std::string(isSigned ? "s" : "u") + (wide ? "64" : "32");
+			std::stringstream kernelText;
+			kernelText << ".version 8.0\n.target sm_86\n.address_size 64\n"
+				<< ".visible .entry chain() { .reg ." << type << " a, b, c, h, i, z, one, d0, d1, d2; "
+				<< body << " ret; }\n";
+			Module module;
+			try { module.load(kernelText); }
+			catch (const std::exception& error) {
+				status << "extended-precision '" << chain.name << "' failed to parse: " << error.what() << "\n";
+				return false;
+			}
+			EmulatedKernel kernel(module.getKernel("chain"), nullptr);
+			kernel.setKernelShape(1, 1, 1);
+			CooperativeThreadArray local(&kernel, Dim3(), false);
+			local.reset();
+			try { local.execute(); }
+			catch (const std::exception& error) {
+				status << "extended-precision '" << chain.name << "' failed to run: " << error.what() << "\n";
+				return false;
+			}
+			size_t index = 0;
+			for (const auto& ins : kernel.instructions) {
+				const bool arithmetic = ins.opcode == PTXInstruction::Add || ins.opcode == PTXInstruction::Sub ||
+					ins.opcode == PTXInstruction::AddC || ins.opcode == PTXInstruction::SubC ||
+					ins.opcode == PTXInstruction::Mad || ins.opcode == PTXInstruction::MadC;
+				if (!arithmetic) continue;
+				const PTXU64 got = wide ? local.getRegAsU64(0, ins.d.reg) : local.getRegAsU32(0, ins.d.reg);
+				if (index >= chain.expected.size() || got != chain.expected[index]) {
+					status << "extended-precision '" << chain.name << "' result " << index
+						<< ": got 0x" << std::hex << got << ", expected 0x"
+						<< (index < chain.expected.size() ? chain.expected[index] : 0) << std::dec << "\n";
+					return false;
+				}
+				++index;
+			}
+			if (index != chain.expected.size()) {
+				status << "extended-precision '" << chain.name << "' ran " << index << " operations\n";
+				return false;
+			}
+		}
+		status << "Extended-precision test passed.\n";
+		return true;
+	}
+
+	// %warpid, %gridid, %clock64, %globaltimer, %total_smem_size and
+	// %dynamic_smem_size parse and read correctly (including 64-bit moves).
+	bool test_SpecialRegisters() {
+		std::stringstream ptx;
+		ptx << ".version 8.0\n.target sm_86\n.address_size 64\n"
+			<< ".visible .entry sregs() { .reg .u32 w, total, dynamic; .reg .u64 grid, c64, timer;\n"
+			<< " .shared .align 4 .b8 buf[64];\n"
+			<< " mov.u32 w, %warpid; mov.u64 grid, %gridid; mov.u64 c64, %clock64;"
+			<< " mov.u64 timer, %globaltimer; mov.u32 total, %total_smem_size;"
+			<< " mov.u32 dynamic, %dynamic_smem_size; ret; }\n";
+		Module module;
+		try { module.load(ptx); }
+		catch (const std::exception& error) {
+			status << "special register parse failed: " << error.what() << "\n";
+			return false;
+		}
+		EmulatedKernel kernel(module.getKernel("sregs"), nullptr);
+		kernel.setKernelShape(64, 1, 1);
+		kernel.setExternSharedMemorySize(128);
+		CooperativeThreadArray local(&kernel, Dim3(), false);
+		local.reset();
+		try { local.execute(); }
+		catch (const std::exception& error) {
+			status << "special register execution failed: " << error.what() << "\n";
+			return false;
+		}
+		std::vector<const PTXInstruction*> movs;
+		for (const auto& ins : kernel.instructions)
+			if (ins.opcode == PTXInstruction::Mov) movs.push_back(&ins);
+		if (movs.size() != 6) { status << "expected 6 movs, found " << movs.size() << "\n"; return false; }
+		for (int t = 0; t < 64; ++t) {
+			const PTXU32 warp = local.getRegAsU32(t, movs[0]->d.reg);
+			if (warp != (PTXU32)(t / 32)) { status << "%warpid of thread " << t << " is " << warp << "\n"; return false; }
+			if (local.getRegAsU64(t, movs[1]->d.reg) != 0) { status << "%gridid is not 0\n"; return false; }
+			if (local.getRegAsU64(t, movs[3]->d.reg) == 0) { status << "%globaltimer is 0\n"; return false; }
+			if (local.getRegAsU32(t, movs[4]->d.reg) != kernel.totalSharedMemorySize()) {
+				status << "%total_smem_size is " << local.getRegAsU32(t, movs[4]->d.reg)
+					<< ", expected " << kernel.totalSharedMemorySize() << "\n";
+				return false;
+			}
+			if (local.getRegAsU32(t, movs[5]->d.reg) != 128) {
+				status << "%dynamic_smem_size is " << local.getRegAsU32(t, movs[5]->d.reg) << "\n";
+				return false;
+			}
+		}
+		status << "Special register test passed.\n";
+		return true;
+	}
+
+	// pmevent a (event index 0..15) and pmevent.mask a (16-bit event mask)
+	// parse, print distinctly, execute as no-ops and reject out-of-range operands.
+	bool test_Pmevent() {
+		auto kernelText = [](const std::string& body) {
+			return ".version 8.0\n.target sm_86\n.address_size 64\n"
+				".visible .entry pm() { " + body + " ret; }\n";
+		};
+		const struct { const char* body; bool legal; const char* printed; } cases[] = {
+			{"pmevent 0;", true, "pmevent 0"},
+			{"pmevent 15;", true, "pmevent 15"},
+			{"pmevent.mask 0;", true, "pmevent.mask 0"},
+			{"pmevent.mask 0xffff;", true, "pmevent.mask 65535"},
+			{"pmevent 16;", false, ""},
+			{"pmevent.mask 0x10000;", false, ""}};
+		for (const auto& c : cases) {
+			std::stringstream source(kernelText(c.body));
+			bool parsed = true;
+			std::stringstream printed;
+			try { Module module; module.load(source); module.write(printed); }
+			catch (const std::exception&) { parsed = false; }
+			if (parsed != c.legal) {
+				status << "pmevent form '" << c.body << (c.legal ? "' was rejected\n" : "' was accepted\n");
+				return false;
+			}
+			if (c.legal && printed.str().find(c.printed) == std::string::npos) {
+				status << "pmevent form '" << c.body << "' printed as:\n" << printed.str() << "\n";
+				return false;
+			}
+		}
+		status << "Pmevent test passed.\n";
+		return true;
+	}
+
+	// nanosleep, discard and applypriority are hints: they must parse, print and
+	// execute as no-ops, and illegal spellings must be rejected.
+	bool test_NoOpHints() {
+		auto kernelText = [](const std::string& body) {
+			return ".version 8.0\n.target sm_86\n.address_size 64\n"
+				".visible .entry hints() { .reg .u32 t; .reg .u64 a; " + body + " ret; }\n";
+		};
+		const struct { const char* body; bool legal; const char* printed; } cases[] = {
+			{"nanosleep.u32 100;", true, "nanosleep.u32 100"},
+			{"nanosleep.u32 t;", true, "nanosleep.u32 "},
+			{"discard.global.L2 [a], 128;", true, "discard.global.L2 ["},
+			{"discard.L2 [a], 128;", true, "discard.L2 ["},
+			{"applypriority.global.L2::evict_normal [a], 128;", true, "applypriority.global.L2::evict_normal ["},
+			{"applypriority.L2::evict_normal [a], 128;", true, "applypriority.L2::evict_normal ["},
+			{"nanosleep.u64 100;", false, ""},
+			{"discard.global.L2 [a], 64;", false, ""},
+			{"discard.global.L1 [a], 128;", false, ""},
+			{"discard.shared.L2 [a], 128;", false, ""},
+			{"applypriority.global.L2::evict_last [a], 128;", false, ""}};
+		for (const auto& c : cases) {
+			std::stringstream source(kernelText(c.body));
+			bool parsed = true;
+			std::stringstream printed;
+			try { Module module; module.load(source); module.write(printed); }
+			catch (const std::exception&) { parsed = false; }
+			if (parsed != c.legal) {
+				status << "hint form '" << c.body << (c.legal ? "' was rejected\n" : "' was accepted\n");
+				return false;
+			}
+			if (c.legal && printed.str().find(c.printed) == std::string::npos) {
+				status << "hint form '" << c.body << "' printed as:\n" << printed.str() << "\n";
+				return false;
+			}
+		}
+		Module module;
+		try {
+			std::stringstream source(kernelText("nanosleep.u32 1; discard.global.L2 [a], 128; "
+				"applypriority.global.L2::evict_normal [a], 128;"));
+			module.load(source);
+			EmulatedKernel kernel(module.getKernel("hints"), nullptr);
+			kernel.setKernelShape(1, 1, 1);
+			CooperativeThreadArray local(&kernel, Dim3(), false);
+			local.reset();
+			local.execute();
+		}
+		catch (const std::exception& error) {
+			status << "hint kernel failed to run: " << error.what() << "\n";
+			return false;
+		}
+		status << "No-op hints test passed.\n";
+		return true;
+	}
+
+	// trap and brkpt must honor their guard predicate: nothing happens unless
+	// at least one thread executes the instruction.
+	bool test_TrapPredicate() {
+		cta->reset();
+		CTAContext& context = cta->getActiveContext();
+		const struct { PTXInstruction::Opcode opcode; CTAContext::ExecutionState fires; } cases[] = {
+			{PTXInstruction::Trap, CTAContext::Trap},
+			{PTXInstruction::Brkpt, CTAContext::Break}};
+		for (const auto& c : cases) {
+			PTXInstruction ins;
+			ins.opcode = c.opcode;
+			ins.pg.condition = PTXOperand::Pred;
+			ins.pg.reg = 3;
+			// Predicate false for every thread: must not fire.
+			for (int t = 0; t < threadCount; t++) cta->setRegAsPredicate(t, 3, false);
+			context.executionState = CTAContext::Running;
+			if (c.opcode == PTXInstruction::Trap) cta->eval_Trap(context, ins);
+			else cta->eval_Brkpt(context, ins);
+			if (context.executionState != CTAContext::Running) {
+				status << PTXInstruction::toString(c.opcode) << " fired with a false predicate\n";
+				context.executionState = CTAContext::Running;
+				return false;
+			}
+			// Predicate true for a single thread: must fire.
+			cta->setRegAsPredicate(1, 3, true);
+			if (c.opcode == PTXInstruction::Trap) cta->eval_Trap(context, ins);
+			else cta->eval_Brkpt(context, ins);
+			if (context.executionState != c.fires) {
+				status << PTXInstruction::toString(c.opcode) << " did not fire for a true predicate\n";
+				context.executionState = CTAContext::Running;
+				return false;
+			}
+			context.executionState = CTAContext::Running;
+		}
+		status << "Trap/brkpt predicate test passed.\n";
+		return true;
+	}
+
+	// mul24: t = a24 * b24 (low 24 bits; sign-extended from bit 23 for .s32);
+	// d = t<47..16> (.hi) or t<31..0> (.lo).
+	bool test_Mul24() {
+		PTXInstruction ins;
+		ins.opcode = PTXInstruction::Mul24;
+		cta->reset();
+		auto mul24 = [&](PTXOperand::DataType type, int modifier, PTXU32 a, PTXU32 b) {
+			ins.type = type; ins.modifier = modifier;
+			ins.d = reg("d", type, 0); ins.a = reg("a", type, 1);
+			ins.b = reg("b", type, 2);
+			cta->setRegAsU32(0, 1, a); cta->setRegAsU32(0, 2, b);
+			cta->eval_Mul24(cta->getActiveContext(), ins);
+			return cta->getRegAsU32(0, 0);
+		};
+		const PTXOperand::DataType u = PTXOperand::u32, s = PTXOperand::s32;
+		const int lo = PTXInstruction::lo, hi = PTXInstruction::hi;
+		const struct { const char* name; PTXOperand::DataType type; int mod;
+			PTXU32 a, b, expected; } cases[] = {
+			{"lo.u32 small", u, lo, 3, 4, 12},
+			{"lo.u32 max operands", u, lo, 0x00ffffff, 0x00ffffff, 0xfe000001},
+			{"hi.u32 max operands", u, hi, 0x00ffffff, 0x00ffffff, 0xfffffe00},
+			{"lo.u32 ignores bits 24-31", u, lo, 0xff000003, 4, 12},
+			{"hi.u32 ignores bits 24-31", u, hi, 0xff800000, 0x200, 0x10000},
+			{"lo.s32 negative", s, lo, (PTXU32)-3, 4, (PTXU32)-12},
+			{"lo.s32 bit 23 sign", s, lo, 0x00800000, 2, 0xff000000},
+			{"hi.s32 bit 23 sign", s, hi, 0x00800000, 2, (PTXU32)-256},
+			{"lo.s32 ignores bits 24-31", s, lo, 0xff000003, 4, 12},
+			{"hi.s32 max positive", s, hi, 0x007fffff, 0x007fffff, 0x3fffff00},
+			{"hi.s32 min times min", s, hi, 0x00800000, 0x00800000, 0x40000000},
+			{"hi.s32 min times max", s, hi, 0x00800000, 0x007fffff, (PTXU32)-1073741696}};
+		for (const auto& c : cases) {
+			const PTXU32 got = mul24(c.type, c.mod, c.a, c.b);
+			if (got != c.expected) {
+				status << "mul24 " << c.name << ": expected 0x" << std::hex
+					<< c.expected << ", got 0x" << got << std::dec << "\n";
+				return false;
+			}
+		}
+		status << "Mul24 test passed.\n";
+		return true;
+	}
+
+	// mad24: t = a24 * b24 (low 24 bits; sign-extended from bit 23 for .s32);
+	// d = t<47..16> + c (.hi) or t<31..0> + c (.lo); .sat clamps signed .hi.
+	bool test_Mad24() {
+		PTXInstruction ins;
+		ins.opcode = PTXInstruction::Mad24;
+		cta->reset();
+		auto mad24 = [&](PTXOperand::DataType type, int modifier,
+			PTXU32 a, PTXU32 b, PTXU32 c) {
+			ins.type = type; ins.modifier = modifier;
+			ins.d = reg("d", type, 0); ins.a = reg("a", type, 1);
+			ins.b = reg("b", type, 2); ins.c = reg("c", type, 3);
+			cta->setRegAsU32(0, 1, a); cta->setRegAsU32(0, 2, b);
+			cta->setRegAsU32(0, 3, c);
+			cta->eval_Mad24(cta->getActiveContext(), ins);
+			return cta->getRegAsU32(0, 0);
+		};
+		const PTXOperand::DataType u = PTXOperand::u32, s = PTXOperand::s32;
+		const int lo = PTXInstruction::lo, hi = PTXInstruction::hi;
+		const int hiSat = hi | PTXInstruction::sat;
+		const struct { const char* name; PTXOperand::DataType type; int mod;
+			PTXU32 a, b, c, expected; } cases[] = {
+			{"lo.u32 small", u, lo, 3, 4, 5, 17},
+			{"lo.u32 max operands", u, lo, 0x00ffffff, 0x00ffffff, 1, 0xfe000002},
+			{"hi.u32 max operands", u, hi, 0x00ffffff, 0x00ffffff, 0, 0xfffffe00},
+			{"hi.u32 wraps", u, hi, 0x00ffffff, 0x00ffffff, 0x200, 0},
+			{"lo.u32 ignores bits 24-31", u, lo, 0xff000003, 4, 0, 12},
+			{"lo.s32 negative", s, lo, (PTXU32)-3, 4, 5, (PTXU32)-7},
+			{"lo.s32 bit 23 sign", s, lo, 0x00800000, 2, 0, 0xff000000},
+			{"hi.s32 bit 23 sign", s, hi, 0x00800000, 2, 1, (PTXU32)-255},
+			{"lo.s32 ignores bits 24-31", s, lo, 0xff000003, 4, 0, 12},
+			{"hi.s32 wraps", s, hi, 0x007fffff, 0x007fffff, 0x7fffffff,
+				(PTXU32)(1073741568u + 0x7fffffffu)},
+			{"hi.sat.s32 max", s, hiSat, 0x007fffff, 0x007fffff, 0x7fffffff, 0x7fffffff},
+			{"hi.sat.s32 min", s, hiSat, 0x00800000, 0x007fffff, 0x80000000, 0x80000000},
+			{"hi.sat.s32 in range", s, hiSat, 0x00800000, 2, 1, (PTXU32)-255}};
+		for (const auto& c : cases) {
+			const PTXU32 got = mad24(c.type, c.mod, c.a, c.b, c.c);
+			if (got != c.expected) {
+				status << "mad24 " << c.name << ": expected 0x" << std::hex
+					<< c.expected << ", got 0x" << got << std::dec << "\n";
+				return false;
+			}
+		}
+		status << "Mad24 test passed.\n";
+		return true;
+	}
+
+	// Dense mma C/D fragments hold 32-bit registers (everything except f64).
+	// A .b64 register must be rejected, a .b32 register accepted.
+	bool test_MmaCdWidth() {
+		const struct { const char* form; int a, b, cd; } forms[] = {
+			{"m16n8k16.row.col.s32.s8.s8.s32", 2, 1, 4},
+			{"m16n8k8.row.col.f32.tf32.tf32.f32", 4, 2, 4},
+			{"m16n8k16.row.col.f32.bf16.bf16.f32", 4, 2, 4},
+			{"m16n8k16.row.col.f32.f16.f16.f32", 4, 2, 4},
+			{"m16n8k16.row.col.f16.f16.f16.f16", 4, 2, 2},
+			{"m8n8k4.row.col.f32.f16.f16.f32", 2, 2, 8},
+			{"m8n8k32.row.col.s32.s4.s4.s32", 1, 1, 2},
+			{"m8n8k128.row.col.s32.b1.b1.s32.xor.popc", 1, 1, 2}};
+		auto list = [](const char* prefix, int count) {
+			std::stringstream text; text << "{";
+			for (int i = 0; i < count; ++i) text << (i ? ", " : "") << prefix << i;
+			text << "}"; return text.str();
+		};
+		auto accepted = [&](const auto& f, const char* width) {
+			std::stringstream ptx;
+			ptx << ".version 8.0\n.target sm_86\n.address_size 64\n"
+				<< ".visible .entry mma_width() { .reg .b32 a<8>; .reg .b32 b<8>; "
+				<< ".reg ." << width << " c<8>; .reg ." << width << " d<8>; "
+				<< "mma.sync.aligned." << f.form << " " << list("d", f.cd) << ", "
+				<< list("a", f.a) << ", " << list("b", f.b) << ", "
+				<< list("c", f.cd) << "; ret; }\n";
+			try { Module module; module.load(ptx); return true; }
+			catch (const std::exception&) { return false; }
+		};
+		for (const auto& f : forms) {
+			if (!accepted(f, "b32")) {
+				status << "mma " << f.form << " rejected 32-bit C/D registers\n";
+				return false;
+			}
+			if (accepted(f, "b64")) {
+				status << "mma " << f.form << " accepted .b64 C/D registers\n";
+				return false;
+			}
+		}
+		status << "Mma C/D width test passed.\n";
 		return true;
 	}
 
@@ -1218,7 +1649,8 @@ public:
 		//
 		if (result) {
 			ins.type = PTXOperand::u32;
-			ins.cc = PTXInstruction::CC;
+			ins.carry = PTXInstruction::CC;
+			ins.pq = reg("r3", PTXOperand::u32, 6);	// carry-out lands in the flag register
 			ins.a = imm_uint("r2", PTXOperand::u32, 0x0fffffffe);
 			ins.b = reg("r1", PTXOperand::u32, 0);
 			ins.c = reg("r3", PTXOperand::u32, 6);
@@ -1227,21 +1659,22 @@ public:
 			for (int i = 0; i < threadCount; i++) {
 				cta->setRegAsU32(i, 0, (PTXU32)(i * 2));
 				cta->setRegAsU32(i, 5, 0);
-				cta->setRegAsU32(i, 6, 1);	// set the carry flag
+				cta->setRegAsU32(i, 6, 1);	// CC.CF = 1: borrow-in
 			}
 			cta->eval_SubC(cta->getActiveContext(), ins);
 			for (int i = 0; i < threadCount; i++) {
-				PTXU32 expected = (0x0fffffffe - ((PTXU32)(i*2)));
+				// subc: d = a - (b + CC.CF)
+				PTXU32 expected = (0x0fffffffe - ((PTXU32)(i*2)) - 1);
 				if (cta->getRegAsU32(i, 5) != expected) {
 					result = false;
 					status << "subc.u32 incorrect - got " << cta->getRegAsU32(i,5) 
 						<< ", expected " << expected << "\n";
 					break;
 				}
-				// verify carry		
-				if (cta->getRegAsU32(i, 6) != 1) {
+				// a > b + CF here, so there is no borrow-out
+				if (cta->getRegAsU32(i, 6) != 0) {
 					result = false;
-					status << "subc.u32 failed to set borrow bit\n";
+					status << "subc.u32 set a borrow-out it should not have\n";
 					break;
 				}		
 			}
@@ -1251,7 +1684,8 @@ public:
 		//
 		if (result) {
 			ins.type = PTXOperand::s32;
-			ins.cc = PTXInstruction::CC;
+			ins.carry = PTXInstruction::CC;
+			ins.pq = reg("r3", PTXOperand::u32, 6);	// carry-out lands in the flag register
 			ins.a = imm_uint("r2", PTXOperand::s32, 0x0fffffffe);
 			ins.b = reg("r1", PTXOperand::s32, 0);
 			ins.c = reg("r3", PTXOperand::s32, 6);
@@ -1260,20 +1694,20 @@ public:
 			for (int i = 0; i < threadCount; i++) {
 				cta->setRegAsS32(i, 0, (PTXS32)(i * 2));
 				cta->setRegAsS32(i, 5, 0);
-				cta->setRegAsU32(i, 6, 1);	// set the carry flag
+				cta->setRegAsU32(i, 6, 1);	// CC.CF = 1: borrow-in
 			}
 			cta->eval_SubC(cta->getActiveContext(), ins);
 			for (int i = 0; i < threadCount; i++) {
-				PTXS32 expected = (0x0fffffffe - ((PTXS32)(i*2)));
+				PTXS32 expected = (0x0fffffffe - ((PTXS32)(i*2)) - 1);
 				if (cta->getRegAsS32(i, 5) != expected) {
 					result = false;
 					status << "subc.s32 incorrect\n";
 					break;
 				}
-				// verify carry			
-				if (cta->getRegAsS32(i, 6) != 1) {
+				// a > b + CF here, so there is no borrow-out
+				if (cta->getRegAsS32(i, 6) != 0) {
 					result = false;
-					status << "subc.s32 failed to set borrow bit\n";
+					status << "subc.s32 set a borrow-out it should not have\n";
 					break;
 				}				
 			}
@@ -11642,6 +12076,51 @@ public:
 		return true;
 	}
 
+	// cvta.to.<space> of a generic address outside that space's window is
+	// undefined in PTX (no trap on hardware): it must not throw, and returns the
+	// address minus the window base, wrapping at the operand width.
+	bool test_CvtaOutsideWindow() {
+		cta->reset();
+		const struct { PTXInstruction::AddressSpace space; PTXU64 base; } spaces[] = {
+			{PTXInstruction::Shared,
+				reinterpret_cast<PTXU64>(cta->functionCallStack.sharedMemoryPointer())},
+			{PTXInstruction::Param, reinterpret_cast<PTXU64>(kernel->ArgumentMemory)}};
+		const PTXU64 outside = 6;
+		for (const auto& c : spaces) {
+			for (PTXOperand::DataType type : {PTXOperand::u32, PTXOperand::u64}) {
+				PTXInstruction ins;
+				ins.opcode = PTXInstruction::Cvta;
+				ins.addressSpace = c.space;
+				ins.toAddrSpace = true;
+				ins.type = type;
+				ins.d = reg("d", type, 1);
+				ins.a = reg("a", type, 0);
+				for (int thread = 0; thread < threadCount; ++thread) {
+					if (type == PTXOperand::u32) cta->setRegAsU32(thread, 0, (PTXU32)outside);
+					else cta->setRegAsU64(thread, 0, outside);
+				}
+				try { cta->eval_Cvta(cta->getActiveContext(), ins); }
+				catch (const std::exception& error) {
+					status << "cvta.to." << PTXInstruction::toString(c.space) << "."
+						<< PTXOperand::toString(type) << " threw: " << error.what() << "\n";
+					return false;
+				}
+				const PTXU64 expected = type == PTXOperand::u32
+					? (PTXU64)(PTXU32)((PTXU32)outside - (PTXU32)c.base) : outside - c.base;
+				const PTXU64 got = type == PTXOperand::u32
+					? cta->getRegAsU32(0, 1) : cta->getRegAsU64(0, 1);
+				if (got != expected) {
+					status << "cvta.to." << PTXInstruction::toString(c.space) << "."
+						<< PTXOperand::toString(type) << " gave 0x" << std::hex << got
+						<< ", expected 0x" << expected << std::dec << "\n";
+					return false;
+				}
+			}
+		}
+		status << "Cvta outside-window test passed.\n";
+		return true;
+	}
+
 	/////////////////////////////////////////////////////////////////////////////////////////////////
 	//
 	// set, setp, selp, slct
@@ -12785,6 +13264,7 @@ public:
 			// cvt instruction
 			result = (result && test_Cvt());
 			result = (result && test_Cvta());
+			result = (result && test_CvtaOutsideWindow());
 			result = (result && test_Isspacep());
 			result = (result && test_IsspacepConst());
 			result = (result && test_IsspacepParam());
@@ -12841,6 +13321,14 @@ public:
 			// arithmetic instructions
 			result = (result && test_Abs());
 			result = (result && test_HexLiteral64());
+			result = (result && test_ExtendedPrecision());
+			result = (result && test_SpecialRegisters());
+			result = (result && test_Pmevent());
+			result = (result && test_NoOpHints());
+			result = (result && test_TrapPredicate());
+			result = (result && test_Mul24());
+			result = (result && test_Mad24());
+			result = (result && test_MmaCdWidth());
 			result = (result && test_Add());
 			result = (result && test_Sub());
 			result = (result && test_AddSubRounding());

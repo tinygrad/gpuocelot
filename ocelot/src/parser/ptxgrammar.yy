@@ -62,7 +62,8 @@
 %token<text> OPCODE_BRA OPCODE_CALL OPCODE_RET OPCODE_EXIT OPCODE_TRAP 
 %token<text> OPCODE_BRKPT OPCODE_SUBC OPCODE_TEX OPCODE_LD OPCODE_BARSYNC
 %token<text> OPCODE_ATOM OPCODE_RED OPCODE_MATCH OPCODE_REDUX OPCODE_NOT OPCODE_CNOT OPCODE_VOTE
-%token<text> OPCODE_SHR OPCODE_SHL OPCODE_FMA OPCODE_MEMBAR OPCODE_PMEVENT
+%token<text> OPCODE_SHR OPCODE_SHL OPCODE_FMA OPCODE_MEMBAR OPCODE_PMEVENT OPCODE_PMEVENT_MASK
+%token<text> OPCODE_NANOSLEEP OPCODE_DISCARD OPCODE_APPLYPRIORITY
 %token<text> OPCODE_POPC OPCODE_PRMT OPCODE_CLZ OPCODE_BFIND OPCODE_BREV 
 %token<text> OPCODE_BFI OPCODE_BFE OPCODE_BMSK OPCODE_FNS OPCODE_TANH OPCODE_TESTP OPCODE_TLD4 OPCODE_BAR
 %token<text> OPCODE_WMMA_MMA
@@ -710,7 +711,7 @@ opcode : OPCODE_COS | OPCODE_SQRT | OPCODE_ADD | OPCODE_RSQRT | OPCODE_ADDC
 	| OPCODE_BARSYNC | OPCODE_SULD | OPCODE_TXQ | OPCODE_SUST | OPCODE_SURED 
 	| OPCODE_SUQ | OPCODE_SZEXT | OPCODE_ATOM | OPCODE_RED | OPCODE_REDUX | OPCODE_MATCH | OPCODE_NOT | OPCODE_CNOT
 	| OPCODE_VOTE | OPCODE_SHR | OPCODE_SHL | OPCODE_MEMBAR | OPCODE_FENCE | OPCODE_FMA
-	| OPCODE_PMEVENT | OPCODE_POPC | OPCODE_CLZ | OPCODE_BFIND | OPCODE_BREV
+	| OPCODE_PMEVENT | OPCODE_NANOSLEEP | OPCODE_DISCARD | OPCODE_APPLYPRIORITY | OPCODE_POPC | OPCODE_CLZ | OPCODE_BFIND | OPCODE_BREV
 	| OPCODE_BFI | OPCODE_BMSK | OPCODE_FNS | OPCODE_TANH | OPCODE_TESTP | OPCODE_TLD4
 	| OPCODE_PREFETCH | OPCODE_PREFETCHU | OPCODE_CREATEPOLICY
 	| OPCODE_MBAR_INIT | OPCODE_MBAR_INVAL | OPCODE_MBAR_ARRIVE | OPCODE_MBAR_PENDING | OPCODE_MBAR_WAIT | OPCODE_MBAR_CP | OPCODE_CP_ASYNC | OPCODE_CP_COMMIT | OPCODE_CP_WAIT_GROUP | OPCODE_CP_WAIT_ALL;
@@ -959,7 +960,7 @@ instruction : activemask | ftzInstruction2 | ftzInstruction3 | approxInstruction
 	| basicInstruction3 | bfe | bfi | bfind | bmsk | brev | branch | addOrSub
 	| addCOrSubC | atom | bar | brkpt | clz | cvt | cvta | isspacep | div | dp2a | dp4a | exit
 	| fence | fns | ld | ldu | ldmatrix | lop3 | mad | mad24 | madc | mma | membar | mov | movmatrix | mul24 | mul | notInstruction
-	| wmmaMma | wmmaMemory | mbarrier | cpAsync | cpAsyncWait | pmevent | popc | prefetch | prefetchu | createpolicy | prmt | rcpSqrtInstruction | red | redux | match
+	| wmmaMma | wmmaMemory | mbarrier | cpAsync | cpAsyncWait | pmevent | nanosleep | discard | applypriority | popc | prefetch | prefetchu | createpolicy | prmt | rcpSqrtInstruction | red | redux | match
 	| ret | sad | selp | set | setp | slct | st | suld | suq | sured | sust | szext
 	| testp | tex | tld4 | trap | txq | vote | shfl | shf;
 
@@ -1501,6 +1502,7 @@ mulModifier : roundHiLoWide optionalFtz optionalSaturate
 
 mulModifier : hiOrLo TOKEN_CARRY
 {
+	state.modifier( $<value>1 );
 	state.carry( true );
 };
 
@@ -1546,6 +1548,7 @@ madc : OPCODE_MADC madCModifier dataType operand ',' operand
 	',' operand ',' operand ';'
 {
 	state.instruction( $<text>1, $<value>3 );
+	state.madcCarryIn();
 };
 
 membarSpaceType : TOKEN_GL | TOKEN_CTA | TOKEN_SYS;
@@ -1627,9 +1630,34 @@ notInstruction : notOpcode dataType operand ',' operand ';'
 	state.instruction( $<text>1, $<value>2 );
 };
 
-pmevent : OPCODE_PMEVENT operand
+pmevent : OPCODE_PMEVENT operand ';'
 {
 	state.instruction( $<text>1 );
+};
+
+pmevent : OPCODE_PMEVENT_MASK operand ';'
+{
+	state.pmeventMask( true );
+	state.instruction( "pmevent" );
+};
+
+nanosleep : OPCODE_NANOSLEEP dataType operand ';'
+{
+	state.instruction( $<text>1, $<value>2 );
+};
+
+/* discard{.global}.L2 [a], 128; (sm_80) */
+discard : OPCODE_DISCARD optionalAddressSpace cacheLevel '[' memoryOperand ']' ',' operand ';'
+{
+	state.instruction( $<text>1 );
+};
+
+/* applypriority{.global}.L2::evict_normal [a], 128; (sm_80) */
+applypriority : OPCODE_APPLYPRIORITY optionalAddressSpace TOKEN_EVICT_NORMAL '[' memoryOperand ']' ',' operand ';'
+{
+	state.instruction( $<text>1 );
+	state.statement.instruction.cacheLevel = ir::PTXInstruction::L2;
+	state.statement.instruction.l2Evict = 0;
 };
 
 popc : OPCODE_POPC dataType operand ',' operand ';'

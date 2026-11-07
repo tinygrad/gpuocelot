@@ -448,6 +448,9 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case Not:        return "not";        break;
 		case Or:         return "or";         break;
 		case Pmevent:    return "pmevent";    break;
+		case Nanosleep:  return "nanosleep";  break;
+		case Discard:    return "discard";    break;
+		case Applypriority: return "applypriority"; break;
 		case Popc:       return "popc";       break;
 		case Prefetch:   return "prefetch";   break;
 		case CpAsync: return "cp.async";
@@ -555,6 +558,7 @@ ir::PTXInstruction::PTXInstruction( Opcode op, const PTXOperand& _d,
 	addressSpace = AddressSpace_Invalid;
 	tailCall = false;
 	mmio = false;
+	pmeventMask = false;
 	cacheHint = false;
 	prefetchSize = 0;
 	l1Evict = -1;
@@ -802,7 +806,8 @@ std::string ir::PTXInstruction::valid() const {
 				if( ( modifier & sat ) ) {
 					return "saturate not supported with carry out";
 				}
-				if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ) ) {
+				if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ||
+					type == PTXOperand::u64 || type == PTXOperand::s64 ) ) {
 					return "invalid instruction type " 
 						+ PTXOperand::toString( type );
 				}
@@ -828,7 +833,8 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case AddC: {
-			if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ) ) {
+			if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ||
+				type == PTXOperand::u64 || type == PTXOperand::s64 ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
@@ -1771,6 +1777,14 @@ std::string ir::PTXInstruction::valid() const {
 					}
 				}
 			}
+			// C/D fragments hold 32-bit registers in every form except f64.
+			if (a.type != PTXOperand::f64) {
+				for (const PTXOperand* operand : {&c, &d}) {
+					for (const auto& element : operand->array) {
+						if (element.bytes() != 4) return "mma C/D registers must be 32-bit";
+					}
+				}
+			}
 			if ((mmaAColumnMajor || !mmaBColumnMajor) &&
 				(mmaShape != MmaM8N8K4 || a.type != PTXOperand::f16)) {
 				return "this mma form requires row.col layouts";
@@ -1996,7 +2010,8 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case MadC: {
-			if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ) ) {
+			if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ||
+				type == PTXOperand::u64 || type == PTXOperand::s64 ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
@@ -2287,9 +2302,47 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			break;
 		}
+		case Nanosleep: {
+			if( type != PTXOperand::u32 ) {
+				return "nanosleep requires .u32, not " + PTXOperand::toString( type );
+			}
+			if( !( d.addressMode == PTXOperand::Register
+				|| d.addressMode == PTXOperand::Immediate ) ) {
+				return "nanosleep operand must be a register or an immediate";
+			}
+			break;
+		}
+		case Discard:
+		case Applypriority: {
+			const std::string name = ( opcode == Discard ) ? "discard" : "applypriority";
+			if( !( addressSpace == Global || addressSpace == Generic ) ) {
+				return name + " address space must be .global or generic, not "
+					+ toString( addressSpace );
+			}
+			if( cacheLevel != L2 ) {
+				return name + " requires .L2";
+			}
+			if( opcode == Applypriority && l2Evict != 0 ) {
+				return "applypriority requires .L2::evict_normal";
+			}
+			if( !( d.addressMode == PTXOperand::Indirect
+				|| d.addressMode == PTXOperand::Address
+				|| d.addressMode == PTXOperand::Immediate ) ) {
+				return name + " address must be Indirect, Address or Immediate, not "
+					+ PTXOperand::toString( d.addressMode );
+			}
+			if( a.addressMode != PTXOperand::Immediate || a.imm_uint != 128 ) {
+				return name + " size must be the immediate 128";
+			}
+			break;
+		}
 		case Pmevent: {
 			if( d.addressMode != PTXOperand::Immediate ) {
 				return "only support Immediate targets";
+			}
+			if( pmeventMask ? d.imm_uint > 0xffffu : d.imm_uint > 15u ) {
+				return pmeventMask ? "pmevent.mask operand must fit in 16 bits"
+					: "pmevent event index must be in 0..15";
 			}
 			break;
 		}
@@ -2922,7 +2975,8 @@ std::string ir::PTXInstruction::valid() const {
 				if( ( modifier & sat ) ) {
 					return "saturate not supported with carry out";
 				}
-				if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ) ) {
+				if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ||
+					type == PTXOperand::u64 || type == PTXOperand::s64 ) ) {
 					return "invalid instruction type " 
 						+ PTXOperand::toString( type );
 				}
@@ -2948,7 +3002,8 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case SubC: {
-			if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ) ) {
+			if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ||
+				type == PTXOperand::u64 || type == PTXOperand::s64 ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
@@ -3592,8 +3647,20 @@ std::string ir::PTXInstruction::toString() const {
 			return guard() + "not." + PTXOperand::toString( type ) + " "
 				+ d.toString() + ", " + a.toString();
 		}
+		case Nanosleep: {
+			return guard() + "nanosleep.u32 " + d.toString();
+		}
+		case Discard: {
+			return guard() + "discard" + ( addressSpace == Global ? ".global" : "" )
+				+ ".L2 [" + d.toString() + "], " + a.toString();
+		}
+		case Applypriority: {
+			return guard() + "applypriority" + ( addressSpace == Global ? ".global" : "" )
+				+ ".L2::evict_normal [" + d.toString() + "], " + a.toString();
+		}
 		case Pmevent: {
-			return guard() + "pmevent." + toString( level );
+			return guard() + (pmeventMask ? "pmevent.mask " : "pmevent ")
+				+ d.toString();
 		}
 		case Popc: {
 			return guard() + "popc." + PTXOperand::toString( type ) + " "
