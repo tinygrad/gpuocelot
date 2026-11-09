@@ -470,6 +470,8 @@ static ir::PTXF32 minMaxF32(int modifier, ir::PTXF32 a,
 		d = b;
 	} else if (hydrazine::isnan(b)) {
 		d = a;
+	} else if (a == 0 && b == 0) {
+		d = maximum ? (std::signbit(a) ? b : a) : (std::signbit(a) ? a : b);
 	} else {
 		d = maximum ? (a > b ? a : b) : (a < b ? a : b);
 	}
@@ -6808,6 +6810,10 @@ void executive::CooperativeThreadArray::eval_Max(CTAContext &context,
 			{
 				d = a;
 			}
+			else if (a == 0 && b == 0)
+			{
+				d = std::signbit(a) ? b : a;
+			}
 			else
 			{
 				d = (a > b ? a : b);
@@ -6959,6 +6965,10 @@ void executive::CooperativeThreadArray::eval_Min(CTAContext &context,
 			else if(hydrazine::isnan(b))
 			{
 				d = a;
+			}
+			else if (a == 0 && b == 0)
+			{
+				d = std::signbit(a) ? a : b;
 			}
 			else
 			{
@@ -8816,26 +8826,30 @@ void executive::CooperativeThreadArray::eval_Sad(CTAContext &context,
 	{
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
-			ir::PTXS32 d, a = operandAsS32(threadID, instr.a),
+			ir::PTXS32 a = operandAsS32(threadID, instr.a),
 				b = operandAsS32(threadID, instr.b),
 				c = operandAsS32(threadID, instr.c);
 
-			d = c + ((a < b) ? b-a : a-b);
+			// Compare signed values; subtract and accumulate with unsigned wraparound.
+			const ir::PTXU32 ua = a, ub = b;
+			const ir::PTXU32 d = static_cast<ir::PTXU32>(c) + ((a < b) ? ub-ua : ua-ub);
 
-			setRegAsS32(threadID, instr.d.reg, d);
+			setRegAsU32(threadID, instr.d.reg, d);
 		}
 	} break;
 	case ir::PTXOperand::s64:
 	{
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
-			ir::PTXS64 d, a = operandAsS64(threadID, instr.a),
+			ir::PTXS64 a = operandAsS64(threadID, instr.a),
 				b = operandAsS64(threadID, instr.b),
 				c = operandAsS64(threadID, instr.c);
 
-			d = c + ((a < b) ? b-a : a-b);
+			// Compare signed values; subtract and accumulate with unsigned wraparound.
+			const ir::PTXU64 ua = a, ub = b;
+			const ir::PTXU64 d = static_cast<ir::PTXU64>(c) + ((a < b) ? ub-ua : ua-ub);
 
-			setRegAsS64(threadID, instr.d.reg, d);
+			setRegAsU64(threadID, instr.d.reg, d);
 		}
 	} break;
 	default:

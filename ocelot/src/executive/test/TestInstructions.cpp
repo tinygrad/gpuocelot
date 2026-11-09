@@ -1716,6 +1716,60 @@ public:
 		return result;
 	}
 
+	bool test_MinMaxSignedZero() {
+		for (auto type : {PTXOperand::f32, PTXOperand::f64}) {
+			for (bool maximum : {false, true}) {
+				for (int signs = 0; signs < 4; ++signs) {
+					PTXInstruction ins(maximum ? PTXInstruction::Max : PTXInstruction::Min);
+					ins.type = type;
+					ins.a = reg("a", type, 0);
+					ins.b = reg("b", type, 1);
+					ins.d = reg("d", type, 2);
+					const PTXU64 sign = PTXU64(1) << (type == PTXOperand::f32 ? 31 : 63);
+					cta->setRegAsU64(0, 0, (signs & 1) ? sign : 0);
+					cta->setRegAsU64(0, 1, (signs & 2) ? sign : 0);
+					if (maximum) cta->eval_Max(cta->getActiveContext(), ins);
+					else cta->eval_Min(cta->getActiveContext(), ins);
+					const PTXU64 got = type == PTXOperand::f32 ? cta->getRegAsU32(0, 2) : cta->getRegAsU64(0, 2);
+					const PTXU64 expected = (maximum ? signs == 3 : signs != 0) ? sign : 0;
+					if (got != expected) {
+						status << "min/max signed zero mismatch " << ins.toString() << " signs " << signs << "\n";
+						return false;
+					}
+				}
+			}
+		}
+		return true;
+	}
+
+	bool test_SadOverflow() {
+		for (auto type : {PTXOperand::s32, PTXOperand::s64}) {
+			const PTXU64 sign = PTXU64(1) << (type == PTXOperand::s32 ? 31 : 63);
+			const PTXU64 mask = sign | (sign - 1);
+			const PTXU64 cases[][4] = {{sign, 1, 0, sign + 1}, {1, sign, 0, sign + 1},
+				{sign, sign - 1, 0, mask}, {sign - 1, sign, 1, 0},
+				{sign - 1, sign, sign - 1, sign - 2}, {sign, sign, mask, mask}, {mask, 1, 0, 2}};
+			PTXInstruction ins(PTXInstruction::Sad);
+			ins.type = type;
+			ins.a = reg("a", type, 0);
+			ins.b = reg("b", type, 1);
+			ins.c = reg("c", type, 2);
+			ins.d = reg("d", type, 3);
+			for (const auto& values : cases) {
+				for (int r = 0; r < 3; ++r) {
+					cta->setRegAsU64(0, r, values[r]);
+				}
+				cta->eval_Sad(cta->getActiveContext(), ins);
+				const PTXU64 got = type == PTXOperand::s32 ? cta->getRegAsU32(0, 3) : cta->getRegAsU64(0, 3);
+				if (got != values[3]) {
+					status << "sad overflow mismatch " << ins.toString() << "\n";
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
 	/*!
 		Sum of absolute differences
 
@@ -13335,6 +13389,8 @@ public:
 			result = (result && test_Div());
 			result = (result && test_Neg());
 			result = (result && test_Rem());
+			result = (result && test_MinMaxSignedZero());
+			result = (result && test_SadOverflow());
 			result = (result && test_Sad());
 			result = (result && test_Min());
 			result = (result && test_Max());

@@ -626,146 +626,136 @@ static bool halfComparison( ir::PTXInstruction::CmpOp op ) {
 }
 
 std::string ir::PTXInstruction::valid() const {
-	if (opcode == WmmaMma) {
-		if (a.type != b.type) return "WMMA multiplicands must have identical element types";
-		const PTXOperand* fragments[] = {&a,&b,&c,&d}; const char roles[] = {'a','b','c','d'};
-		for (int i = 0; i < 4; ++i) {
-			const unsigned int count = wmmaFragmentRegisters(roles[i],fragments[i]->type);
-			if (!count || fragments[i]->array.size() != count) return "invalid WMMA MMA fragment shape, type or length";
-			for (const auto& reg : fragments[i]->array) {
-				if (reg.addressMode != PTXOperand::Register || reg.vec != PTXOperand::v1 || !reg.array.empty() || reg.bytes() != (fragments[i]->type == PTXOperand::f64 ? 8 : 4)) return "invalid WMMA MMA register container";
-			}
-		}
-		const bool integer = a.type == PTXOperand::s8 || a.type == PTXOperand::u8 || a.type == PTXOperand::s4 || a.type == PTXOperand::u4 || a.type == PTXOperand::b1;
-		if (integer ? (type != PTXOperand::s32 || c.type != PTXOperand::s32) : a.type == PTXOperand::f16 ?
-			((type != PTXOperand::f16 && type != PTXOperand::f32) || (c.type != PTXOperand::f16 && c.type != PTXOperand::f32)) :
-			(type != (a.type == PTXOperand::f64 ? PTXOperand::f64 : PTXOperand::f32) || c.type != type)) return "invalid WMMA accumulator types";
-		if ((a.type == PTXOperand::s4 || a.type == PTXOperand::u4 || a.type == PTXOperand::b1) && (mmaAColumnMajor || !mmaBColumnMajor)) return "sub-byte WMMA requires row/column multiplicands";
-		if (a.type == PTXOperand::b1 ? (booleanOperator != BoolAnd && booleanOperator != BoolXor) : booleanOperator != BoolNop) return "invalid WMMA bit operation";
-		if (a.type == PTXOperand::f64 ? (modifier && modifier != rn && modifier != rz && modifier != rm && modifier != rp) :
-			(modifier && (!integer || a.type == PTXOperand::b1 || modifier != satfinite))) return "invalid WMMA rounding or saturation modifier";
-		return "";
-	}
-	if (opcode == WmmaLoadA || opcode == WmmaLoadB || opcode == WmmaLoadC || opcode == WmmaStoreD) {
-		const bool store = opcode == WmmaStoreD;
-		const char matrix = store ? 'd' : opcode == WmmaLoadA ? 'a' : opcode == WmmaLoadB ? 'b' : 'c';
-		const auto& fragment = store ? a : d; const auto& address = store ? d : a;
-		const unsigned int count = wmmaFragmentRegisters(matrix,type);
-		if (!count || fragment.array.size() != count || modifier) return "invalid WMMA memory shape, type or fragment length";
-		for (const auto& reg : fragment.array) {
-			if (reg.addressMode != PTXOperand::Register || reg.vec != PTXOperand::v1 || !reg.array.empty() || reg.bytes() != (type == PTXOperand::f64 ? 8 : 4)) return "invalid WMMA fragment register";
-		}
-		if ((type == PTXOperand::s4 || type == PTXOperand::u4 || type == PTXOperand::b1) && mmaAColumnMajor != (matrix == 'b')) return "sub-byte WMMA multiplicands require A row and B column layouts";
-		if (addressSpace != Global && addressSpace != Shared && addressSpace != Generic) return "invalid WMMA memory space";
-		if (address.vec != PTXOperand::v1 || !address.array.empty() || (address.addressMode != PTXOperand::Address &&
-			((address.addressMode != PTXOperand::Indirect && address.addressMode != PTXOperand::Register && address.addressMode != PTXOperand::Immediate) ||
-			(!PTXOperand::isInt(address.type) && address.type != PTXOperand::b32 && address.type != PTXOperand::b64) || (address.bytes() != 4 && address.bytes() != 8)))) return "invalid WMMA address";
-		if (b.addressMode != PTXOperand::Invalid && ((b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) || b.vec != PTXOperand::v1 || !b.array.empty() ||
-			(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32) || (b.addressMode == PTXOperand::Register && b.bytes() != 4))) return "WMMA stride must be a scalar 32-bit integer";
-		return "";
-	}
-	if (opcode == MbarrierPendingCount) {
-		if (type != PTXOperand::b64 || d.addressMode != PTXOperand::Register || d.vec != PTXOperand::v1 || !d.array.empty() ||
-			(!PTXOperand::isInt(d.type) && d.type != PTXOperand::b32) || d.bytes() != 4) return "mbarrier.pending_count needs a scalar 32-bit destination";
-		if (a.addressMode != PTXOperand::Register || a.vec != PTXOperand::v1 || !a.array.empty() || !PTXOperand::valid(PTXOperand::b64,a.type)) return "mbarrier.pending_count needs a scalar 64-bit state register";
-		return "";
-	}
-	if (opcode == MbarrierInit || opcode == MbarrierInval || opcode == MbarrierArrive || opcode == MbarrierArriveDrop || opcode == MbarrierTestWait || opcode == MbarrierTestWaitParity || opcode == CpAsyncMbarrierArrive || opcode == CpAsyncMbarrierArriveNoInc) {
-		if (type != PTXOperand::b64 || (addressSpace != Shared && addressSpace != Generic)) return "mbarrier requires shared or generic b64 addressing";
-		if (a.vec != PTXOperand::v1 || !a.array.empty()) return "mbarrier requires a scalar address";
-		if (a.addressMode != PTXOperand::Address &&
-			((a.addressMode != PTXOperand::Indirect && a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Immediate) ||
-			(!PTXOperand::isInt(a.type) && a.type != PTXOperand::b32 && a.type != PTXOperand::b64) || (a.bytes() != 4 && a.bytes() != 8))) return "invalid mbarrier address";
-		if (a.addressMode == PTXOperand::Immediate && a.imm_uint > 0xffffffffULL) return "mbarrier absolute address must fit in 32 bits";
-		if ((opcode == MbarrierInit || opcode == MbarrierArrive || opcode == MbarrierArriveDrop) && (b.vec != PTXOperand::v1 || !b.array.empty() ||
-			(b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) ||
-			(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32) || (b.addressMode == PTXOperand::Register && b.bytes() != 4))) return "mbarrier count must be a 32-bit integer";
-		if ((opcode == MbarrierArrive || opcode == MbarrierArriveDrop) && d.addressMode != PTXOperand::BitBucket &&
-			(d.addressMode != PTXOperand::Register || d.vec != PTXOperand::v1 || !d.array.empty() || !PTXOperand::valid(PTXOperand::b64,d.type))) return "mbarrier arrival state must be a scalar 64-bit register";
-		if (opcode == MbarrierTestWait || opcode == MbarrierTestWaitParity) {
-			if (d.addressMode != PTXOperand::Register || d.vec != PTXOperand::v1 || !d.array.empty() || d.type != PTXOperand::pred || d.condition != PTXOperand::Pred) return "mbarrier.test_wait needs a predicate destination";
-			if (b.vec != PTXOperand::v1 || !b.array.empty()) return "mbarrier.test_wait needs a scalar token or parity";
-			if (opcode == MbarrierTestWait && (b.addressMode != PTXOperand::Register || !PTXOperand::valid(PTXOperand::b64,b.type))) return "mbarrier.test_wait needs a 64-bit state register";
-			if (opcode == MbarrierTestWaitParity && ((b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) ||
-				(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32) || (b.addressMode == PTXOperand::Register && b.bytes() != 4))) return "mbarrier parity needs a 32-bit integer";
-		}
-		return "";
-	}
-	if (opcode == CpAsync) {
-		if (prefetchSize && prefetchSize != 64 && prefetchSize != 128 && prefetchSize != 256) return "invalid cp.async prefetch size";
-		if (q.addressMode != PTXOperand::Invalid && (!cacheHint || (q.addressMode != PTXOperand::Register && q.addressMode != PTXOperand::Immediate) ||
-			q.vec != PTXOperand::v1 || !q.array.empty() || q.bytes() != 8 || !PTXOperand::valid(PTXOperand::b64,q.type))) return "cp.async policy requires cache_hint and a scalar 64-bit operand";
-		if (cacheOperation != Ca && cacheOperation != Cg) return "cp.async requires .ca or .cg";
-		if (b.addressMode != PTXOperand::Immediate || !PTXOperand::isInt(b.type) ||
-			(b.imm_uint != 4 && b.imm_uint != 8 && b.imm_uint != 16) || (cacheOperation == Cg && b.imm_uint != 16)) return "invalid cp.async copy size";
-		for (const auto* address : {&d, &a}) {
-			if (address->vec != PTXOperand::v1 || !address->array.empty()) return "cp.async requires scalar addresses";
-			if (address->addressMode == PTXOperand::Address) continue;
-			if (address->addressMode != PTXOperand::Indirect && address->addressMode != PTXOperand::Register && address->addressMode != PTXOperand::Immediate) return "invalid cp.async address";
-			if ((!PTXOperand::isInt(address->type) && address->type != PTXOperand::b32 && address->type != PTXOperand::b64) || (address->bytes() != 4 && address->bytes() != 8)) return "cp.async addresses require 32 or 64 bits";
-			if (address->addressMode == PTXOperand::Immediate && address->imm_uint > 0xffffffffULL) return "absolute address must fit in 32 bits";
-		}
-		if (c.addressMode != PTXOperand::Invalid) {
-			if (c.vec != PTXOperand::v1 || !c.array.empty()) return "cp.async requires a scalar source size or predicate";
-			if (c.type == PTXOperand::pred) {
-				if (c.addressMode != PTXOperand::Register) return "cp.async ignore-src requires a predicate register";
-			} else if ((c.addressMode != PTXOperand::Register && c.addressMode != PTXOperand::Immediate) ||
-				(!PTXOperand::isInt(c.type) && c.type != PTXOperand::b32) ||
-				(c.addressMode == PTXOperand::Register && c.bytes() != 4)) return "invalid cp.async source size";
-		}
-		return "";
-	}
-	if (opcode == CpAsyncCommitGroup || opcode == CpAsyncWaitAll) return "";
-	if (opcode == CpAsyncWaitGroup) return a.addressMode == PTXOperand::Immediate &&
-		PTXOperand::isInt(a.type) && (!PTXOperand::isSigned(a.type) || a.imm_int >= 0) ? "" : "cp.async.wait_group requires a nonnegative integer constant";
-	if (opcode == Createpolicy) {
-		if (type != PTXOperand::b64 || modifier || vec != PTXOperand::v1 || d.addressMode != PTXOperand::Register ||
-			d.vec != PTXOperand::v1 || !d.array.empty() || !PTXOperand::valid(PTXOperand::b64,d.type)) return "createpolicy requires a scalar b64 destination";
-		if (policyMode == PolicyCvt) return (a.addressMode == PTXOperand::Register || (a.addressMode == PTXOperand::Immediate && PTXOperand::isInt(a.type))) && a.vec == PTXOperand::v1 && a.array.empty() &&
-			PTXOperand::valid(PTXOperand::b64,a.type) ? "" : "createpolicy.cvt requires a scalar b64 source";
-		if (primaryPriority < EvictNormal || primaryPriority > EvictUnchanged ||
-			(secondaryPriority != EvictFirst && secondaryPriority != EvictUnchanged)) return "invalid createpolicy mode/priority";
-		if (policyMode == PolicyRange) {
-			if (a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Indirect && a.addressMode != PTXOperand::Address && a.addressMode != PTXOperand::Immediate) return "invalid policy address operand";
-			if (a.addressMode == PTXOperand::Immediate && a.imm_uint > 0xffffffffULL) return "policy absolute address must fit in 32 bits";
-			if ((addressSpace != Global && addressSpace != Generic) || a.vec != PTXOperand::v1 || !a.array.empty() ||
-				(a.addressMode != PTXOperand::Address && ((a.bytes() != 4 && a.bytes() != 8) || (!PTXOperand::isInt(a.type) && a.type != PTXOperand::b32 && a.type != PTXOperand::b64)))) return "createpolicy.range requires a global address";
-			for (const auto* size : {&b,&c}) if ((size->addressMode != PTXOperand::Register && size->addressMode != PTXOperand::Immediate) ||
-				size->vec != PTXOperand::v1 || !size->array.empty() || !PTXOperand::valid(PTXOperand::u32,size->type) ||
-				(size->addressMode == PTXOperand::Immediate && size->imm_uint > 0x100000000ULL)) return "createpolicy.range requires 32-bit integer sizes";
-			if (b.addressMode == PTXOperand::Immediate && c.addressMode == PTXOperand::Immediate && b.imm_uint > c.imm_uint) return "createpolicy primary size exceeds total size";
+	switch (opcode) {
+		case MbarrierPendingCount: {
+			if (type != PTXOperand::b64 || d.addressMode != PTXOperand::Register || d.vec != PTXOperand::v1 || !d.array.empty() ||
+				(!PTXOperand::isInt(d.type) && d.type != PTXOperand::b32) || d.bytes() != 4) return "mbarrier.pending_count needs a scalar 32-bit destination";
+			if (a.addressMode != PTXOperand::Register || a.vec != PTXOperand::v1 || !a.array.empty() || !PTXOperand::valid(PTXOperand::b64,a.type)) return "mbarrier.pending_count needs a scalar 64-bit state register";
 			return "";
 		}
-		if (policyMode != PolicyFractional) return "invalid createpolicy mode";
-		if ((a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Immediate) || a.vec != PTXOperand::v1 ||
-			!a.array.empty() || !PTXOperand::valid(PTXOperand::f32,a.type)) return "createpolicy fraction must be scalar f32";
-		if (a.addressMode == PTXOperand::Immediate && !(a.imm_single > 0 && a.imm_single <= 1)) return "createpolicy fraction must be in (0,1]";
-		return "";
-	}
-	if (opcode == Atom || opcode == Red) {
-		if (cacheHint && (addressSpace != Global && addressSpace != Generic)) return "atomic cache hints require global addressing";
-		if (cacheHint && opcode == Atom && atomicOperation == AtomicCas) return "atom.cas does not support cache hints";
-		if (q.addressMode != PTXOperand::Invalid && (!cacheHint || (q.addressMode != PTXOperand::Register && q.addressMode != PTXOperand::Immediate) ||
-			q.vec != PTXOperand::v1 || !q.array.empty() || q.bytes() != 8 || !PTXOperand::valid(PTXOperand::b64, q.type)))
-			return "atomic cache policy requires .L2::cache_hint and a scalar 64-bit operand";
-	}
-	if (opcode != Mma && (d.vec == PTXOperand::v8 || a.vec == PTXOperand::v8 ||
-		b.vec == PTXOperand::v8 || c.vec == PTXOperand::v8)) return "eight-register fragments require mma";
-	if( opcode == Min || opcode == Max ) {
-		const unsigned int fp32Modifiers = nan | xorsign | abs;
-		if( (modifier & fp32Modifiers) && type != PTXOperand::f32
-			&& type != PTXOperand::f16 && type != PTXOperand::f16x2
-			&& type != PTXOperand::bf16 && type != PTXOperand::bf16x2 ) {
-			return "NaN and xorsign.abs modifiers require a floating type";
+		case MbarrierInit:
+		case MbarrierInval:
+		case MbarrierArrive:
+		case MbarrierArriveDrop:
+		case MbarrierTestWait:
+		case MbarrierTestWaitParity:
+		case CpAsyncMbarrierArrive:
+		case CpAsyncMbarrierArriveNoInc: {
+			if (type != PTXOperand::b64 || (addressSpace != Shared && addressSpace != Generic)) return "mbarrier requires shared or generic b64 addressing";
+			if (a.vec != PTXOperand::v1 || !a.array.empty()) return "mbarrier requires a scalar address";
+			if (a.addressMode != PTXOperand::Address &&
+				((a.addressMode != PTXOperand::Indirect && a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Immediate) ||
+				(!PTXOperand::isInt(a.type) && a.type != PTXOperand::b32 && a.type != PTXOperand::b64) || (a.bytes() != 4 && a.bytes() != 8))) return "invalid mbarrier address";
+			if (a.addressMode == PTXOperand::Immediate && a.imm_uint > 0xffffffffULL) return "mbarrier absolute address must fit in 32 bits";
+			if ((opcode == MbarrierInit || opcode == MbarrierArrive || opcode == MbarrierArriveDrop) && (b.vec != PTXOperand::v1 || !b.array.empty() ||
+				(b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) ||
+				(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32) || (b.addressMode == PTXOperand::Register && b.bytes() != 4))) return "mbarrier count must be a 32-bit integer";
+			if ((opcode == MbarrierArrive || opcode == MbarrierArriveDrop) && d.addressMode != PTXOperand::BitBucket &&
+				(d.addressMode != PTXOperand::Register || d.vec != PTXOperand::v1 || !d.array.empty() || !PTXOperand::valid(PTXOperand::b64,d.type))) return "mbarrier arrival state must be a scalar 64-bit register";
+			if (opcode == MbarrierTestWait || opcode == MbarrierTestWaitParity) {
+				if (d.addressMode != PTXOperand::Register || d.vec != PTXOperand::v1 || !d.array.empty() || d.type != PTXOperand::pred || d.condition != PTXOperand::Pred) return "mbarrier.test_wait needs a predicate destination";
+				if (b.vec != PTXOperand::v1 || !b.array.empty()) return "mbarrier.test_wait needs a scalar token or parity";
+				if (opcode == MbarrierTestWait && (b.addressMode != PTXOperand::Register || !PTXOperand::valid(PTXOperand::b64,b.type))) return "mbarrier.test_wait needs a 64-bit state register";
+				if (opcode == MbarrierTestWaitParity && ((b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) ||
+					(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32) || (b.addressMode == PTXOperand::Register && b.bytes() != 4))) return "mbarrier parity needs a 32-bit integer";
+			}
+			return "";
 		}
-		if ((modifier & ftz) && (type == PTXOperand::bf16 || type == PTXOperand::bf16x2))
-			return "ftz is invalid for bf16 min/max";
-		if( (modifier & (xorsign | abs)) != 0
-			&& (modifier & (xorsign | abs)) != (xorsign | abs) ) {
-			return "xorsign and abs modifiers must be specified together";
+		case CpAsync: {
+			if (prefetchSize && prefetchSize != 64 && prefetchSize != 128 && prefetchSize != 256) return "invalid cp.async prefetch size";
+			if (q.addressMode != PTXOperand::Invalid && (!cacheHint || (q.addressMode != PTXOperand::Register && q.addressMode != PTXOperand::Immediate) ||
+				q.vec != PTXOperand::v1 || !q.array.empty() || q.bytes() != 8 || !PTXOperand::valid(PTXOperand::b64,q.type))) return "cp.async policy requires cache_hint and a scalar 64-bit operand";
+			if (cacheOperation != Ca && cacheOperation != Cg) return "cp.async requires .ca or .cg";
+			if (b.addressMode != PTXOperand::Immediate || !PTXOperand::isInt(b.type) ||
+				(b.imm_uint != 4 && b.imm_uint != 8 && b.imm_uint != 16) || (cacheOperation == Cg && b.imm_uint != 16)) return "invalid cp.async copy size";
+			for (const auto* address : {&d, &a}) {
+				if (address->vec != PTXOperand::v1 || !address->array.empty()) return "cp.async requires scalar addresses";
+				if (address->addressMode == PTXOperand::Address) continue;
+				if (address->addressMode != PTXOperand::Indirect && address->addressMode != PTXOperand::Register && address->addressMode != PTXOperand::Immediate) return "invalid cp.async address";
+				if ((!PTXOperand::isInt(address->type) && address->type != PTXOperand::b32 && address->type != PTXOperand::b64) || (address->bytes() != 4 && address->bytes() != 8)) return "cp.async addresses require 32 or 64 bits";
+				if (address->addressMode == PTXOperand::Immediate && address->imm_uint > 0xffffffffULL) return "absolute address must fit in 32 bits";
+			}
+			if (c.addressMode != PTXOperand::Invalid) {
+				if (c.vec != PTXOperand::v1 || !c.array.empty()) return "cp.async requires a scalar source size or predicate";
+				if (c.type == PTXOperand::pred) {
+					if (c.addressMode != PTXOperand::Register) return "cp.async ignore-src requires a predicate register";
+				} else if ((c.addressMode != PTXOperand::Register && c.addressMode != PTXOperand::Immediate) ||
+					(!PTXOperand::isInt(c.type) && c.type != PTXOperand::b32) ||
+					(c.addressMode == PTXOperand::Register && c.bytes() != 4)) return "invalid cp.async source size";
+			}
+			return "";
 		}
-	}
-	switch (opcode) {
+		case CpAsyncCommitGroup:
+		case CpAsyncWaitAll:
+			return "";
+		case CpAsyncWaitGroup:
+			return a.addressMode == PTXOperand::Immediate &&
+				PTXOperand::isInt(a.type) && (!PTXOperand::isSigned(a.type) || a.imm_int >= 0) ? "" : "cp.async.wait_group requires a nonnegative integer constant";
+		case Createpolicy: {
+			if (type != PTXOperand::b64 || modifier || vec != PTXOperand::v1 || d.addressMode != PTXOperand::Register ||
+				d.vec != PTXOperand::v1 || !d.array.empty() || !PTXOperand::valid(PTXOperand::b64,d.type)) return "createpolicy requires a scalar b64 destination";
+			if (policyMode == PolicyCvt) return (a.addressMode == PTXOperand::Register || (a.addressMode == PTXOperand::Immediate && PTXOperand::isInt(a.type))) && a.vec == PTXOperand::v1 && a.array.empty() &&
+				PTXOperand::valid(PTXOperand::b64,a.type) ? "" : "createpolicy.cvt requires a scalar b64 source";
+			if (primaryPriority < EvictNormal || primaryPriority > EvictUnchanged ||
+				(secondaryPriority != EvictFirst && secondaryPriority != EvictUnchanged)) return "invalid createpolicy mode/priority";
+			if (policyMode == PolicyRange) {
+				if (a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Indirect && a.addressMode != PTXOperand::Address && a.addressMode != PTXOperand::Immediate) return "invalid policy address operand";
+				if (a.addressMode == PTXOperand::Immediate && a.imm_uint > 0xffffffffULL) return "policy absolute address must fit in 32 bits";
+				if ((addressSpace != Global && addressSpace != Generic) || a.vec != PTXOperand::v1 || !a.array.empty() ||
+					(a.addressMode != PTXOperand::Address && ((a.bytes() != 4 && a.bytes() != 8) || (!PTXOperand::isInt(a.type) && a.type != PTXOperand::b32 && a.type != PTXOperand::b64)))) return "createpolicy.range requires a global address";
+				for (const auto* size : {&b,&c}) if ((size->addressMode != PTXOperand::Register && size->addressMode != PTXOperand::Immediate) ||
+					size->vec != PTXOperand::v1 || !size->array.empty() || !PTXOperand::valid(PTXOperand::u32,size->type) ||
+					(size->addressMode == PTXOperand::Immediate && size->imm_uint > 0x100000000ULL)) return "createpolicy.range requires 32-bit integer sizes";
+				if (b.addressMode == PTXOperand::Immediate && c.addressMode == PTXOperand::Immediate && b.imm_uint > c.imm_uint) return "createpolicy primary size exceeds total size";
+				return "";
+			}
+			if (policyMode != PolicyFractional) return "invalid createpolicy mode";
+			if ((a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Immediate) || a.vec != PTXOperand::v1 ||
+				!a.array.empty() || !PTXOperand::valid(PTXOperand::f32,a.type)) return "createpolicy fraction must be scalar f32";
+			if (a.addressMode == PTXOperand::Immediate && !(a.imm_single > 0 && a.imm_single <= 1)) return "createpolicy fraction must be in (0,1]";
+			return "";
+		}
+		case WmmaLoadA:
+		case WmmaLoadB:
+		case WmmaLoadC:
+		case WmmaStoreD: {
+			const bool store = opcode == WmmaStoreD;
+			const char matrix = store ? 'd' : opcode == WmmaLoadA ? 'a' : opcode == WmmaLoadB ? 'b' : 'c';
+			const auto& fragment = store ? a : d; const auto& address = store ? d : a;
+			const unsigned int count = wmmaFragmentRegisters(matrix,type);
+			if (!count || fragment.array.size() != count || modifier) return "invalid WMMA memory shape, type or fragment length";
+			for (const auto& reg : fragment.array) {
+				if (reg.addressMode != PTXOperand::Register || reg.vec != PTXOperand::v1 || !reg.array.empty() || reg.bytes() != (type == PTXOperand::f64 ? 8 : 4)) return "invalid WMMA fragment register";
+			}
+			if ((type == PTXOperand::s4 || type == PTXOperand::u4 || type == PTXOperand::b1) && mmaAColumnMajor != (matrix == 'b')) return "sub-byte WMMA multiplicands require A row and B column layouts";
+			if (addressSpace != Global && addressSpace != Shared && addressSpace != Generic) return "invalid WMMA memory space";
+			if (address.vec != PTXOperand::v1 || !address.array.empty() || (address.addressMode != PTXOperand::Address &&
+				((address.addressMode != PTXOperand::Indirect && address.addressMode != PTXOperand::Register && address.addressMode != PTXOperand::Immediate) ||
+				(!PTXOperand::isInt(address.type) && address.type != PTXOperand::b32 && address.type != PTXOperand::b64) || (address.bytes() != 4 && address.bytes() != 8)))) return "invalid WMMA address";
+			if (b.addressMode != PTXOperand::Invalid && ((b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) || b.vec != PTXOperand::v1 || !b.array.empty() ||
+				(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32) || (b.addressMode == PTXOperand::Register && b.bytes() != 4))) return "WMMA stride must be a scalar 32-bit integer";
+			return "";
+		}
+		case WmmaMma: {
+			if (a.type != b.type) return "WMMA multiplicands must have identical element types";
+			const PTXOperand* fragments[] = {&a,&b,&c,&d}; const char roles[] = {'a','b','c','d'};
+			for (int i = 0; i < 4; ++i) {
+				const unsigned int count = wmmaFragmentRegisters(roles[i],fragments[i]->type);
+				if (!count || fragments[i]->array.size() != count) return "invalid WMMA MMA fragment shape, type or length";
+				for (const auto& reg : fragments[i]->array) {
+					if (reg.addressMode != PTXOperand::Register || reg.vec != PTXOperand::v1 || !reg.array.empty() || reg.bytes() != (fragments[i]->type == PTXOperand::f64 ? 8 : 4)) return "invalid WMMA MMA register container";
+				}
+			}
+			const bool integer = a.type == PTXOperand::s8 || a.type == PTXOperand::u8 || a.type == PTXOperand::s4 || a.type == PTXOperand::u4 || a.type == PTXOperand::b1;
+			if (integer ? (type != PTXOperand::s32 || c.type != PTXOperand::s32) : a.type == PTXOperand::f16 ?
+				((type != PTXOperand::f16 && type != PTXOperand::f32) || (c.type != PTXOperand::f16 && c.type != PTXOperand::f32)) :
+				(type != (a.type == PTXOperand::f64 ? PTXOperand::f64 : PTXOperand::f32) || c.type != type)) return "invalid WMMA accumulator types";
+			if ((a.type == PTXOperand::s4 || a.type == PTXOperand::u4 || a.type == PTXOperand::b1) && (mmaAColumnMajor || !mmaBColumnMajor)) return "sub-byte WMMA requires row/column multiplicands";
+			if (a.type == PTXOperand::b1 ? (booleanOperator != BoolAnd && booleanOperator != BoolXor) : booleanOperator != BoolNop) return "invalid WMMA bit operation";
+			if (a.type == PTXOperand::f64 ? (modifier && modifier != rn && modifier != rz && modifier != rm && modifier != rp) :
+				(modifier && (!integer || a.type == PTXOperand::b1 || modifier != satfinite))) return "invalid WMMA rounding or saturation modifier";
+			return "";
+		}
 		case Abs: {
 			if ( !( type == PTXOperand::s16 || type == PTXOperand::s32 || 
 				type == PTXOperand::s64 || type == PTXOperand::f32 || 
@@ -873,6 +863,11 @@ std::string ir::PTXInstruction::valid() const {
 			break;	
 		}
 		case Atom: {
+			if (cacheHint && (addressSpace != Global && addressSpace != Generic)) return "atomic cache hints require global addressing";
+			if (cacheHint && atomicOperation == AtomicCas) return "atom.cas does not support cache hints";
+			if (q.addressMode != PTXOperand::Invalid && (!cacheHint || (q.addressMode != PTXOperand::Register && q.addressMode != PTXOperand::Immediate) ||
+				q.vec != PTXOperand::v1 || !q.array.empty() || q.bytes() != 8 || !PTXOperand::valid(PTXOperand::b64, q.type)))
+				return "atomic cache policy requires .L2::cache_hint and a scalar 64-bit operand";
 			const bool half = type == PTXOperand::f16 || type == PTXOperand::f16x2;
 			if ((atomicOperation == AtomicCas) != (c.addressMode != PTXOperand::Invalid)) return "atom.cas requires two values; other atom operations require one";
 			if (a.addressMode != PTXOperand::Address && a.addressMode != PTXOperand::Register &&
@@ -2037,6 +2032,18 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case Max: {
+			const unsigned int fp32Modifiers = nan | xorsign | abs;
+			if( (modifier & fp32Modifiers) && type != PTXOperand::f32
+				&& type != PTXOperand::f16 && type != PTXOperand::f16x2
+				&& type != PTXOperand::bf16 && type != PTXOperand::bf16x2 ) {
+				return "NaN and xorsign.abs modifiers require a floating type";
+			}
+			if ((modifier & ftz) && (type == PTXOperand::bf16 || type == PTXOperand::bf16x2))
+				return "ftz is invalid for bf16 min/max";
+			if( (modifier & (xorsign | abs)) != 0
+				&& (modifier & (xorsign | abs)) != (xorsign | abs) ) {
+				return "xorsign and abs modifiers must be specified together";
+			}
 			if( !( type != PTXOperand::s8 && type != PTXOperand::u8 && 
 				type != PTXOperand::b8
 				&& type != PTXOperand::pred ) ) {
@@ -2083,6 +2090,18 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case Min: {
+			const unsigned int fp32Modifiers = nan | xorsign | abs;
+			if( (modifier & fp32Modifiers) && type != PTXOperand::f32
+				&& type != PTXOperand::f16 && type != PTXOperand::f16x2
+				&& type != PTXOperand::bf16 && type != PTXOperand::bf16x2 ) {
+				return "NaN and xorsign.abs modifiers require a floating type";
+			}
+			if ((modifier & ftz) && (type == PTXOperand::bf16 || type == PTXOperand::bf16x2))
+				return "ftz is invalid for bf16 min/max";
+			if( (modifier & (xorsign | abs)) != 0
+				&& (modifier & (xorsign | abs)) != (xorsign | abs) ) {
+				return "xorsign and abs modifiers must be specified together";
+			}
 			if( !( type != PTXOperand::s8 && type != PTXOperand::u8 && 
 				type != PTXOperand::b8 && type != PTXOperand::pred ) ) {
 				return "invalid instruction type " 
@@ -2474,6 +2493,10 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case Red: {
+			if (cacheHint && (addressSpace != Global && addressSpace != Generic)) return "atomic cache hints require global addressing";
+			if (q.addressMode != PTXOperand::Invalid && (!cacheHint || (q.addressMode != PTXOperand::Register && q.addressMode != PTXOperand::Immediate) ||
+				q.vec != PTXOperand::v1 || !q.array.empty() || q.bytes() != 8 || !PTXOperand::valid(PTXOperand::b64, q.type)))
+				return "atomic cache policy requires .L2::cache_hint and a scalar 64-bit operand";
 			const bool half = type == PTXOperand::f16 || type == PTXOperand::f16x2;
 			if (modifier != (half ? noftz : Modifier_invalid)) return "red requires .noftz only for f16/f16x2";
 			if (half && (reductionOperation != ReductionAdd || b.addressMode != PTXOperand::Register))
@@ -3223,6 +3246,8 @@ std::string ir::PTXInstruction::valid() const {
 		}
 		default: return "check not implemented for " + toString(opcode); break;
 	}
+	if (opcode != Mma && (d.vec == PTXOperand::v8 || a.vec == PTXOperand::v8 ||
+		b.vec == PTXOperand::v8 || c.vec == PTXOperand::v8)) return "eight-register fragments require mma";
 	return "";
 }
 
