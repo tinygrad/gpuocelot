@@ -34,6 +34,7 @@
 #include <climits>
 #include <algorithm>
 #include <limits>
+#include <iostream>
 #include <sstream>
 
 // Preprocessor Macros
@@ -902,6 +903,9 @@ void executive::CooperativeThreadArray::execute(int PC) {
 			case ir::PTXInstruction::Reconverge:
 				eval_Reconverge(context, instr); break;
 			default:
+				std::cerr << "Error: opcode at pc " << context.PC << " - "
+					<< ir::PTXInstruction::toString(instr.opcode)
+					<< " not supported." << std::endl;
 				assertM(false, "Opcode at pc "
 					<< context.PC << " - "
 					<< ir::PTXInstruction::toString(instr.opcode)
