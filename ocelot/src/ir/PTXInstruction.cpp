@@ -19,11 +19,33 @@ std::string ir::PTXInstruction::toString( Level l ) {
 	return "";
 }
 
+std::string ir::PTXInstruction::toString( Semantics s ) {
+	switch( s ) {
+		case Sc:      return "sc";      break;
+		case AcqRel:  return "acq_rel"; break;
+		case Acquire: return "acquire"; break;
+		case Release: return "release"; break;
+		case Relaxed: return "relaxed"; break;
+		default: break;
+	}
+	return "";
+}
+
 std::string ir::PTXInstruction::toString(CacheLevel cache) {
 	switch( cache ) {
 		case L1: return "L1";
 		case L2: return "L2";
 		default: break;
+	}
+	return "";
+}
+
+std::string ir::PTXInstruction::toString(CachePriority priority) {
+	switch (priority) {
+		case EvictNormal: return "L2::evict_normal";
+		case EvictLast: return "L2::evict_last";
+		case EvictFirst: return "L2::evict_first";
+		case EvictUnchanged: return "L2::evict_unchanged";
 	}
 	return "";
 }
@@ -35,6 +57,7 @@ std::string ir::PTXInstruction::toStringLoad(CacheOperation operation) {
 		case Cs: return "cs";
 		case Cv: return "cv";
 		case Nc: return "nc";
+		case Lu: return "lu";
 		default: break;
 	}
 	return "";
@@ -201,6 +224,9 @@ std::string ir::PTXInstruction::modifierString( unsigned int modifier,
 	else if( modifier & rn ) {
 		result += "rn.";
 	}
+	else if( modifier & rna ) {
+		result += "rna.";
+	}
 	else if( modifier & rz ) {
 		result += "rz.";
 	}
@@ -214,8 +240,20 @@ std::string ir::PTXInstruction::modifierString( unsigned int modifier,
 	if( modifier & ftz ) {
 		result += "ftz.";
 	}
+	if( modifier & nan ) {
+		result += "NaN.";
+	}
+	if( modifier & xorsign ) {
+		result += "xorsign.";
+	}
+	if( modifier & abs ) {
+		result += "abs.";
+	}
 	if( modifier & sat ) {
 		result += "sat.";
+	}
+	if( modifier & relu ) {
+		result += "relu.";
 	}
 	if( carry == CC ) {
 		result += "cc.";
@@ -230,11 +268,17 @@ std::string ir::PTXInstruction::toString( Modifier modifier ) {
 		case wide:   return "wide";   break;
 		case sat:    return "sat";    break;
 		case rn:     return "rn";     break;
+		case rna:    return "rna";    break;
 		case rz:     return "rz";     break;
 		case rm:     return "rm";     break;
 		case rp:     return "rp";     break;
 		case approx: return "approx"; break;
 		case ftz:    return "ftz";    break;
+		case noftz:  return "noftz";  break;
+		case nan:    return "NaN";    break;
+		case xorsign:return "xorsign";break;
+		case abs:    return "abs";    break;
+		case relu:   return "relu";   break;
 		default: break;
 	}
 	return "";	
@@ -358,10 +402,12 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case AddC:       return "addc";       break;
 		case And:        return "and";        break;
 		case Atom:       return "atom";       break;
+		case BarWarp:    return "bar.warp.sync";
 		case Bar:        return "bar";        break;
 		case Bfe:        return "bfe";        break;
 		case Bfi:        return "bfi";        break;
 		case Bfind:      return "bfind";      break;
+		case Bmsk:       return "bmsk";       break;
 		case Bra:        return "bra";        break;
 		case Brev:       return "brev";       break;
 		case Brkpt:      return "brkpt";      break;
@@ -373,19 +419,28 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case Cvt:        return "cvt";        break;
 		case Cvta:       return "cvta";       break;
 		case Div:        return "div";        break;
+		case Dp2a:       return "dp2a";       break;
+		case Dp4a:       return "dp4a";       break;
 		case Ex2:        return "ex2";        break;
 		case Exit:       return "exit";       break;
 		case Fma:        return "fma";        break;
+		case Fns:        return "fns";        break;
 		case Isspacep:   return "isspacep";   break;
 		case Ld:         return "ld";         break;
 		case Ldu:        return "ldu";        break;
+		case Ldmatrix:   return "ldmatrix";   break;
 		case Lg2:        return "lg2";        break;
+		case Lop3:       return "lop3";       break;
 		case Mad24:      return "mad24";      break;
 		case Mad:        return "mad";        break;
+		case Mma:        return "mma";        break;
 		case MadC:       return "madc";        break;
 		case Max:        return "max";        break;
 		case Membar:     return "membar";     break;
+		case Fence:      return "fence";      break;
 		case Min:        return "min";        break;
+		case Activemask: return "activemask";
+		case Movmatrix:  return "movmatrix";
 		case Mov:        return "mov";        break;
 		case Mul24:      return "mul24";      break;
 		case Mul:        return "mul";        break;
@@ -393,11 +448,35 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case Not:        return "not";        break;
 		case Or:         return "or";         break;
 		case Pmevent:    return "pmevent";    break;
+		case Nanosleep:  return "nanosleep";  break;
+		case Discard:    return "discard";    break;
+		case Applypriority: return "applypriority"; break;
 		case Popc:       return "popc";       break;
 		case Prefetch:   return "prefetch";   break;
+		case CpAsync: return "cp.async";
+		case CpAsyncCommitGroup: return "cp.async.commit_group";
+		case CpAsyncWaitGroup: return "cp.async.wait_group";
+		case CpAsyncWaitAll: return "cp.async.wait_all";
+		case WmmaLoadA: return "wmma.load.a";
+		case WmmaLoadB: return "wmma.load.b";
+		case WmmaLoadC: return "wmma.load.c";
+		case WmmaStoreD: return "wmma.store.d";
+		case WmmaMma: return "wmma.mma";
+		case MbarrierInit: return "mbarrier.init";
+		case MbarrierInval: return "mbarrier.inval";
+		case MbarrierArrive: return "mbarrier.arrive";
+		case MbarrierArriveDrop: return "mbarrier.arrive_drop";
+		case MbarrierPendingCount: return "mbarrier.pending_count";
+		case MbarrierTestWait: return "mbarrier.test_wait";
+		case MbarrierTestWaitParity: return "mbarrier.test_wait.parity";
+		case CpAsyncMbarrierArrive: return "cp.async.mbarrier.arrive";
+		case CpAsyncMbarrierArriveNoInc: return "cp.async.mbarrier.arrive.noinc";
+		case Createpolicy: return "createpolicy";
 		case Prefetchu:  return "prefetchu";  break;
 		case Prmt:       return "prmt";       break;
 		case Rcp:        return "rcp";        break;
+		case Match:      return "match";
+		case Redux:      return "redux";
 		case Red:        return "red";        break;
 		case Rem:        return "rem";        break;
 		case Ret:        return "ret";        break;
@@ -407,6 +486,7 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case Set:        return "set";        break;
 		case SetP:       return "setp";       break;
 		case Shf:        return "shf";        break;
+		case ShflSync:   return "shfl.sync";
 		case Shfl:       return "shfl";       break;
 		case Shl:        return "shl";        break;
 		case Shr:        return "shr";        break;
@@ -420,6 +500,8 @@ std::string ir::PTXInstruction::toString( Opcode opcode ) {
 		case Sured:      return "sured";      break;
 		case Sust:       return "sust";       break;
 		case Suq:        return "suq";        break;
+		case Szext:      return "szext";      break;
+		case Tanh:       return "tanh";       break;
 		case TestP:      return "testp";      break;
 		case Tex:        return "tex";        break;
 		case Tld4:       return "tld4";       break;
@@ -454,10 +536,18 @@ ir::PTXInstruction::PTXInstruction( Opcode op, const PTXOperand& _d,
 	: opcode(op), d(_d), a(_a), b(_b), c(_c) {
 	ISA = Instruction::PTX;
 	type = PTXOperand::s32;
+	bType = PTXOperand::TypeSpecifier_invalid;
 	modifier = 0;
 	reconvergeInstruction = 0;
 	branchTargetInstruction = 0;
 	vec = PTXOperand::v1;
+	mmaShape = MmaShape_Invalid;
+	mmaAColumnMajor = false;
+	mmaBColumnMajor = true;
+	mmaSparse = false;
+	matrixTranspose = false;
+	voteSync = false;
+	matchAll = false;
 	pg.condition = PTXOperand::PT;
 	pg.type = PTXOperand::pred;
 	barrierOperation = BarSync;
@@ -467,6 +557,20 @@ ir::PTXInstruction::PTXInstruction( Opcode op, const PTXOperand& _d,
 	cc = 0;
 	addressSpace = AddressSpace_Invalid;
 	tailCall = false;
+	mmio = false;
+	pmeventMask = false;
+	cacheHint = false;
+	prefetchSize = 0;
+	l1Evict = -1;
+	l2Evict = -1;
+	mbarrierNoComplete = false;
+	policyMode = PolicyFractional;
+	primaryPriority = EvictNormal;
+	secondaryPriority = EvictUnchanged;
+	cacheOperation = Ca;
+	booleanOperator = BoolAnd;
+	semantics = AcqRel;
+	scope = Level_Invalid;
 }
 
 ir::PTXInstruction::~PTXInstruction() {
@@ -477,12 +581,187 @@ bool ir::PTXInstruction::operator==( const PTXInstruction& i ) const {
 	return opcode == i.opcode;
 }
 
+void ir::PTXInstruction::wmmaDimensions(unsigned int& m, unsigned int& n, unsigned int& k) const {
+	m = n = k = 0;
+	switch (mmaShape) {
+		case MmaM16N16K16: m = n = k = 16; break;
+		case MmaM8N32K16: m = 8; n = 32; k = 16; break;
+		case MmaM32N8K16: m = 32; n = 8; k = 16; break;
+		case MmaM16N16K8: m = n = 16; k = 8; break;
+		case MmaM8N8K4: m = n = 8; k = 4; break;
+		case MmaM8N8K32: m = n = 8; k = 32; break;
+		case MmaM8N8K128: m = n = 8; k = 128; break;
+		default: break;
+	}
+}
+
+unsigned int ir::PTXInstruction::wmmaFragmentRegisters(char matrix, PTXOperand::DataType element) const {
+	unsigned int m, n, k; wmmaDimensions(m,n,k);
+	if (!m || (matrix != 'a' && matrix != 'b' && matrix != 'c' && matrix != 'd')) return 0;
+	const bool accumulator = matrix == 'c' || matrix == 'd';
+	const unsigned int elements = accumulator ? m*n : matrix == 'a' ? m*k : k*n;
+	if (k == 16) {
+		if (accumulator) return element == PTXOperand::f16 ? 4 : (element == PTXOperand::f32 || element == PTXOperand::s32) ? 8 : 0;
+		if (element == PTXOperand::f16) return 8; // FP16 multiplicands have redundant slots.
+		if (element == PTXOperand::bf16) return elements / 64;
+		return element == PTXOperand::s8 || element == PTXOperand::u8 ? elements / 128 : 0;
+	}
+	if (k == 8) return element == (accumulator ? PTXOperand::f32 : PTXOperand::tf32) ? (accumulator ? 8 : 4) : 0;
+	if (k == 4) return element == PTXOperand::f64 ? (accumulator ? 2 : 1) : 0;
+	if (accumulator) return element == PTXOperand::s32 ? 2 : 0;
+	return k == 32 ? (element == PTXOperand::s4 || element == PTXOperand::u4 ? 1 : 0) : (element == PTXOperand::b1 ? 1 : 0);
+}
+
+static std::string l1EvictString( int priority ) {
+	static const char* names[] = {"L1::evict_normal", "L1::evict_unchanged",
+		"L1::evict_first", "L1::evict_last", "L1::no_allocate"};
+	return names[priority];
+}
+
+// Half-precision comparisons accept only the floating-point CmpOps (no lo/ls/hi/hs).
+static bool halfComparison( ir::PTXInstruction::CmpOp op ) {
+	return op != ir::PTXInstruction::Lo && op != ir::PTXInstruction::Ls
+		&& op != ir::PTXInstruction::Hi && op != ir::PTXInstruction::Hs
+		&& op != ir::PTXInstruction::CmpOp_Invalid;
+}
+
 std::string ir::PTXInstruction::valid() const {
 	switch (opcode) {
+		case MbarrierPendingCount: {
+			if (type != PTXOperand::b64 || d.addressMode != PTXOperand::Register || d.vec != PTXOperand::v1 || !d.array.empty() ||
+				(!PTXOperand::isInt(d.type) && d.type != PTXOperand::b32) || d.bytes() != 4) return "mbarrier.pending_count needs a scalar 32-bit destination";
+			if (a.addressMode != PTXOperand::Register || a.vec != PTXOperand::v1 || !a.array.empty() || !PTXOperand::valid(PTXOperand::b64,a.type)) return "mbarrier.pending_count needs a scalar 64-bit state register";
+			return "";
+		}
+		case MbarrierInit:
+		case MbarrierInval:
+		case MbarrierArrive:
+		case MbarrierArriveDrop:
+		case MbarrierTestWait:
+		case MbarrierTestWaitParity:
+		case CpAsyncMbarrierArrive:
+		case CpAsyncMbarrierArriveNoInc: {
+			if (type != PTXOperand::b64 || (addressSpace != Shared && addressSpace != Generic)) return "mbarrier requires shared or generic b64 addressing";
+			if (a.vec != PTXOperand::v1 || !a.array.empty()) return "mbarrier requires a scalar address";
+			if (a.addressMode != PTXOperand::Address &&
+				((a.addressMode != PTXOperand::Indirect && a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Immediate) ||
+				(!PTXOperand::isInt(a.type) && a.type != PTXOperand::b32 && a.type != PTXOperand::b64) || (a.bytes() != 4 && a.bytes() != 8))) return "invalid mbarrier address";
+			if (a.addressMode == PTXOperand::Immediate && a.imm_uint > 0xffffffffULL) return "mbarrier absolute address must fit in 32 bits";
+			if ((opcode == MbarrierInit || opcode == MbarrierArrive || opcode == MbarrierArriveDrop) && (b.vec != PTXOperand::v1 || !b.array.empty() ||
+				(b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) ||
+				(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32) || (b.addressMode == PTXOperand::Register && b.bytes() != 4))) return "mbarrier count must be a 32-bit integer";
+			if ((opcode == MbarrierArrive || opcode == MbarrierArriveDrop) && d.addressMode != PTXOperand::BitBucket &&
+				(d.addressMode != PTXOperand::Register || d.vec != PTXOperand::v1 || !d.array.empty() || !PTXOperand::valid(PTXOperand::b64,d.type))) return "mbarrier arrival state must be a scalar 64-bit register";
+			if (opcode == MbarrierTestWait || opcode == MbarrierTestWaitParity) {
+				if (d.addressMode != PTXOperand::Register || d.vec != PTXOperand::v1 || !d.array.empty() || d.type != PTXOperand::pred || d.condition != PTXOperand::Pred) return "mbarrier.test_wait needs a predicate destination";
+				if (b.vec != PTXOperand::v1 || !b.array.empty()) return "mbarrier.test_wait needs a scalar token or parity";
+				if (opcode == MbarrierTestWait && (b.addressMode != PTXOperand::Register || !PTXOperand::valid(PTXOperand::b64,b.type))) return "mbarrier.test_wait needs a 64-bit state register";
+				if (opcode == MbarrierTestWaitParity && ((b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) ||
+					(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32) || (b.addressMode == PTXOperand::Register && b.bytes() != 4))) return "mbarrier parity needs a 32-bit integer";
+			}
+			return "";
+		}
+		case CpAsync: {
+			if (prefetchSize && prefetchSize != 64 && prefetchSize != 128 && prefetchSize != 256) return "invalid cp.async prefetch size";
+			if (q.addressMode != PTXOperand::Invalid && (!cacheHint || (q.addressMode != PTXOperand::Register && q.addressMode != PTXOperand::Immediate) ||
+				q.vec != PTXOperand::v1 || !q.array.empty() || q.bytes() != 8 || !PTXOperand::valid(PTXOperand::b64,q.type))) return "cp.async policy requires cache_hint and a scalar 64-bit operand";
+			if (cacheOperation != Ca && cacheOperation != Cg) return "cp.async requires .ca or .cg";
+			if (b.addressMode != PTXOperand::Immediate || !PTXOperand::isInt(b.type) ||
+				(b.imm_uint != 4 && b.imm_uint != 8 && b.imm_uint != 16) || (cacheOperation == Cg && b.imm_uint != 16)) return "invalid cp.async copy size";
+			for (const auto* address : {&d, &a}) {
+				if (address->vec != PTXOperand::v1 || !address->array.empty()) return "cp.async requires scalar addresses";
+				if (address->addressMode == PTXOperand::Address) continue;
+				if (address->addressMode != PTXOperand::Indirect && address->addressMode != PTXOperand::Register && address->addressMode != PTXOperand::Immediate) return "invalid cp.async address";
+				if ((!PTXOperand::isInt(address->type) && address->type != PTXOperand::b32 && address->type != PTXOperand::b64) || (address->bytes() != 4 && address->bytes() != 8)) return "cp.async addresses require 32 or 64 bits";
+				if (address->addressMode == PTXOperand::Immediate && address->imm_uint > 0xffffffffULL) return "absolute address must fit in 32 bits";
+			}
+			if (c.addressMode != PTXOperand::Invalid) {
+				if (c.vec != PTXOperand::v1 || !c.array.empty()) return "cp.async requires a scalar source size or predicate";
+				if (c.type == PTXOperand::pred) {
+					if (c.addressMode != PTXOperand::Register) return "cp.async ignore-src requires a predicate register";
+				} else if ((c.addressMode != PTXOperand::Register && c.addressMode != PTXOperand::Immediate) ||
+					(!PTXOperand::isInt(c.type) && c.type != PTXOperand::b32) ||
+					(c.addressMode == PTXOperand::Register && c.bytes() != 4)) return "invalid cp.async source size";
+			}
+			return "";
+		}
+		case CpAsyncCommitGroup:
+		case CpAsyncWaitAll:
+			return "";
+		case CpAsyncWaitGroup:
+			return a.addressMode == PTXOperand::Immediate &&
+				PTXOperand::isInt(a.type) && (!PTXOperand::isSigned(a.type) || a.imm_int >= 0) ? "" : "cp.async.wait_group requires a nonnegative integer constant";
+		case Createpolicy: {
+			if (type != PTXOperand::b64 || modifier || vec != PTXOperand::v1 || d.addressMode != PTXOperand::Register ||
+				d.vec != PTXOperand::v1 || !d.array.empty() || !PTXOperand::valid(PTXOperand::b64,d.type)) return "createpolicy requires a scalar b64 destination";
+			if (policyMode == PolicyCvt) return (a.addressMode == PTXOperand::Register || (a.addressMode == PTXOperand::Immediate && PTXOperand::isInt(a.type))) && a.vec == PTXOperand::v1 && a.array.empty() &&
+				PTXOperand::valid(PTXOperand::b64,a.type) ? "" : "createpolicy.cvt requires a scalar b64 source";
+			if (primaryPriority < EvictNormal || primaryPriority > EvictUnchanged ||
+				(secondaryPriority != EvictFirst && secondaryPriority != EvictUnchanged)) return "invalid createpolicy mode/priority";
+			if (policyMode == PolicyRange) {
+				if (a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Indirect && a.addressMode != PTXOperand::Address && a.addressMode != PTXOperand::Immediate) return "invalid policy address operand";
+				if (a.addressMode == PTXOperand::Immediate && a.imm_uint > 0xffffffffULL) return "policy absolute address must fit in 32 bits";
+				if ((addressSpace != Global && addressSpace != Generic) || a.vec != PTXOperand::v1 || !a.array.empty() ||
+					(a.addressMode != PTXOperand::Address && ((a.bytes() != 4 && a.bytes() != 8) || (!PTXOperand::isInt(a.type) && a.type != PTXOperand::b32 && a.type != PTXOperand::b64)))) return "createpolicy.range requires a global address";
+				for (const auto* size : {&b,&c}) if ((size->addressMode != PTXOperand::Register && size->addressMode != PTXOperand::Immediate) ||
+					size->vec != PTXOperand::v1 || !size->array.empty() || !PTXOperand::valid(PTXOperand::u32,size->type) ||
+					(size->addressMode == PTXOperand::Immediate && size->imm_uint > 0x100000000ULL)) return "createpolicy.range requires 32-bit integer sizes";
+				if (b.addressMode == PTXOperand::Immediate && c.addressMode == PTXOperand::Immediate && b.imm_uint > c.imm_uint) return "createpolicy primary size exceeds total size";
+				return "";
+			}
+			if (policyMode != PolicyFractional) return "invalid createpolicy mode";
+			if ((a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Immediate) || a.vec != PTXOperand::v1 ||
+				!a.array.empty() || !PTXOperand::valid(PTXOperand::f32,a.type)) return "createpolicy fraction must be scalar f32";
+			if (a.addressMode == PTXOperand::Immediate && !(a.imm_single > 0 && a.imm_single <= 1)) return "createpolicy fraction must be in (0,1]";
+			return "";
+		}
+		case WmmaLoadA:
+		case WmmaLoadB:
+		case WmmaLoadC:
+		case WmmaStoreD: {
+			const bool store = opcode == WmmaStoreD;
+			const char matrix = store ? 'd' : opcode == WmmaLoadA ? 'a' : opcode == WmmaLoadB ? 'b' : 'c';
+			const auto& fragment = store ? a : d; const auto& address = store ? d : a;
+			const unsigned int count = wmmaFragmentRegisters(matrix,type);
+			if (!count || fragment.array.size() != count || modifier) return "invalid WMMA memory shape, type or fragment length";
+			for (const auto& reg : fragment.array) {
+				if (reg.addressMode != PTXOperand::Register || reg.vec != PTXOperand::v1 || !reg.array.empty() || reg.bytes() != (type == PTXOperand::f64 ? 8 : 4)) return "invalid WMMA fragment register";
+			}
+			if ((type == PTXOperand::s4 || type == PTXOperand::u4 || type == PTXOperand::b1) && mmaAColumnMajor != (matrix == 'b')) return "sub-byte WMMA multiplicands require A row and B column layouts";
+			if (addressSpace != Global && addressSpace != Shared && addressSpace != Generic) return "invalid WMMA memory space";
+			if (address.vec != PTXOperand::v1 || !address.array.empty() || (address.addressMode != PTXOperand::Address &&
+				((address.addressMode != PTXOperand::Indirect && address.addressMode != PTXOperand::Register && address.addressMode != PTXOperand::Immediate) ||
+				(!PTXOperand::isInt(address.type) && address.type != PTXOperand::b32 && address.type != PTXOperand::b64) || (address.bytes() != 4 && address.bytes() != 8)))) return "invalid WMMA address";
+			if (b.addressMode != PTXOperand::Invalid && ((b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) || b.vec != PTXOperand::v1 || !b.array.empty() ||
+				(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32) || (b.addressMode == PTXOperand::Register && b.bytes() != 4))) return "WMMA stride must be a scalar 32-bit integer";
+			return "";
+		}
+		case WmmaMma: {
+			if (a.type != b.type) return "WMMA multiplicands must have identical element types";
+			const PTXOperand* fragments[] = {&a,&b,&c,&d}; const char roles[] = {'a','b','c','d'};
+			for (int i = 0; i < 4; ++i) {
+				const unsigned int count = wmmaFragmentRegisters(roles[i],fragments[i]->type);
+				if (!count || fragments[i]->array.size() != count) return "invalid WMMA MMA fragment shape, type or length";
+				for (const auto& reg : fragments[i]->array) {
+					if (reg.addressMode != PTXOperand::Register || reg.vec != PTXOperand::v1 || !reg.array.empty() || reg.bytes() != (fragments[i]->type == PTXOperand::f64 ? 8 : 4)) return "invalid WMMA MMA register container";
+				}
+			}
+			const bool integer = a.type == PTXOperand::s8 || a.type == PTXOperand::u8 || a.type == PTXOperand::s4 || a.type == PTXOperand::u4 || a.type == PTXOperand::b1;
+			if (integer ? (type != PTXOperand::s32 || c.type != PTXOperand::s32) : a.type == PTXOperand::f16 ?
+				((type != PTXOperand::f16 && type != PTXOperand::f32) || (c.type != PTXOperand::f16 && c.type != PTXOperand::f32)) :
+				(type != (a.type == PTXOperand::f64 ? PTXOperand::f64 : PTXOperand::f32) || c.type != type)) return "invalid WMMA accumulator types";
+			if ((a.type == PTXOperand::s4 || a.type == PTXOperand::u4 || a.type == PTXOperand::b1) && (mmaAColumnMajor || !mmaBColumnMajor)) return "sub-byte WMMA requires row/column multiplicands";
+			if (a.type == PTXOperand::b1 ? (booleanOperator != BoolAnd && booleanOperator != BoolXor) : booleanOperator != BoolNop) return "invalid WMMA bit operation";
+			if (a.type == PTXOperand::f64 ? (modifier && modifier != rn && modifier != rz && modifier != rm && modifier != rp) :
+				(modifier && (!integer || a.type == PTXOperand::b1 || modifier != satfinite))) return "invalid WMMA rounding or saturation modifier";
+			return "";
+		}
 		case Abs: {
 			if ( !( type == PTXOperand::s16 || type == PTXOperand::s32 || 
 				type == PTXOperand::s64 || type == PTXOperand::f32 || 
-				type == PTXOperand::f64 ) ) {
+				type == PTXOperand::f64 || type == PTXOperand::f16 ||
+				type == PTXOperand::bf16 || type == PTXOperand::f16x2 ||
+				type == PTXOperand::bf16x2 ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );	
 			}			
@@ -504,16 +783,21 @@ std::string ir::PTXInstruction::valid() const {
 		}
 		case Add: {
 			if ( !( type != PTXOperand::s8 && type != PTXOperand::u8 && 
-				type != PTXOperand::b8 && type != PTXOperand::f16 
+				type != PTXOperand::b8
 				&& type != PTXOperand::pred ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
+			}
+			if ((type == PTXOperand::f16 || type == PTXOperand::f16x2)
+				&& (modifier & ~(rn | ftz | sat))) {
+				return "add.f16 only supports .rn, .ftz, and .sat";
 			}
 			if( carry == CC ) {
 				if( ( modifier & sat ) ) {
 					return "saturate not supported with carry out";
 				}
-				if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ) ) {
+				if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ||
+					type == PTXOperand::u64 || type == PTXOperand::s64 ) ) {
 					return "invalid instruction type " 
 						+ PTXOperand::toString( type );
 				}
@@ -539,7 +823,8 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case AddC: {
-			if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ) ) {
+			if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ||
+				type == PTXOperand::u64 || type == PTXOperand::s64 ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
@@ -578,39 +863,77 @@ std::string ir::PTXInstruction::valid() const {
 			break;	
 		}
 		case Atom: {
-			if( !PTXOperand::valid( PTXOperand::b32, type ) 
-				&& !PTXOperand::valid( PTXOperand::b64, type ) 
-				&& ( atomicOperation == AtomicAnd || atomicOperation == AtomicOr 
-				|| atomicOperation == AtomicXor || atomicOperation == AtomicCas 
-				|| atomicOperation == AtomicExch ) ) {
-				return "invalid instruction type " 
-					+ PTXOperand::toString( type ) + " for atomic " 
+			if (cacheHint && (addressSpace != Global && addressSpace != Generic)) return "atomic cache hints require global addressing";
+			if (cacheHint && atomicOperation == AtomicCas) return "atom.cas does not support cache hints";
+			if (q.addressMode != PTXOperand::Invalid && (!cacheHint || (q.addressMode != PTXOperand::Register && q.addressMode != PTXOperand::Immediate) ||
+				q.vec != PTXOperand::v1 || !q.array.empty() || q.bytes() != 8 || !PTXOperand::valid(PTXOperand::b64, q.type)))
+				return "atomic cache policy requires .L2::cache_hint and a scalar 64-bit operand";
+			const bool half = type == PTXOperand::f16 || type == PTXOperand::f16x2;
+			if ((atomicOperation == AtomicCas) != (c.addressMode != PTXOperand::Invalid)) return "atom.cas requires two values; other atom operations require one";
+			if (a.addressMode != PTXOperand::Address && a.addressMode != PTXOperand::Register &&
+				a.addressMode != PTXOperand::Indirect && a.addressMode != PTXOperand::Immediate) return "atom requires an address";
+			if (a.vec != PTXOperand::v1 || !a.array.empty() || (a.addressMode != PTXOperand::Address &&
+				((a.bytes() != 4 && a.bytes() != 8) || (!PTXOperand::isInt(a.type) && a.type != PTXOperand::b32 && a.type != PTXOperand::b64))))
+				return "atom requires a scalar integer address";
+			if (a.addressMode == PTXOperand::Immediate && a.imm_uint > 0xffffffffULL) return "atom absolute address must fit in 32 bits";
+			const bool cas16 = type == PTXOperand::b16 && atomicOperation == AtomicCas;
+			if (cas16) {
+				if (modifier || vec != PTXOperand::v1) return "atom.cas.b16 does not accept modifiers or vectors";
+				for (const auto* operand : {&d, &b, &c}) {
+					if (operand == &d && operand->addressMode == PTXOperand::BitBucket) continue;
+					if ((operand->addressMode != PTXOperand::Register && !(operand != &d && operand->addressMode == PTXOperand::Immediate)) ||
+						operand->vec != PTXOperand::v1 || !operand->array.empty() || operand->bytes() != 2 || !PTXOperand::valid(type, operand->type))
+						return "atom.cas.b16 requires scalar 16-bit operands";
+				}
+			}
+			if ((half && modifier != noftz) || (!half && (modifier & noftz))) return "atom requires .noftz only for f16/f16x2";
+			if (half) {
+				if (atomicOperation != AtomicAdd || c.addressMode != PTXOperand::Invalid || vec != PTXOperand::v1)
+					return "half atom requires scalar two-source add";
+				if (b.addressMode != PTXOperand::Register || b.vec != PTXOperand::v1 || !b.array.empty() ||
+					b.bytes() != PTXOperand::bytes(type) || !PTXOperand::valid(type, b.type)) return "half atom requires a matching scalar register source";
+				if (d.addressMode != PTXOperand::BitBucket && (d.addressMode != PTXOperand::Register ||
+					d.vec != PTXOperand::v1 || !d.array.empty() || d.bytes() != PTXOperand::bytes(type) || !PTXOperand::valid(type, d.type))) return "half atom requires a matching scalar register destination";
+			}
+			if( ( atomicOperation == AtomicAnd || atomicOperation == AtomicOr
+				|| atomicOperation == AtomicXor || atomicOperation == AtomicCas
+				|| atomicOperation == AtomicExch )
+				&& type != PTXOperand::b32 && type != PTXOperand::b64 && !cas16 ) {
+				return "invalid instruction type "
+					+ PTXOperand::toString( type ) + " for atomic "
 					+ toString( atomicOperation );
 			}
-				
-			if( !PTXOperand::valid( PTXOperand::u32, type ) 
-				&& !PTXOperand::valid( PTXOperand::u64, type ) 
-				&& !PTXOperand::valid( PTXOperand::s32, type ) 
-				&& ( atomicOperation == AtomicInc 
-				|| atomicOperation == AtomicDec ) ) {
-				return "invalid instruction type " 
-					+ PTXOperand::toString( type ) + " for atomic " 
+			if( ( atomicOperation == AtomicInc || atomicOperation == AtomicDec )
+				&& type != PTXOperand::u32 ) {
+				return "invalid instruction type "
+					+ PTXOperand::toString( type ) + " for atomic "
 					+ toString( atomicOperation );
 			}
-			if( !PTXOperand::valid( PTXOperand::f32, type ) 
-				&& !PTXOperand::valid( PTXOperand::u32, type ) 
-				&& !PTXOperand::valid( PTXOperand::u64, type ) 
-				&& !PTXOperand::valid( PTXOperand::s32, type ) 
-				&& ( atomicOperation == AtomicAdd 
-				|| atomicOperation == AtomicMin 
-				|| atomicOperation == AtomicMax ) ) {
-				return "invalid instruction type " 
-					+ PTXOperand::toString( type ) + " for atomic " 
+			if( atomicOperation == AtomicAdd
+				&& type != PTXOperand::u32 && type != PTXOperand::s32
+				&& type != PTXOperand::u64 && type != PTXOperand::f32
+				&& type != PTXOperand::f64 && !half ) {
+				return "invalid instruction type "
+					+ PTXOperand::toString( type ) + " for atomic "
 					+ toString( atomicOperation );
 			}
-			if( !( addressSpace == Shared || addressSpace == Global ) ) {
+			if( ( atomicOperation == AtomicMin || atomicOperation == AtomicMax )
+				&& type != PTXOperand::u32 && type != PTXOperand::s32
+				&& type != PTXOperand::u64 && type != PTXOperand::s64 ) {
+				return "invalid instruction type "
+					+ PTXOperand::toString( type ) + " for atomic "
+					+ toString( atomicOperation );
+			}
+			if( !( addressSpace == Shared || addressSpace == Global || addressSpace == Generic ) ) {
 				return "invalid adress space " + toString( addressSpace );
 			}
+			break;
+		}
+		case BarWarp: {
+			if (modifier || vec != PTXOperand::v1 || type != PTXOperand::u32 ||
+				b.vec != PTXOperand::v1 || !b.array.empty() || b.bytes() != 4 ||
+				(b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) ||
+				(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32)) return "bar.warp.sync requires a scalar 32-bit integer member mask";
 			break;
 		}
 		case Bar: {
@@ -637,12 +960,12 @@ std::string ir::PTXInstruction::valid() const {
                     + " cannot be assigned to " + PTXOperand::toString( type );
             }
             if( !PTXOperand::valid( PTXOperand::u32, b.type )
-                && a.addressMode != PTXOperand::Immediate ) {
+                && b.addressMode != PTXOperand::Immediate ) {
                 return "operand 1 type " + PTXOperand::toString( b.type )
                     + " cannot be assigned to " + PTXOperand::toString( PTXOperand::u32 );
             }
             if( !PTXOperand::valid( PTXOperand::u32, c.type )
-                && a.addressMode != PTXOperand::Immediate ) {
+                && c.addressMode != PTXOperand::Immediate ) {
                 return "operand 1 type " + PTXOperand::toString( c.type )
                     + " cannot be assigned to " + PTXOperand::toString( PTXOperand::u32 );
             }
@@ -672,7 +995,7 @@ std::string ir::PTXInstruction::valid() const {
 					+ " cannot be assigned to " 
 					+ PTXOperand::toString( PTXOperand::u32 );
 			}
-			if( !PTXOperand::valid( PTXOperand::u32, b.type )  ) {
+			if( !PTXOperand::valid( PTXOperand::u32, c.type )  ) {
 				return "operand 4 type " + PTXOperand::toString( c.type ) 
 					+ " cannot be assigned to " 
 					+ PTXOperand::toString( PTXOperand::u32 );
@@ -693,6 +1016,46 @@ std::string ir::PTXInstruction::valid() const {
 				return "operand D type " + PTXOperand::toString( d.type ) 
 					+ " cannot be assigned to " 
 					+ PTXOperand::toString( PTXOperand::u32 );
+			}
+			break;
+		}
+		case Bmsk: {
+			if( type != PTXOperand::b32 ) {
+				return "bmsk instruction requires .b32 type";
+			}
+			if( shiftMode != ShiftMode::Clamp && shiftMode != ShiftMode::Wrap ) {
+				return "bmsk instruction requires .clamp or .wrap mode";
+			}
+			if( !PTXOperand::valid( type, d.type )
+				|| !PTXOperand::valid( type, a.type )
+				|| !PTXOperand::valid( type, b.type ) ) {
+				return "bmsk operands must have 32-bit integer types";
+			}
+			break;
+		}
+		case Lop3: {
+			if( type != PTXOperand::b32 ) {
+				return "lop3 instruction requires .b32 type";
+			}
+			const bool predicateResult = pq.addressMode != PTXOperand::Invalid;
+			if( (d.addressMode == PTXOperand::BitBucket && !predicateResult)
+				|| (d.addressMode != PTXOperand::BitBucket
+					&& !PTXOperand::valid( type, d.type ))
+				|| !PTXOperand::valid( type, a.type )
+				|| !PTXOperand::valid( type, b.type ) ) {
+				return "lop3 data operands must have 32-bit integer types";
+			}
+			if( !PTXOperand::valid( type, c.type ) ) {
+				return "lop3 data operands must have 32-bit integer types";
+			}
+			if( immLut.addressMode != PTXOperand::Immediate
+				|| immLut.imm_uint > 0xff ) {
+				return "lop3 immLut must be an integer constant from 0 to 255";
+			}
+			if( predicateResult && (pq.type != PTXOperand::pred
+				|| q.type != PTXOperand::pred
+				|| (booleanOperator != BoolAnd && booleanOperator != BoolOr)) ) {
+				return "lop3 predicate form requires .and or .or and predicates p, q";
 			}
 			break;
 		}
@@ -825,6 +1188,9 @@ std::string ir::PTXInstruction::valid() const {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
+			if( modifier != approx && modifier != ( approx | ftz ) ) {
+				return "cos requires .approx with optional .ftz";
+			}
 			if( !PTXOperand::valid( type, a.type ) ) {
 				return "operand A type " + PTXOperand::toString( a.type ) 
 					+ " cannot be assigned to " + PTXOperand::toString( type );
@@ -833,27 +1199,151 @@ std::string ir::PTXInstruction::valid() const {
 				return "operand D type " + PTXOperand::toString( d.type ) 
 					+ " cannot be assigned to " + PTXOperand::toString( type );
 			}
-			if( modifier & ftz ) {
-				if( PTXOperand::isInt( type ) ) {
-					return toString( ftz ) 
-						+ " only valid for float point instructions.";
-				}
-			}
 			break;
 		}
 		case Cvt: {
-			if( type == PTXOperand::pred ) {
+			PTXOperand::DataType sourceType = a.relaxedType ==
+				PTXOperand::TypeSpecifier_invalid ? a.type : a.relaxedType;
+			const int cvtModifiers = rni | rzi | rmi | rpi | rn | rna | rz
+				| rm | rp | ftz | sat | relu;
+			if( modifier & ~cvtModifiers ) return "invalid cvt modifier";
+			const bool packed = type == PTXOperand::f16x2
+				|| type == PTXOperand::bf16x2;
+			if (!packed && b.addressMode != PTXOperand::Invalid) {
+				return "scalar cvt accepts only two operands";
+			}
+			if( packed ) {
+				const PTXOperand::DataType bSourceType = b.relaxedType ==
+					PTXOperand::TypeSpecifier_invalid ? b.type : b.relaxedType;
+				if( sourceType != PTXOperand::f32
+					|| bSourceType != PTXOperand::f32 ) {
+					return "packed cvt requires two f32 source operands";
+				}
+				const int rounding = modifier & (rn | rz);
+				if( rounding != rn && rounding != rz ) {
+					return "packed cvt requires .rn or .rz";
+				}
+				if( modifier & ~(rn | rz | relu) ) {
+					return "invalid packed cvt modifier";
+				}
+				if( type == PTXOperand::f16x2
+					? !PTXOperand::relaxedValid(type, d.type)
+					: d.type != PTXOperand::b32 ) {
+					return "packed cvt requires a b32 destination";
+				}
+				break;
+			}
+			if( type == PTXOperand::tf32 ) {
+				if( sourceType != PTXOperand::f32 || modifier != rna ) {
+					return "sm_86 tf32 cvt requires cvt.rna.tf32.f32";
+				}
+				if( d.type != PTXOperand::b32 ) {
+					return "tf32 cvt requires a b32 destination";
+				}
+				break;
+			}
+			if( type == PTXOperand::bf16 ) {
+				const int rounding = modifier & (rn | rz);
+				if( sourceType != PTXOperand::f32
+					|| (modifier & ~(rn | rz | relu))
+					|| (rounding != rn && rounding != rz) ) {
+					return "sm_86 bf16 cvt requires cvt.{rn,rz}{.relu}.bf16.f32";
+				}
+				if( d.type != PTXOperand::b16 ) {
+					return "bf16 cvt requires a b16 destination";
+				}
+				break;
+			}
+			if( sourceType == PTXOperand::bf16 ) {
+				if( type != PTXOperand::f32 || modifier ) {
+					return "sm_86 supports only cvt.f32.bf16";
+				}
+				if( !PTXOperand::relaxedValid(type, d.type) ) {
+					return "cvt.f32.bf16 requires an f32-compatible destination";
+				}
+				break;
+			}
+			if( sourceType == PTXOperand::f16x2
+				|| sourceType == PTXOperand::bf16x2
+				|| sourceType == PTXOperand::tf32 ) {
+				return "cvt source type is not supported on sm_86";
+			}
+			if( !PTXOperand::isInt(type) && !PTXOperand::isFloat(type)
+				) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
-			}					
+			}
+			if( !PTXOperand::isInt(sourceType)
+				&& !PTXOperand::isFloat(sourceType) ) {
+				return "invalid source type " + PTXOperand::toString(sourceType);
+			}
+			const bool destinationFloat = PTXOperand::isFloat(type);
+			const bool sourceFloat = PTXOperand::isFloat(sourceType);
+			const bool destinationInt = PTXOperand::isInt(type);
+			const bool sourceInt = PTXOperand::isInt(sourceType);
+			const int integerRounding = modifier & (rni | rzi | rmi | rpi);
+			const int floatRounding = modifier & (rn | rz | rm | rp);
+			const int rounding = integerRounding | floatRounding;
+			if( rounding && (rounding & (rounding - 1)) ) {
+				return "cvt accepts only one rounding modifier";
+			}
+			const bool narrowerFloat = sourceFloat && destinationFloat
+				&& PTXOperand::bytes(type) < PTXOperand::bytes(sourceType);
+			const bool sameSizeFloat = sourceFloat && destinationFloat
+				&& PTXOperand::bytes(type) == PTXOperand::bytes(sourceType);
+			if( integerRounding
+				&& !(sourceFloat && (destinationInt || sameSizeFloat)) ) {
+				return "integer rounding is invalid for this cvt conversion";
+			}
+			if( floatRounding
+				&& !(destinationFloat && (sourceInt || narrowerFloat)) ) {
+				return "floating-point rounding is invalid for this cvt conversion";
+			}
+			if( sourceFloat && destinationInt && !integerRounding ) {
+				return "float-to-integer cvt requires integer rounding";
+			}
+			if( sourceInt && destinationFloat && !floatRounding ) {
+				return "integer-to-float cvt requires floating-point rounding";
+			}
+			if( narrowerFloat && !floatRounding ) {
+				return "narrowing float cvt requires floating-point rounding";
+			}
+			if( modifier & rna ) {
+				return ".rna is valid only for cvt.rna.tf32.f32 on sm_86";
+			}
+			if( modifier & relu ) {
+				const int rounding = modifier & (rn | rz);
+				if( type != PTXOperand::f16 || sourceType != PTXOperand::f32
+					|| (rounding != rn && rounding != rz)
+					|| (modifier & ~(rn | rz | relu)) ) {
+					return ".relu requires cvt.{rn,rz}.f16.f32";
+				}
+			}
+			if( modifier & sat ) {
+				if( !destinationInt && type != PTXOperand::f16
+					&& type != PTXOperand::f32 && type != PTXOperand::f64 ) {
+					return ".sat is invalid for this cvt destination type";
+				}
+				if( destinationInt && sourceInt ) {
+					const unsigned int destinationBits = PTXOperand::bytes(type) * 8;
+					const unsigned int sourceBits = PTXOperand::bytes(sourceType) * 8;
+					const bool destinationSigned = PTXOperand::isSigned(type);
+					const bool sourceSigned = PTXOperand::isSigned(sourceType);
+					const bool destinationSuperset = destinationSigned == sourceSigned
+						? destinationBits >= sourceBits
+						: destinationSigned && destinationBits > sourceBits;
+					if( destinationSuperset ) {
+						return ".sat is invalid when the destination range contains the source range";
+					}
+				}
+			}
 			if( d.bytes() < PTXOperand::bytes( type ) ) {
 				return "operand D type " + PTXOperand::toString( d.type ) 
 					+ " cannot be assigned from " + PTXOperand::toString( type );
 			}
 			if( modifier & ftz ) {
-				if( !(PTXOperand::isFloat( type ) || PTXOperand::isFloat(a.type))) {
-					return toString( ftz ) 
-						+ " only valid for float point instructions.";
+				if( type != PTXOperand::f32 && sourceType != PTXOperand::f32 ) {
+					return ".ftz requires an f32 source or destination";
 				}
 			}
 			if( vec == PTXOperand::v1
@@ -870,7 +1360,8 @@ std::string ir::PTXInstruction::valid() const {
 				return "invalid instruction type " + PTXOperand::toString(type);
 			}
 			if (!(addressSpace == Global || addressSpace == Local
-				|| addressSpace == Shared || addressSpace == Const)) {
+				|| addressSpace == Shared || addressSpace == Const
+				|| addressSpace == Param)) {
 				return "invalid address space " + toString(addressSpace);
 			}
 			break;
@@ -879,19 +1370,29 @@ std::string ir::PTXInstruction::valid() const {
 			if( ( modifier & sat ) ) {
 				return "no support for saturating divide.";
 			}
-			if( ( modifier & approx ) ) {
-				if( type != PTXOperand::f32 ) {
-					return "only f32 supported for approximate";
+			if( modifier & ~(rn | rz | rm | rp | approx | full | ftz) ) {
+				return "invalid divide modifier";
+			}
+			const int rounding = modifier & (rn | rz | rm | rp);
+			const bool oneRounding = rounding == rn || rounding == rz
+				|| rounding == rm || rounding == rp;
+			if( type == PTXOperand::f32 ) {
+				const int modes = ((modifier & approx) ? 1 : 0)
+					+ ((modifier & full) ? 1 : 0) + (rounding ? 1 : 0);
+				if( modes != 1 || (rounding && !oneRounding) ) {
+					return "div.f32 requires exactly one of approx, full, or rounding";
 				}
 			}
 			if( type == PTXOperand::f64 ) {
-				if( !( modifier & rn ) && !( modifier & rz ) 
-					&& !( modifier & rm ) && !( modifier & rp ) ) {
-					return "requires a rounding modifier";
+				if( modifier & (approx | full | ftz) ) {
+					return "approx, full, and ftz are invalid for div.f64";
 				}
-				if( !( modifier & rn ) ) {
-					return "only nearest rounding supported";
+				if( !oneRounding ) {
+					return "div.f64 requires exactly one rounding modifier";
 				}
+			}
+			if( PTXOperand::isInt( type ) && modifier ) {
+				return "integer divide does not accept modifiers";
 			}
 			if( !( type == PTXOperand::u16 || type == PTXOperand::u32 
 				|| type == PTXOperand::u64 || type == PTXOperand::s16 
@@ -920,10 +1421,34 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			break;
 		}
+		case Dp2a:
+		case Dp4a: {
+			if( (type != PTXOperand::u32 && type != PTXOperand::s32)
+				|| (bType != PTXOperand::u32 && bType != PTXOperand::s32) ) {
+				return "dp2a/dp4a type qualifiers must be .u32 or .s32";
+			}
+			if( opcode == Dp2a && modifier != lo && modifier != hi ) {
+				return "dp2a instruction requires .lo or .hi mode";
+			}
+			const PTXOperand::DataType resultType = type == PTXOperand::u32
+				&& bType == PTXOperand::u32 ? PTXOperand::u32 : PTXOperand::s32;
+			if( !PTXOperand::valid(type, a.type)
+				|| !PTXOperand::valid(bType, b.type)
+				|| !PTXOperand::valid(resultType, c.type)
+				|| !PTXOperand::valid(resultType, d.type) ) {
+				return "dp2a/dp4a operands must have compatible 32-bit integer types";
+			}
+			break;
+		}
 		case Ex2: {
-			if( !( type == PTXOperand::f32 ) ) {
+			if( !( type == PTXOperand::f32 || type == PTXOperand::f16
+				|| type == PTXOperand::f16x2 ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
+			}
+			if( type == PTXOperand::f32 && modifier != approx
+				&& modifier != ( approx | ftz ) ) {
+				return "ex2.f32 requires .approx with optional .ftz";
 			}
 			if( !PTXOperand::valid( type, a.type )  ) {
 				return "operand A type " + PTXOperand::toString( a.type ) 
@@ -933,20 +1458,52 @@ std::string ir::PTXInstruction::valid() const {
 				return "operand D type " + PTXOperand::toString( d.type ) 
 					+ " cannot be assigned to " + PTXOperand::toString( type );
 			}
-			if( modifier & ftz ) {
-				if( PTXOperand::isInt( type ) ) {
-					return toString( ftz ) 
-						+ " only valid for float point instructions.";
-				}
-			}
 			break;
 		}
 		case Exit: {
 			break;
 		}
 		case Fma: {
-			if (!(type == ir::PTXOperand::f32 || type == ir::PTXOperand::f64)) {
+			if (!(type == ir::PTXOperand::f16 || type == ir::PTXOperand::f16x2
+				|| type == ir::PTXOperand::f32
+				|| type == ir::PTXOperand::f64 || type == ir::PTXOperand::bf16
+				|| type == ir::PTXOperand::bf16x2)) {
 				return "invalid instruction type " + PTXOperand::toString( type );
+			}
+			const int rounding = modifier & (rn | rz | rm | rp);
+			if (rounding != rn && rounding != rz
+				&& rounding != rm && rounding != rp) {
+				return "fma requires exactly one rounding modifier";
+			}
+			if (type == PTXOperand::f64 && (modifier & (ftz | sat))) {
+				return "ftz and sat modifiers are invalid for fma.f64";
+			}
+			if ((type == PTXOperand::f32 || type == PTXOperand::f64) && (modifier & relu)) {
+				return "relu is only valid for fma.{f16,f16x2,bf16,bf16x2}";
+			}
+			if ((type == PTXOperand::f16 || type == PTXOperand::f16x2)
+				&& rounding != rn) {
+				return "fma.f16 requires .rn";
+			}
+			if ((type == PTXOperand::f16 || type == PTXOperand::f16x2)
+				&& (modifier & sat) && (modifier & relu)) {
+				return "fma.f16 sat and relu are mutually exclusive";
+			}
+			if ((type == PTXOperand::bf16 || type == PTXOperand::bf16x2)
+				&& (rounding != rn || (modifier & (ftz | sat)))) {
+				return "fma.bf16 requires .rn without ftz or sat";
+			}
+			if( !PTXOperand::valid( type, a.type ) ) {
+				return "operand A type " + PTXOperand::toString( a.type )
+					+ " cannot be assigned to " + PTXOperand::toString( type );
+			}
+			if( !PTXOperand::valid( type, b.type ) ) {
+				return "operand B type " + PTXOperand::toString( b.type )
+					+ " cannot be assigned to " + PTXOperand::toString( type );
+			}
+			if( !PTXOperand::valid( type, c.type ) ) {
+				return "operand C type " + PTXOperand::toString( c.type )
+					+ " cannot be assigned to " + PTXOperand::toString( type );
 			}
 			if( !PTXOperand::valid( type, d.type )  ) {
 				return "operand D type " + PTXOperand::toString( d.type ) 
@@ -954,16 +1511,60 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			break;
 		}
+		case Fns: {
+			if( type != PTXOperand::b32 ) {
+				return "fns instruction only supports .b32 type";
+			}
+			if( d.type != PTXOperand::b32 ) {
+				return "fns destination operand must have .b32 type";
+			}
+			if( a.bytes() != 4 ) {
+				return "fns mask operand must be 32-bit";
+			}
+			if( b.type != PTXOperand::b32 && b.type != PTXOperand::u32
+				&& b.type != PTXOperand::s32 ) {
+				return "fns base operand must have .b32, .u32, or .s32 type";
+			}
+			if( c.type != PTXOperand::s32 ) {
+				return "fns offset operand must have .s32 type";
+			}
+			if( b.addressMode == PTXOperand::Immediate && b.imm_uint > 31 ) {
+				return "fns base operand must be between 0 and 31";
+			}
+			break;
+		}
 		case Isspacep: {
-			if (!(addressSpace == PTXInstruction::Global
+			if (!(addressSpace == PTXInstruction::Const
+				|| addressSpace == PTXInstruction::Global
+				|| addressSpace == PTXInstruction::Param
 				|| addressSpace == PTXInstruction::Shared
 				|| addressSpace == PTXInstruction::Local)) {
 				return "invalid address space " + toString(addressSpace);
 			}
 			if (!(d.addressMode == PTXOperand::Register
-				&& a.addressMode == PTXOperand::Register)) {
+				&& d.type == PTXOperand::pred && d.vec == PTXOperand::v1
+				&& a.addressMode == PTXOperand::Register && a.vec == PTXOperand::v1
+				&& (a.type == PTXOperand::u32 || a.type == PTXOperand::u64))) {
 				return "invalid address mode for operands";
 			}
+			break;
+		}
+		case Ldmatrix: {
+			if (type != PTXOperand::b16 || modifier ||
+				(addressSpace != Shared && addressSpace != Generic)) return "invalid ldmatrix type/modifier/space";
+			if ((vec != PTXOperand::v1 && vec != PTXOperand::v2 && vec != PTXOperand::v4) ||
+				d.addressMode != PTXOperand::Register || d.vec != vec || d.array.size() != unsigned(vec))
+				return "ldmatrix requires one 32-bit destination register per matrix";
+			for (const auto& element : d.array) {
+				if (element.addressMode != PTXOperand::Register || element.bytes() != 4 ||
+					element.vec != PTXOperand::v1 || !element.array.empty()) return "invalid ldmatrix destination leaf";
+			}
+			if ((a.addressMode != PTXOperand::Indirect && a.addressMode != PTXOperand::Register &&
+				a.addressMode != PTXOperand::Address && a.addressMode != PTXOperand::Immediate) ||
+				a.vec != PTXOperand::v1 || !a.array.empty() ||
+				(a.addressMode != PTXOperand::Address && ((!PTXOperand::isInt(a.type) &&
+				a.type != PTXOperand::b32 && a.type != PTXOperand::b64) ||
+				(a.bytes() != 4 && a.bytes() != 8)))) return "ldmatrix requires a scalar 32/64-bit address";
 			break;
 		}
 		case Ldu: // fall through
@@ -981,8 +1582,17 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			if( addressSpace != Global && addressSpace != Shared 
 				&& volatility == Volatile && addressSpace != Generic ) {
-				return "only shared and global address spaces supported " 
+				return "only shared and global address spaces supported "
 					"for volatile loads";
+			}
+			if( cacheOperation == Lu && volatility == Volatile ) {
+				return "ld.lu cannot be combined with .volatile";
+			}
+			if( l1Evict >= 0 && ( volatility == Volatile || mmio || cacheOperation != Ca ) ) {
+				return "ld .L1::eviction_priority excludes .volatile, .mmio and cache operators";
+			}
+			if( prefetchSize && ( mmio || volatility == Volatile ) ) {
+				return "ld .L2 prefetch size excludes .mmio and .volatile";
 			}
 			if( d.addressMode != PTXOperand::Register ) {
 				return "operand D must be a register not a " 
@@ -1004,6 +1614,9 @@ std::string ir::PTXInstruction::valid() const {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
+			if( modifier != approx && modifier != ( approx | ftz ) ) {
+				return "lg2 requires .approx with optional .ftz";
+			}
 			if( !PTXOperand::valid( type, a.type ) ) {
 				return "operand A type " + PTXOperand::toString( a.type ) 
 					+ " cannot be assigned to " + PTXOperand::toString( type );
@@ -1011,12 +1624,6 @@ std::string ir::PTXInstruction::valid() const {
 			if( !PTXOperand::valid( type, d.type ) ) {
 				return "operand D type " + PTXOperand::toString( d.type ) 
 					+ " cannot be assigned to " + PTXOperand::toString( type );
-			}
-			if( modifier & ftz ) {
-				if( PTXOperand::isInt( type ) ) {
-					return toString( ftz ) 
-						+ " only valid for float point instructions.";
-				}
 			}
 			break;
 		}
@@ -1044,6 +1651,33 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case Mad: {
+			if( type == PTXOperand::f32 || type == PTXOperand::f64 ) {
+				const int rounding = modifier & (rn | rz | rm | rp);
+				if( rounding != rn && rounding != rz
+					&& rounding != rm && rounding != rp ) {
+					return "mad requires exactly one rounding modifier";
+				}
+				if( type == PTXOperand::f64 && (modifier & (ftz | sat)) ) {
+					return "ftz and sat modifiers are invalid for mad.f64";
+				}
+				if( !PTXOperand::valid( type, a.type ) ) {
+					return "operand A type " + PTXOperand::toString( a.type )
+						+ " cannot be assigned to " + PTXOperand::toString( type );
+				}
+				if( !PTXOperand::valid( type, b.type ) ) {
+					return "operand B type " + PTXOperand::toString( b.type )
+						+ " cannot be assigned to " + PTXOperand::toString( type );
+				}
+				if( !PTXOperand::valid( type, c.type ) ) {
+					return "operand C type " + PTXOperand::toString( c.type )
+						+ " cannot be assigned to " + PTXOperand::toString( type );
+				}
+				if( !PTXOperand::valid( type, d.type ) ) {
+					return "operand D type " + PTXOperand::toString( d.type )
+						+ " cannot be assigned to " + PTXOperand::toString( type );
+				}
+				break;
+			}
 			if( !( type != PTXOperand::s8 && type != PTXOperand::u8 && 
 				type != PTXOperand::b8 && type != PTXOperand::f16 
 				&& type != PTXOperand::pred ) ) {
@@ -1094,8 +1728,285 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			break;
 		}
+		case Mma: {
+			if (mmaSparse) {
+				const bool sparseTf32 = (mmaShape == MmaM16N8K8 || mmaShape == MmaM16N8K16) && a.type == PTXOperand::tf32;
+				const bool sparseInt8 = (mmaShape == MmaM16N8K32 || mmaShape == MmaM16N8K64) &&
+					(a.type == PTXOperand::s8 || a.type == PTXOperand::u8);
+				const bool sparseInt4 = (mmaShape == MmaM16N8K64 || mmaShape == MmaM16N8K128) &&
+					(a.type == PTXOperand::s4 || a.type == PTXOperand::u4);
+				const bool sparseHalf = (mmaShape == MmaM16N8K16 || mmaShape == MmaM16N8K32) &&
+					(a.type == PTXOperand::f16 || a.type == PTXOperand::bf16);
+				if (!sparseTf32 && !sparseHalf && !sparseInt8 && !sparseInt4) {
+					return "unsupported sparse mma shape/type combination";
+				}
+				if (q.addressMode != PTXOperand::Register || q.vec != PTXOperand::v1 ||
+					!q.array.empty() || (q.type != PTXOperand::b32 &&
+					q.type != PTXOperand::u32 && q.type != PTXOperand::s32)) {
+					return "sparse mma metadata must be a scalar 32-bit integer register";
+				}
+				const unsigned maxSelector = (sparseInt8 && mmaShape == MmaM16N8K64) ||
+					(sparseInt4 && mmaShape == MmaM16N8K128) ? 0u :
+					mmaShape == MmaM16N8K32 || sparseInt4 || (mmaShape == MmaM16N8K16 && sparseTf32) ? 1u : 3u;
+				if (mmaSelector.addressMode != PTXOperand::Immediate ||
+					!PTXOperand::isInt(mmaSelector.type) ||
+					mmaSelector.imm_uint > maxSelector) {
+					return "sparse mma selector must be a legal integer constant for its shape";
+				}
+				for (const auto* operand : {&c, &d}) {
+					for (const auto& element : operand->array) {
+						if (element.bytes() != 4) return "sparse mma C/D registers must be 32-bit";
+					}
+				}
+			}
+			for (const PTXOperand* operand : {&a, &b, &c, &d}) {
+				if (operand->addressMode != PTXOperand::Register) {
+					return "mma fragments must be register operands";
+				}
+				for (const auto& element : operand->array) {
+					if (element.addressMode != PTXOperand::Register) {
+						return "mma fragment elements must be registers";
+					}
+					if (element.vec != PTXOperand::v1 || !element.array.empty()) {
+						return "mma fragment elements must be scalar registers";
+					}
+				}
+			}
+			// C/D fragments hold 32-bit registers in every form except f64.
+			if (a.type != PTXOperand::f64) {
+				for (const PTXOperand* operand : {&c, &d}) {
+					for (const auto& element : operand->array) {
+						if (element.bytes() != 4) return "mma C/D registers must be 32-bit";
+					}
+				}
+			}
+			if ((mmaAColumnMajor || !mmaBColumnMajor) &&
+				(mmaShape != MmaM8N8K4 || a.type != PTXOperand::f16)) {
+				return "this mma form requires row.col layouts";
+			}
+			if (a.type == PTXOperand::b1) {
+				const bool small = mmaShape == MmaM8N8K128;
+				const bool k256 = mmaShape == MmaM16N8K256;
+				if ((!small && !k256 && mmaShape != MmaM16N8K128) ||
+					type != PTXOperand::s32 || b.type != a.type || c.type != type || d.type != type || modifier ||
+					(booleanOperator != BoolAnd && booleanOperator != BoolXor)) return "invalid binary mma shape/type/modifier";
+				const unsigned aCount = small ? 1u : k256 ? 4u : 2u;
+				const unsigned bCount = k256 ? 2u : 1u;
+				const unsigned cdCount = small ? 2u : 4u;
+				for (const PTXOperand* operand : {&a, &b, &c, &d}) {
+					const bool input = operand == &a || operand == &b;
+					const unsigned count = operand == &a ? aCount : operand == &b ? bCount : cdCount;
+					if (operand->array.size() != count || operand->vec != static_cast<PTXOperand::Vec>(count)) return "invalid binary mma fragment size";
+					for (const auto& element : operand->array)
+						if (input ? element.type != PTXOperand::b32 : !PTXOperand::relaxedValid(type, element.type)) return "invalid binary mma register type";
+				}
+				break;
+			}
+			if (a.type == PTXOperand::f64) {
+				if (mmaShape != MmaM8N8K4 || type != PTXOperand::f64 ||
+					b.type != type || c.type != type || d.type != type ||
+					(modifier & ~(rn | rz | rm | rp))) return "invalid f64 mma shape/type/modifier";
+				if (modifier && (modifier & (modifier - 1))) {
+					return "f64 mma accepts only one rounding modifier";
+				}
+				for (const PTXOperand* operand : {&a, &b, &c, &d}) {
+					const int count = (operand == &a || operand == &b) ? 1 : 2;
+					if (operand->array.size() != count || operand->vec != (count == 1 ? PTXOperand::v1 : PTXOperand::v2))
+						return "invalid f64 mma fragment size";
+					for (const auto& element : operand->array)
+						if (!PTXOperand::relaxedValid(type, element.type)) return "invalid f64 mma register type";
+				}
+				break;
+			}
+			if (mmaShape == MmaM8N8K4) {
+				if ((type != PTXOperand::f16 && type != PTXOperand::f32) || a.type != PTXOperand::f16 ||
+					b.type != a.type || (c.type != PTXOperand::f16 && c.type != PTXOperand::f32) ||
+					d.type != type || (c.type == PTXOperand::f32 && type != PTXOperand::f32) || modifier)
+					return "unsupported m8n8k4 type/modifier combination";
+				for (const PTXOperand* operand : {&a, &b, &c, &d}) {
+					const bool input = operand == &a || operand == &b;
+					const unsigned count = input ? 2 : operand->type == PTXOperand::f32 ? 8 : 4;
+					if (operand->vec != static_cast<PTXOperand::Vec>(count) || operand->array.size() != count)
+						return "invalid m8n8k4 f16 fragment size";
+					for (const auto& element : operand->array)
+						if (input || operand->type == PTXOperand::f16 ?
+							(element.type != PTXOperand::b32 && element.type != PTXOperand::f16x2) :
+							!PTXOperand::relaxedValid(PTXOperand::f32, element.type)) return "invalid mma fragment register type";
+				}
+				break;
+			}
+			if (a.type == PTXOperand::s4 || a.type == PTXOperand::u4) {
+				const bool small = mmaShape == MmaM8N8K32;
+				const bool k64 = mmaShape == MmaM16N8K64;
+				const bool sparseK128 = mmaSparse && mmaShape == MmaM16N8K128;
+				if ((!small && !k64 && !sparseK128 && mmaShape != MmaM16N8K32) || (b.type != PTXOperand::s4 && b.type != PTXOperand::u4) ||
+					type != PTXOperand::s32 || c.type != type || d.type != type || (modifier & ~satfinite))
+					return "unsupported sub-byte mma shape/type/modifier combination";
+				const unsigned aCount = mmaSparse ? (sparseK128 ? 4u : 2u) : small ? 1u : k64 ? 4u : 2u;
+				const unsigned bCount = mmaSparse ? aCount : k64 ? 2u : 1u;
+				const unsigned cdCount = small ? 2u : 4u;
+				for (const PTXOperand* operand : {&a, &b, &c, &d}) {
+					const bool input = operand == &a || operand == &b;
+					const unsigned count = operand == &a ? aCount : operand == &b ? bCount : cdCount;
+					if (operand->vec != static_cast<PTXOperand::Vec>(count) || operand->array.size() != count)
+						return "invalid sub-byte mma fragment size";
+					for (const auto& element : operand->array)
+						if (input ? element.type != PTXOperand::b32 : !PTXOperand::relaxedValid(type, element.type)) return "invalid sub-byte mma register type";
+				}
+				break;
+			}
+			const bool intInput = a.type == PTXOperand::s8 ||
+				a.type == PTXOperand::u8;
+			if (intInput) {
+				if (modifier & ~satfinite) {
+					return "integer mma accepts only satfinite";
+				}
+				if (mmaShape != MmaM16N8K16 && mmaShape != MmaM8N8K16 &&
+					mmaShape != MmaM16N8K32 && !(mmaSparse && mmaShape == MmaM16N8K64)) {
+					return "integer mma requires a supported shape";
+				}
+				if (type != PTXOperand::s32) {
+					return "integer mma requires s32 accumulators";
+				}
+				if (b.type != PTXOperand::s8 && b.type != PTXOperand::u8) {
+					return "integer mma B type must be s8 or u8";
+				}
+				if (d.type != PTXOperand::s32 || c.type != PTXOperand::s32) {
+					return "integer mma C and D types must be s32";
+				}
+				const unsigned int aCount = mmaSparse ? (mmaShape == MmaM16N8K64 ? 4u : 2u) : mmaShape == MmaM16N8K32
+					? 4u : mmaShape == MmaM8N8K16 ? 1u : 2u;
+				const unsigned int bCount = mmaSparse ? aCount : mmaShape == MmaM8N8K16
+					? 1u : mmaShape == MmaM16N8K32 ? 2u : 1u;
+				const unsigned int cdCount = mmaShape == MmaM8N8K16 ? 2u : 4u;
+				const auto aVec = static_cast<PTXOperand::Vec>(aCount), bVec = static_cast<PTXOperand::Vec>(bCount);
+				const auto cdVec = static_cast<PTXOperand::Vec>(cdCount);
+				if (d.vec != cdVec || c.vec != cdVec ||
+					a.vec != aVec || b.vec != bVec) {
+					return "integer mma has invalid fragment sizes";
+				}
+				if (d.array.size() != cdCount || c.array.size() != cdCount ||
+					a.array.size() != aCount || b.array.size() != bCount) {
+					return "integer mma has invalid fragment register counts";
+				}
+				for (PTXOperand::Array::const_iterator element = a.array.begin();
+					element != a.array.end(); ++element) {
+					if (element->type != PTXOperand::b32) {
+						return "mma A fragment registers must be 32-bit "
+							"packed values";
+					}
+				}
+				for (PTXOperand::Array::const_iterator element = b.array.begin();
+					element != b.array.end(); ++element) {
+					if (element->type != PTXOperand::b32) {
+						return "mma B fragment registers must be 32-bit "
+							"packed values";
+					}
+				}
+				for (PTXOperand::Array::const_iterator element = c.array.begin();
+					element != c.array.end(); ++element) {
+					if (!PTXOperand::relaxedValid(PTXOperand::s32, element->type)) {
+						return "mma C fragment registers must be s32 or b32";
+					}
+				}
+				for (PTXOperand::Array::const_iterator element = d.array.begin();
+					element != d.array.end(); ++element) {
+					if (!PTXOperand::relaxedValid(PTXOperand::s32, element->type)) {
+						return "mma D fragment registers must be s32 or b32";
+					}
+				}
+				break;
+			}
+			if (modifier) {
+				return "f16/bf16/tf32 mma does not accept modifiers";
+			}
+			const bool m16n8k8 = mmaShape == MmaM16N8K8;
+			const bool m16n8k4 = mmaShape == MmaM16N8K4;
+			const bool sparseK32 = mmaSparse && mmaShape == MmaM16N8K32;
+			const bool tf32Input = a.type == PTXOperand::tf32;
+			const bool sparseTf32K16 = mmaSparse && tf32Input && mmaShape == MmaM16N8K16;
+			const bool halfAccumulator = type == PTXOperand::f16;
+			if ((m16n8k4 && !tf32Input) ||
+				(!m16n8k4 && !m16n8k8 && mmaShape != MmaM16N8K16 && !sparseK32)) {
+				return "unsupported floating-point mma shape/type combination";
+			}
+			if (!halfAccumulator && type != PTXOperand::f32) {
+				return "mma requires f16 or f32 accumulators";
+			}
+			if (a.type != PTXOperand::f16 && a.type != PTXOperand::bf16 &&
+				a.type != PTXOperand::tf32) {
+				return "mma A type must be f16, bf16, or tf32";
+			}
+			if (tf32Input && ((!m16n8k8 && !m16n8k4 && !sparseTf32K16) || type != PTXOperand::f32 ||
+				b.type != PTXOperand::tf32)) {
+				return "tf32 mma requires a supported shape with f32 accumulators";
+			}
+			if (halfAccumulator && a.type != PTXOperand::f16) {
+				return "f16 mma accumulators require f16 inputs";
+			}
+			if (b.type != a.type) {
+				return "mma A and B types must match";
+			}
+			if (d.type != type || c.type != type) {
+				return halfAccumulator ? "mma C and D types must be f16"
+					: "mma C and D types must be f32";
+			}
+			const PTXOperand::Vec accumulatorVec = halfAccumulator
+				? PTXOperand::v2 : PTXOperand::v4;
+			const unsigned int accumulatorRegisters = halfAccumulator ? 2 : 4;
+			const bool compactInputFragment = m16n8k4 || (m16n8k8 && !tf32Input);
+			const bool compactA = compactInputFragment || (mmaSparse && !sparseK32 && !sparseTf32K16);
+			const PTXOperand::Vec inputAVec = compactA
+				? PTXOperand::v2 : PTXOperand::v4;
+			const PTXOperand::Vec inputBVec = (sparseK32 || sparseTf32K16) ? PTXOperand::v4 : compactInputFragment
+				? PTXOperand::v1 : PTXOperand::v2;
+			if (d.vec != accumulatorVec || c.vec != accumulatorVec ||
+				a.vec != inputAVec || b.vec != inputBVec) {
+				return "mma has invalid fragment sizes";
+			}
+			if (d.array.size() != accumulatorRegisters ||
+				c.array.size() != accumulatorRegisters ||
+				a.array.size() != (compactA ? 2u : 4u) ||
+				b.array.size() != (sparseK32 || sparseTf32K16 ? 4u : compactInputFragment ? 1u : 2u)) {
+				return "mma has invalid fragment register counts";
+			}
+			for (PTXOperand::Array::const_iterator element = a.array.begin();
+				element != a.array.end(); ++element) {
+				if (element->type != PTXOperand::b32 &&
+					(tf32Input || element->type != PTXOperand::f16x2)) {
+					return "mma A fragment registers must be 32-bit packed values";
+				}
+			}
+			for (PTXOperand::Array::const_iterator element = b.array.begin();
+				element != b.array.end(); ++element) {
+				if (element->type != PTXOperand::b32 &&
+					(tf32Input || element->type != PTXOperand::f16x2)) {
+					return "mma B fragment registers must be 32-bit packed values";
+				}
+			}
+			for (PTXOperand::Array::const_iterator element = c.array.begin();
+				element != c.array.end(); ++element) {
+				if (halfAccumulator ? (element->type != PTXOperand::b32 &&
+					element->type != PTXOperand::f16x2)
+					: !PTXOperand::relaxedValid(PTXOperand::f32, element->type)) {
+					return halfAccumulator ? "mma C fragment registers must be b32 or f16x2"
+						: "mma C fragment registers must be f32 or b32";
+				}
+			}
+			for (PTXOperand::Array::const_iterator element = d.array.begin();
+				element != d.array.end(); ++element) {
+				if (halfAccumulator ? (element->type != PTXOperand::b32 &&
+					element->type != PTXOperand::f16x2)
+					: !PTXOperand::relaxedValid(PTXOperand::f32, element->type)) {
+					return halfAccumulator ? "mma D fragment registers must be b32 or f16x2"
+						: "mma D fragment registers must be f32 or b32";
+				}
+			}
+			break;
+		}
 		case MadC: {
-			if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ) ) {
+			if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ||
+				type == PTXOperand::u64 || type == PTXOperand::s64 ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
@@ -1121,11 +2032,33 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case Max: {
+			const unsigned int fp32Modifiers = nan | xorsign | abs;
+			if( (modifier & fp32Modifiers) && type != PTXOperand::f32
+				&& type != PTXOperand::f16 && type != PTXOperand::f16x2
+				&& type != PTXOperand::bf16 && type != PTXOperand::bf16x2 ) {
+				return "NaN and xorsign.abs modifiers require a floating type";
+			}
+			if ((modifier & ftz) && (type == PTXOperand::bf16 || type == PTXOperand::bf16x2))
+				return "ftz is invalid for bf16 min/max";
+			if( (modifier & (xorsign | abs)) != 0
+				&& (modifier & (xorsign | abs)) != (xorsign | abs) ) {
+				return "xorsign and abs modifiers must be specified together";
+			}
 			if( !( type != PTXOperand::s8 && type != PTXOperand::u8 && 
-				type != PTXOperand::b8 && type != PTXOperand::f16 
+				type != PTXOperand::b8
 				&& type != PTXOperand::pred ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
+			}
+			if (type == PTXOperand::b16 || type == PTXOperand::b32 ||
+				type == PTXOperand::b64) {
+				return "invalid instruction type " + PTXOperand::toString(type);
+			}
+			if ((type == PTXOperand::u16 || type == PTXOperand::u32 ||
+				type == PTXOperand::u64 || type == PTXOperand::s16 ||
+				type == PTXOperand::s32 || type == PTXOperand::s64) &&
+				(modifier || carry != None)) {
+				return "integer max does not support modifiers or carry out";
 			}
 			if( !PTXOperand::valid( type, a.type ) ) {
 				return "operand A type " + PTXOperand::toString( a.type ) 
@@ -1150,12 +2083,39 @@ std::string ir::PTXInstruction::valid() const {
 		case Membar: {
 			break;
 		}
+		case Fence: {
+			if( semantics != Sc && semantics != AcqRel ) {
+				return "fence semantics must be .sc or .acq_rel";
+			}
+			break;
+		}
 		case Min: {
+			const unsigned int fp32Modifiers = nan | xorsign | abs;
+			if( (modifier & fp32Modifiers) && type != PTXOperand::f32
+				&& type != PTXOperand::f16 && type != PTXOperand::f16x2
+				&& type != PTXOperand::bf16 && type != PTXOperand::bf16x2 ) {
+				return "NaN and xorsign.abs modifiers require a floating type";
+			}
+			if ((modifier & ftz) && (type == PTXOperand::bf16 || type == PTXOperand::bf16x2))
+				return "ftz is invalid for bf16 min/max";
+			if( (modifier & (xorsign | abs)) != 0
+				&& (modifier & (xorsign | abs)) != (xorsign | abs) ) {
+				return "xorsign and abs modifiers must be specified together";
+			}
 			if( !( type != PTXOperand::s8 && type != PTXOperand::u8 && 
-				type != PTXOperand::b8 && type != PTXOperand::f16 
-				&& type != PTXOperand::pred ) ) {
+				type != PTXOperand::b8 && type != PTXOperand::pred ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
+			}
+			if (type == PTXOperand::b16 || type == PTXOperand::b32 ||
+				type == PTXOperand::b64) {
+				return "invalid instruction type " + PTXOperand::toString(type);
+			}
+			if ((type == PTXOperand::u16 || type == PTXOperand::u32 ||
+				type == PTXOperand::u64 || type == PTXOperand::s16 ||
+				type == PTXOperand::s32 || type == PTXOperand::s64) &&
+				(modifier || carry != None)) {
+				return "integer min does not support modifiers or carry out";
 			}
 			if( !PTXOperand::valid( type, a.type ) ) {
 				return "operand A type " + PTXOperand::toString( a.type ) 
@@ -1177,15 +2137,62 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			break;
 		}
+		case Match: {
+			if ((type != PTXOperand::b32 && type != PTXOperand::b64) || modifier || vec != PTXOperand::v1) return "invalid match type/modifier";
+			for (const auto* operand : {&d, &a, &b, &pq})
+				if (operand->vec != PTXOperand::v1 || !operand->array.empty()) return "match requires scalar operands";
+			if (!(d.addressMode == PTXOperand::Register && d.bytes() == 4) &&
+				!(matchAll && d.addressMode == PTXOperand::BitBucket)) return "match requires a 32-bit destination";
+			if ((a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Immediate) ||
+				a.bytes() != PTXOperand::bytes(type)) return "match source must have instruction width";
+			if ((b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) || b.bytes() != 4 ||
+				(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32)) return "match requires a 32-bit integer member mask";
+			if (pq.addressMode != PTXOperand::Invalid && (!matchAll ||
+				!(pq.addressMode == PTXOperand::BitBucket || (pq.addressMode == PTXOperand::Register &&
+				pq.type == PTXOperand::pred && pq.condition == PTXOperand::Pred)))) return "invalid match predicate destination";
+			if (d.addressMode == PTXOperand::BitBucket && pq.addressMode == PTXOperand::BitBucket) return "match cannot discard both destinations";
+			break;
+		}
+		case Redux: {
+			const bool bitwise = reductionOperation == ReductionAnd || reductionOperation == ReductionOr || reductionOperation == ReductionXor;
+			const bool arithmetic = reductionOperation == ReductionAdd || reductionOperation == ReductionMin || reductionOperation == ReductionMax;
+			if (modifier || vec != PTXOperand::v1 || !(bitwise ? type == PTXOperand::b32 :
+				arithmetic && (type == PTXOperand::s32 || type == PTXOperand::u32))) return "invalid redux operation/type/modifier";
+			for (const auto* operand : {&d, &a, &b})
+				if (operand->vec != PTXOperand::v1 || !operand->array.empty() || operand->bytes() != 4) return "redux requires scalar 32-bit operands";
+			for (const auto* operand : {&d, &a})
+				if (operand->addressMode != PTXOperand::Register || (!bitwise && !PTXOperand::valid(type, operand->type))) return "redux requires compatible destination/source registers";
+			if ((b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) ||
+				(!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32)) return "redux requires a 32-bit integer member mask";
+			break;
+		}
+		case Activemask: {
+			if (type != PTXOperand::b32 || modifier || vec != PTXOperand::v1 ||
+				d.addressMode != PTXOperand::Register || d.bytes() != 4 ||
+				d.vec != PTXOperand::v1 || !d.array.empty()) return "activemask requires a scalar 32-bit register";
+			break;
+		}
+		case Movmatrix: {
+			if (type != PTXOperand::b16 || modifier || !matrixTranspose || vec != PTXOperand::v1)
+				return "invalid movmatrix type/modifier/transpose/count";
+			for (const auto* operand : {&d, &a}) {
+				if (operand->addressMode != PTXOperand::Register || operand->bytes() != 4 ||
+					operand->vec != PTXOperand::v1 || !operand->array.empty())
+					return "movmatrix requires scalar 32-bit register operands";
+			}
+			break;
+		}
 		case Mov: {
-			if ( ( a.type == PTXOperand::f16 ) &&
+			if ( type != PTXOperand::b16 &&
+				a.type == PTXOperand::f16 &&
+				a.array.empty() &&
 				a.addressMode != PTXOperand::Address &&
 				a.addressMode != PTXOperand::Immediate ) {
-				return "invalid type for operand A " 
+				return "invalid type for operand A "
 					+ PTXOperand::toString( a.type );
 			}
 			if ( !( d.type != PTXOperand::s8 && d.type != PTXOperand::u8 
-				&& d.type != PTXOperand::b8 && d.type != PTXOperand::f16 ) ) {
+				&& d.type != PTXOperand::b8 ) ) {
 				return "invalid type for operand D " 
 					+ PTXOperand::toString( d.type );
 			}
@@ -1222,10 +2229,14 @@ std::string ir::PTXInstruction::valid() const {
 		}
 		case Mul: {
 			if( type == PTXOperand::s8 || type == PTXOperand::u8 
-				|| type == PTXOperand::b8 || type == PTXOperand::f16 
+				|| type == PTXOperand::b8
 				|| type == PTXOperand::pred ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
+			}
+			if ((type == PTXOperand::f16 || type == PTXOperand::f16x2)
+				&& (modifier & ~(rn | ftz | sat))) {
+				return "mul.f16 only supports .rn, .ftz, and .sat";
 			}
 			if( !PTXOperand::valid( type, a.type )  ) {
 				return "operand A type " + PTXOperand::toString( a.type ) 
@@ -1264,9 +2275,15 @@ std::string ir::PTXInstruction::valid() const {
 		case Neg: {
 			if( type != PTXOperand::s16 && type != PTXOperand::s32 && 
 				type != PTXOperand::s64 && type != PTXOperand::f32 && 
-				type != PTXOperand::f64 ) {
+				type != PTXOperand::f64 && type != PTXOperand::f16 &&
+				type != PTXOperand::f16x2 && type != PTXOperand::bf16x2 &&
+				type != PTXOperand::bf16 ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
+			}
+			if ((type == PTXOperand::s16 || type == PTXOperand::s32 ||
+				type == PTXOperand::s64) && (modifier || carry != None)) {
+				return "integer neg does not support modifiers or carry out";
 			}
 			if( !PTXOperand::valid( type, a.type )  ) {
 				return "operand A type " + PTXOperand::toString( a.type ) 
@@ -1304,9 +2321,47 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			break;
 		}
+		case Nanosleep: {
+			if( type != PTXOperand::u32 ) {
+				return "nanosleep requires .u32, not " + PTXOperand::toString( type );
+			}
+			if( !( d.addressMode == PTXOperand::Register
+				|| d.addressMode == PTXOperand::Immediate ) ) {
+				return "nanosleep operand must be a register or an immediate";
+			}
+			break;
+		}
+		case Discard:
+		case Applypriority: {
+			const std::string name = ( opcode == Discard ) ? "discard" : "applypriority";
+			if( !( addressSpace == Global || addressSpace == Generic ) ) {
+				return name + " address space must be .global or generic, not "
+					+ toString( addressSpace );
+			}
+			if( cacheLevel != L2 ) {
+				return name + " requires .L2";
+			}
+			if( opcode == Applypriority && l2Evict != 0 ) {
+				return "applypriority requires .L2::evict_normal";
+			}
+			if( !( d.addressMode == PTXOperand::Indirect
+				|| d.addressMode == PTXOperand::Address
+				|| d.addressMode == PTXOperand::Immediate ) ) {
+				return name + " address must be Indirect, Address or Immediate, not "
+					+ PTXOperand::toString( d.addressMode );
+			}
+			if( a.addressMode != PTXOperand::Immediate || a.imm_uint != 128 ) {
+				return name + " size must be the immediate 128";
+			}
+			break;
+		}
 		case Pmevent: {
 			if( d.addressMode != PTXOperand::Immediate ) {
 				return "only support Immediate targets";
+			}
+			if( pmeventMask ? d.imm_uint > 0xffffu : d.imm_uint > 15u ) {
+				return pmeventMask ? "pmevent.mask operand must fit in 16 bits"
+					: "pmevent event index must be in 0..15";
 			}
 			break;
 		}
@@ -1314,6 +2369,9 @@ std::string ir::PTXInstruction::valid() const {
 			if( !( type == PTXOperand::b32 || type == PTXOperand::b64 ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
+			}
+			if (modifier || carry != None) {
+				return "popc does not support modifiers or carry out";
 			}
 			if( !PTXOperand::valid( type, a.type )  ) {
 				return "operand A type " + PTXOperand::toString( a.type ) 
@@ -1332,6 +2390,9 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			if (!(addressSpace == Local || addressSpace == Global)) {
 				return "address space must be .local or .global, not " + toString(addressSpace);
+			}
+			if (l2Evict >= 0 && addressSpace != Global) {
+				return "prefetch .L2::eviction_priority requires .global";
 			}
 			if (!(d.addressMode == PTXOperand::Indirect || d.addressMode == PTXOperand::Address ||
 				d.addressMode == PTXOperand::Immediate)) {
@@ -1402,17 +2463,24 @@ std::string ir::PTXInstruction::valid() const {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
-			if( type == PTXOperand::f64 ) {
-				if( modifier & ftz ) {
-					if( !( modifier & approx ) ) {
-						return "requires .approx.ftz for f64";
-					}
+			const int rounding = modifier & (rn | rz | rm | rp);
+			if( modifier & ~(approx | ftz | rn | rz | rm | rp) ) {
+				return "invalid modifier for rcp";
+			}
+			if( type == PTXOperand::f64 && (modifier & approx) ) {
+				if( modifier != (approx | ftz) ) {
+					return "rcp.approx.f64 requires .ftz and no rounding modifier";
 				}
-				else if ( !( modifier & rn ) && !( modifier & rz ) 
-					&& !( modifier & rm ) && !( modifier & rp ) ) {
-					return "rounding mode required";
+			} else {
+				if( modifier & approx ) {
+					if( rounding ) return "rcp.approx.f32 cannot specify rounding";
+				} else if( rounding != rn && rounding != rz
+					&& rounding != rm && rounding != rp ) {
+					return "rcp requires exactly one rounding modifier";
 				}
-			
+				if( type == PTXOperand::f64 && (modifier & ftz) ) {
+					return "rcp.rnd.f64 does not support .ftz";
+				}
 			}
 			if( !PTXOperand::valid( type, a.type )  ) {
 				return "operand A type " + PTXOperand::toString( a.type ) 
@@ -1422,43 +2490,46 @@ std::string ir::PTXInstruction::valid() const {
 				return "operand D type " + PTXOperand::toString( d.type ) 
 					+ " cannot be assigned to " + PTXOperand::toString( type );
 			}
-			if( modifier & ftz ) {
-				if( PTXOperand::isInt( type ) ) {
-					return toString( ftz ) 
-						+ " only valid for float point instructions.";
-				}
-			}
 			break;
 		}
 		case Red: {
-			if( ( reductionOperation == ReductionAnd 
+			if (cacheHint && (addressSpace != Global && addressSpace != Generic)) return "atomic cache hints require global addressing";
+			if (q.addressMode != PTXOperand::Invalid && (!cacheHint || (q.addressMode != PTXOperand::Register && q.addressMode != PTXOperand::Immediate) ||
+				q.vec != PTXOperand::v1 || !q.array.empty() || q.bytes() != 8 || !PTXOperand::valid(PTXOperand::b64, q.type)))
+				return "atomic cache policy requires .L2::cache_hint and a scalar 64-bit operand";
+			const bool half = type == PTXOperand::f16 || type == PTXOperand::f16x2;
+			if (modifier != (half ? noftz : Modifier_invalid)) return "red requires .noftz only for f16/f16x2";
+			if (half && (reductionOperation != ReductionAdd || b.addressMode != PTXOperand::Register))
+				return "half red requires add and a register value";
+			if( ( reductionOperation == ReductionAnd
 				|| reductionOperation == ReductionOr
-				|| reductionOperation == ReductionXor ) 
-				&& type != PTXOperand::b32 ) {
-				return "invalid instruction type " 
-					+ PTXOperand::toString( type ) + " for reduction " 
+				|| reductionOperation == ReductionXor )
+				&& type != PTXOperand::b32 && type != PTXOperand::b64 ) {
+				return "invalid instruction type "
+					+ PTXOperand::toString( type ) + " for reduction "
 					+ toString( reductionOperation );
 			}
 			if( reductionOperation == ReductionAdd
-				&& ( type != PTXOperand::u32 && type != PTXOperand::s32 
-				&& type != PTXOperand::f32 && type != PTXOperand::u64 ) ) {
-				return "invalid instruction type " 
-					+ PTXOperand::toString( type ) + " for reduction " 
+				&& ( type != PTXOperand::u32 && type != PTXOperand::s32
+				&& type != PTXOperand::u64 && type != PTXOperand::f32
+				&& type != PTXOperand::f64 && !half ) ) {
+				return "invalid instruction type "
+					+ PTXOperand::toString( type ) + " for reduction "
 					+ toString( reductionOperation );
 			}
 			if( ( reductionOperation == ReductionInc
 				|| reductionOperation == ReductionDec )
 				&& type != PTXOperand::u32 ) {
-				return "invalid instruction type " 
-					+ PTXOperand::toString( type ) + " for reduction " 
+				return "invalid instruction type "
+					+ PTXOperand::toString( type ) + " for reduction "
 					+ toString( reductionOperation );
 			}
 			if( ( reductionOperation == ReductionMin
 				|| reductionOperation == ReductionMax )
-				&& ( type != PTXOperand::u32 && type != PTXOperand::s32 
-				&& type != PTXOperand::f32 ) ) {
-				return "invalid instruction type " 
-					+ PTXOperand::toString( type ) + " for reduction " 
+				&& ( type != PTXOperand::u32 && type != PTXOperand::s32
+				&& type != PTXOperand::u64 && type != PTXOperand::s64 ) ) {
+				return "invalid instruction type "
+					+ PTXOperand::toString( type ) + " for reduction "
 					+ toString( reductionOperation );
 			}
 			if( a.addressMode != PTXOperand::Address 
@@ -1467,8 +2538,17 @@ std::string ir::PTXInstruction::valid() const {
 				&& a.addressMode != PTXOperand::Immediate ) {
 				return "operand A must be an address";
 			}
-			if( addressSpace != Shared && addressSpace != Global ) {
-				return "address space much be either shared or global";
+			if (a.vec != PTXOperand::v1 || !a.array.empty() || (a.addressMode != PTXOperand::Address &&
+				((a.bytes() != 4 && a.bytes() != 8) || (!PTXOperand::isInt(a.type) && a.type != PTXOperand::b32 && a.type != PTXOperand::b64))))
+				return "red requires a scalar integer address";
+			if (a.addressMode == PTXOperand::Immediate && a.imm_uint > 0xffffffffULL) return "red absolute address must fit in 32 bits";
+			if (b.vec != PTXOperand::v1 || !b.array.empty() || b.bytes() != PTXOperand::bytes(type) ||
+				(b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate &&
+				!(b.addressMode == PTXOperand::Special && b.special == PTXOperand::warpSize)) ||
+				(type != PTXOperand::b32 && type != PTXOperand::b64 && !PTXOperand::valid(type, b.type)))
+				return "red requires a scalar value compatible with instruction type";
+			if( addressSpace != Shared && addressSpace != Global && addressSpace != Generic ) {
+				return "red address space must be shared, global or generic";
 			}
 			break;
 		}
@@ -1500,6 +2580,9 @@ std::string ir::PTXInstruction::valid() const {
 			if( type != PTXOperand::f32 && type != PTXOperand::f64 ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
+			}
+			if( modifier != approx && modifier != (approx | ftz) ) {
+				return "rsqrt requires .approx with optional .ftz";
 			}
 			if( !PTXOperand::valid( type, a.type )  ) {
 				return "operand A type " + PTXOperand::toString( a.type ) 
@@ -1537,7 +2620,7 @@ std::string ir::PTXInstruction::valid() const {
 					+ " cannot be assigned to " + PTXOperand::toString( type );
 			}
 			if( !PTXOperand::valid( type, c.type )  ) {
-				return "operand C type " + PTXOperand::toString( b.type ) 
+				return "operand C type " + PTXOperand::toString( c.type )
 					+ " cannot be assigned to " + PTXOperand::toString( type );
 			}
 			break;		
@@ -1571,19 +2654,29 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case Set: {
+			if( a.type == PTXOperand::f16x2 ) {
+				// set.CmpOp{.BoolOp}{.ftz}.{f16x2,u32,s32}.f16x2: one 16-bit result per half.
+				if( type != PTXOperand::f16x2 && type != PTXOperand::u32 && type != PTXOperand::s32 )
+					return "set with .f16x2 source requires .f16x2, .u32 or .s32 destination";
+				if( !halfComparison( comparisonOperator ) )
+					return "invalid comparison " + toString( comparisonOperator ) + " for set.f16x2";
+				if( d.bytes() != 4 || b.bytes() != 4 ) return "set.f16x2 operands must be 32-bit";
+				break;
+			}
 			if( type != PTXOperand::s16 && type != PTXOperand::s32 
 				&& type != PTXOperand::s64 && type != PTXOperand::u16 
 				&& type != PTXOperand::u32 && type != PTXOperand::u64
 				&& type != PTXOperand::b16 && type != PTXOperand::b32 
 				&& type != PTXOperand::b64 && type != PTXOperand::f32
-				&& type != PTXOperand::f64 ) {
+				&& type != PTXOperand::f64 && type != PTXOperand::f16 ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
-			if( d.type != PTXOperand::s32 && d.type != PTXOperand::f32 
-				&& d.type != PTXOperand::u32 ) {
+			if( d.type != PTXOperand::s32 && d.type != PTXOperand::f32
+				&& d.type != PTXOperand::u32 && d.type != PTXOperand::b32
+				&& d.type != PTXOperand::b16 && d.type != PTXOperand::f16 ) {
 				return "operand D type " + PTXOperand::toString( d.type ) 
-					+ " invalid (must be u32, s32, or f32)";
+					+ " invalid (must be b16, f16, b32, u32, s32, or f32)";
 			}
 			if( c.type != PTXOperand::pred && 
 				c.addressMode != PTXOperand::Invalid ) {
@@ -1598,12 +2691,18 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case SetP: {
-			if( d.type != PTXOperand::pred ) {
+			if( d.type != PTXOperand::pred
+				&& d.addressMode != PTXOperand::BitBucket ) {
 				return "destination must be a predicate";
 			}
 			if( pq.type != PTXOperand::pred 
-				&& pq.addressMode != PTXOperand::Invalid ) {
+				&& pq.addressMode != PTXOperand::Invalid
+				&& pq.addressMode != PTXOperand::BitBucket ) {
 				return "Pq must be a predicate";
+			}
+			if( d.addressMode == PTXOperand::BitBucket
+				&& pq.addressMode == PTXOperand::BitBucket ) {
+				return "only one setp destination may be a sink";
 			}
 			if( c.type != PTXOperand::pred 
 				&& c.addressMode != PTXOperand::Invalid ) {
@@ -1615,9 +2714,19 @@ std::string ir::PTXInstruction::valid() const {
 				&& type != PTXOperand::u32 && type != PTXOperand::u64
 				&& type != PTXOperand::b16 && type != PTXOperand::b32 
 				&& type != PTXOperand::b64 && type != PTXOperand::f32
-				&& type != PTXOperand::f64 ) {
+				&& type != PTXOperand::f64 && type != PTXOperand::f16
+				&& type != PTXOperand::f16x2 ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
+			}
+			if( type == PTXOperand::f16x2 ) {
+				// PTX 8.0: setp.CmpOp{.BoolOp}{.ftz}.f16x2 p|q, a, b; p gets the low half,
+				// q the high half. Either destination may be a sink, but q must be present.
+				if( pq.addressMode == PTXOperand::Invalid ) return "setp.f16x2 requires two destinations p|q";
+				if( !halfComparison( comparisonOperator ) )
+					return "invalid comparison " + toString( comparisonOperator ) + " for setp.f16x2";
+				if( a.bytes() != 4 || b.bytes() != 4 ) return "setp.f16x2 operands must be 32-bit";
+				break;
 			}
 			if( !PTXOperand::valid( type, a.type )  ) {
 				return "operand A type " + PTXOperand::toString( a.type ) 
@@ -1634,6 +2743,22 @@ std::string ir::PTXInstruction::valid() const {
 				}
 			}
 			break;			
+		}
+		case ShflSync: {
+			if (type != PTXOperand::b32 || modifier || vec != PTXOperand::v1 || shuffleMode < Up || shuffleMode > Idx) return "invalid shfl.sync mode/type/modifier";
+			for (const auto* operand : {&d, &a, &b, &c, &q, &pq})
+				if (operand->vec != PTXOperand::v1 || !operand->array.empty()) return "shfl.sync requires scalar operands";
+			// PTX 8.0 syntax is d[|p]: only the predicate destination may be a sink.
+			if (!(d.addressMode == PTXOperand::Register && d.bytes() == 4) ||
+				(a.addressMode != PTXOperand::Register && a.addressMode != PTXOperand::Immediate &&
+				!(a.addressMode == PTXOperand::Special && a.special == PTXOperand::warpSize)) || a.bytes() != 4) return "shfl.sync requires 32-bit data operands";
+			for (const auto* control : {&b, &c, &q})
+				if ((control->addressMode != PTXOperand::Register && control->addressMode != PTXOperand::Immediate &&
+					!(control->addressMode == PTXOperand::Special && control->special == PTXOperand::warpSize)) || control->bytes() != 4 ||
+					(!PTXOperand::isInt(control->type) && control->type != PTXOperand::b32)) return "shfl.sync requires 32-bit integer controls and member mask";
+			if (pq.addressMode != PTXOperand::Invalid && pq.addressMode != PTXOperand::BitBucket &&
+				!(pq.addressMode == PTXOperand::Register && pq.type == PTXOperand::pred && pq.condition == PTXOperand::Pred)) return "invalid shfl.sync predicate destination";
+			break;
 		}
 		case Shfl: {
 			if( type != PTXOperand::b32 ) {
@@ -1680,10 +2805,9 @@ std::string ir::PTXInstruction::valid() const {
 				stream << "second source operand must be 32-bit, got " << b.bytes() << " bytes";
 				return stream.str();
 			}
-			if ( c.bytes() != 4 && c.addressMode != PTXOperand::Immediate ) {
-				std::stringstream stream;
-				stream << "shift amount must be 32-bit, got " << c.bytes() << " bytes";
-				return stream.str();
+			if ( c.addressMode != PTXOperand::Immediate
+				&& !PTXOperand::valid( PTXOperand::u32, c.type ) ) {
+				return "shift amount must have a 32-bit integer type";
 			}
 			break;
 		}
@@ -1693,18 +2817,19 @@ std::string ir::PTXInstruction::valid() const {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
-			if( d.bytes() != a.bytes() 
-				&& a.addressMode != PTXOperand::Immediate ) {
-				std::stringstream stream;
-				stream << "size of operand A " << a.bytes() 
-					<< " does not match size of operand D " << d.bytes();
-				return stream.str(); 
+			if( !PTXOperand::valid( type, d.type ) ) {
+				return "operand D type " + PTXOperand::toString( d.type )
+					+ " cannot be assigned to " + PTXOperand::toString( type );
 			}
-			if( b.bytes() != 4 && b.addressMode != PTXOperand::Immediate ) {
-				std::stringstream stream;
-				stream << "size of operand B " << a.bytes() 
-					<< " must be 4 bytes";
-				return stream.str();
+			if( a.addressMode != PTXOperand::Immediate
+				&& !PTXOperand::valid( type, a.type ) ) {
+				return "operand A type " + PTXOperand::toString( a.type )
+					+ " cannot be assigned to " + PTXOperand::toString( type );
+			}
+			if( b.addressMode != PTXOperand::Immediate
+				&& !PTXOperand::valid( PTXOperand::u32, b.type ) ) {
+				return "operand B type " + PTXOperand::toString( b.type )
+					+ " cannot be assigned to u32";
 			}
 			break;
 		}
@@ -1717,17 +2842,19 @@ std::string ir::PTXInstruction::valid() const {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
-			if( d.bytes() != a.bytes() ) {
-				std::stringstream stream;
-				stream << "size of operand A " << a.bytes() 
-					<< " does not match size of operand D " << d.bytes();
-				return stream.str(); 
+			if( !PTXOperand::valid( type, d.type ) ) {
+				return "operand D type " + PTXOperand::toString( d.type )
+					+ " cannot be assigned to " + PTXOperand::toString( type );
 			}
-			if( b.bytes() != 4 && b.addressMode != PTXOperand::Immediate ) {
-				std::stringstream stream;
-				stream << "size of operand B " << a.bytes() 
-					<< " must be 4 bytes";
-				return stream.str();
+			if( a.addressMode != PTXOperand::Immediate
+				&& !PTXOperand::valid( type, a.type ) ) {
+				return "operand A type " + PTXOperand::toString( a.type )
+					+ " cannot be assigned to " + PTXOperand::toString( type );
+			}
+			if( b.addressMode != PTXOperand::Immediate
+				&& !PTXOperand::valid( PTXOperand::u32, b.type ) ) {
+				return "operand B type " + PTXOperand::toString( b.type )
+					+ " cannot be assigned to u32";
 			}
 			break;
 		}
@@ -1735,7 +2862,10 @@ std::string ir::PTXInstruction::valid() const {
 			if( !( type == PTXOperand::f32 ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
-			}			
+			}
+			if( modifier != approx && modifier != ( approx | ftz ) ) {
+				return "sin requires .approx with optional .ftz";
+			}
 			if( !PTXOperand::valid( type, a.type ) ) {
 				return "operand A type " + PTXOperand::toString( a.type ) 
 					+ " cannot be assigned to " + PTXOperand::toString( type );
@@ -1743,12 +2873,6 @@ std::string ir::PTXInstruction::valid() const {
 			if( !PTXOperand::valid( type, d.type ) ) {
 				return "operand D type " + PTXOperand::toString( d.type ) 
 					+ " cannot be assigned to " + PTXOperand::toString( type );
-			}
-			if( modifier & ftz ) {
-				if( PTXOperand::isInt( type ) ) {
-					return toString( ftz ) 
-						+ " only valid for float point instructions.";
-				}
 			}
 			break;
 		}
@@ -1786,32 +2910,34 @@ std::string ir::PTXInstruction::valid() const {
 				return "operand C must be either s32 or f32 assignable";
 			}
 			if( modifier & ftz ) {
-				if( PTXOperand::isInt( type ) ) {
+				if( c.type != PTXOperand::f32 ) {
 					return toString( ftz ) 
-						+ " only valid for float point instructions.";
+						+ " only valid for an f32 comparison.";
 				}
 			}
 			break;
 			
 		}
 		case Sqrt: {
-			if( ( modifier & approx ) ) {
-				if( type != PTXOperand::f32 ) {
-					return "only f32 supported for approximate";
-				}
-			}
 			if( type != PTXOperand::f32 && type != PTXOperand::f64 ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
-			if( type == PTXOperand::f64 ) {
-				if( !( modifier & rn ) && !( modifier & rz ) 
-					&& !( modifier & rm ) && !( modifier & rp ) ) {
-					return "requires a rounding modifier";
+			const int rounding = modifier & (rn | rz | rm | rp);
+			if( modifier & ~(approx | ftz | rn | rz | rm | rp) ) {
+				return "invalid modifier for sqrt";
+			}
+			if( modifier & approx ) {
+				if( type != PTXOperand::f32 ) {
+					return "sqrt.approx only supports f32";
 				}
-				if( !( modifier & rn ) ) {
-					return "only nearest rounding supported";
-				}
+				if( rounding ) return "sqrt.approx cannot specify rounding";
+			} else if( rounding != rn && rounding != rz
+				&& rounding != rm && rounding != rp ) {
+				return "sqrt requires exactly one rounding modifier";
+			}
+			if( type == PTXOperand::f64 && (modifier & ftz) ) {
+				return "sqrt.rnd.f64 does not support .ftz";
 			}
 			if( !PTXOperand::valid( type, a.type )  ) {
 				return "operand A type " + PTXOperand::toString( a.type ) 
@@ -1820,12 +2946,6 @@ std::string ir::PTXInstruction::valid() const {
 			if( !PTXOperand::valid( type, d.type ) ) {
 				return "operand D type " + PTXOperand::toString( d.type ) 
 					+ " cannot be assigned to " + PTXOperand::toString( type );
-			}
-			if( modifier & ftz ) {
-				if( PTXOperand::isInt( type ) ) {
-					return toString( ftz ) 
-						+ " only valid for float point instructions.";
-				}
 			}
 			break;			
 		}
@@ -1858,20 +2978,28 @@ std::string ir::PTXInstruction::valid() const {
 					+ " cannot be assigned to " + PTXOperand::toString( type ) 
 					+ ", not even for relaxed typed instructions.";
 			}
+			if( l1Evict >= 0 && ( volatility == Volatile || mmio || cacheOperation != Wb ) ) {
+				return "st .L1::eviction_priority excludes .volatile, .mmio and cache operators";
+			}
 			break;
 		}
 		case Sub: {
 			if ( !( type != PTXOperand::s8 && type != PTXOperand::u8 && 
-				type != PTXOperand::b8 && type != PTXOperand::f16 
+				type != PTXOperand::b8
 				&& type != PTXOperand::pred ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
+			}
+			if ((type == PTXOperand::f16 || type == PTXOperand::f16x2)
+				&& (modifier & ~(rn | ftz | sat))) {
+				return "sub.f16 only supports .rn, .ftz, and .sat";
 			}
 			if( carry == CC ) {
 				if( ( modifier & sat ) ) {
 					return "saturate not supported with carry out";
 				}
-				if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ) ) {
+				if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ||
+					type == PTXOperand::u64 || type == PTXOperand::s64 ) ) {
 					return "invalid instruction type " 
 						+ PTXOperand::toString( type );
 				}
@@ -1897,7 +3025,8 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case SubC: {
-			if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ) ) {
+			if( !( type == PTXOperand::u32 || type == PTXOperand::s32 ||
+				type == PTXOperand::u64 || type == PTXOperand::s64 ) ) {
 				return "invalid instruction type " 
 					+ PTXOperand::toString( type );
 			}
@@ -1912,6 +3041,17 @@ std::string ir::PTXInstruction::valid() const {
 			if( !PTXOperand::valid( type, b.type )  ) {
 				return "operand B type " + PTXOperand::toString( b.type ) 
 					+ " cannot be assigned to " + PTXOperand::toString( type );
+			}
+			break;
+		}
+		case Tanh: {
+			if( !(type == PTXOperand::f32 || type == PTXOperand::f16
+				|| type == PTXOperand::f16x2) || modifier != approx ) {
+				return "tanh requires .approx with f32, f16, or f16x2";
+			}
+			if( !PTXOperand::valid(type, a.type)
+				|| !PTXOperand::valid(type, d.type) ) {
+				return "tanh operands must have compatible types";
 			}
 			break;
 		}
@@ -1980,16 +3120,19 @@ std::string ir::PTXInstruction::valid() const {
 		}
 		case Suld: {
 			if (formatMode == Formatted && !(type == ir::PTXOperand::b32
-				|| type == ir::PTXOperand::u32 
+				|| type == ir::PTXOperand::u32
 				|| type == ir::PTXOperand::s32
 				|| type == ir::PTXOperand::f32)) {
 				return "sust.p - data type must be .b32, .u32, .s32, or .f32";
 			}
 			else if (formatMode == Unformatted && !(type == ir::PTXOperand::b8
-				|| type == ir::PTXOperand::b16 
+				|| type == ir::PTXOperand::b16
 				|| type == ir::PTXOperand::b32
 				|| type == ir::PTXOperand::b64)) {
 				return "sust.b - data type must be .b8, .b16, .b32, or .b64";
+			}
+			if (cacheOperation == Nc || cacheOperation == Lu) {
+				return "suld cache operator must be .ca, .cg, .cs, or .cv";
 			}
 			break;
 		}
@@ -2000,6 +3143,24 @@ std::string ir::PTXInstruction::valid() const {
 			}
 			if (type != ir::PTXOperand::b32) {
 				return "data type must be .b32";
+			}
+			break;
+		}
+		case Szext: {
+			if( type != PTXOperand::u32 && type != PTXOperand::s32 ) {
+				return "szext instruction requires .u32 or .s32 type";
+			}
+			if( shiftMode != ShiftMode::Clamp && shiftMode != ShiftMode::Wrap ) {
+				return "szext instruction requires .clamp or .wrap mode";
+			}
+			if( !PTXOperand::valid( type, d.type ) ) {
+				return "invalid szext destination type " + PTXOperand::toString(d.type);
+			}
+			if( !PTXOperand::valid( type, a.type ) ) {
+				return "invalid szext source type " + PTXOperand::toString(a.type);
+			}
+			if( b.type != PTXOperand::u32 ) {
+				return "szext operand B must have .u32 type";
 			}
 			break;
 		}
@@ -2019,16 +3180,19 @@ std::string ir::PTXInstruction::valid() const {
 		}
 		case Sust: {
 			if (formatMode == Formatted && !(type == ir::PTXOperand::b32
-				|| type == ir::PTXOperand::u32 
+				|| type == ir::PTXOperand::u32
 				|| type == ir::PTXOperand::s32
 				|| type == ir::PTXOperand::f32)) {
 				return "sust.p - data type must be .b32, .u32, .s32, or .f32";
 			}
 			else if (formatMode == Unformatted && !(type == ir::PTXOperand::b8
-				|| type == ir::PTXOperand::b16 
+				|| type == ir::PTXOperand::b16
 				|| type == ir::PTXOperand::b32
 				|| type == ir::PTXOperand::b64)) {
 				return "sust.b - data type must be .b8, .b16, .b32, or .b64";
+			}
+			if (cacheOperation == Nc || cacheOperation == Lu) {
+				return "sust cache operator must be .ca, .cg, .cs, or .cv";
 			}
 			break;
 		}
@@ -2036,6 +3200,18 @@ std::string ir::PTXInstruction::valid() const {
 			break;
 		}
 		case Vote: {
+			if (voteSync) {
+				if (vote < All || vote > Ballot || modifier || vec != PTXOperand::v1 ||
+					type != (vote == Ballot ? PTXOperand::b32 : PTXOperand::pred)) return "invalid vote.sync mode/type/modifier";
+				for (const auto* operand : {&d, &a, &b})
+					if (operand->vec != PTXOperand::v1 || !operand->array.empty()) return "vote.sync requires scalar operands";
+				if (d.addressMode != PTXOperand::Register || a.addressMode != PTXOperand::Register ||
+					(vote == Ballot && d.bytes() != 4) || (vote != Ballot && d.condition != PTXOperand::Pred))
+					return "vote.sync requires scalar destination and source registers";
+				if ((b.addressMode != PTXOperand::Register && b.addressMode != PTXOperand::Immediate) ||
+					b.bytes() != 4 || (!PTXOperand::isInt(b.type) && b.type != PTXOperand::b32))
+					return "vote.sync member mask must be a 32-bit integer";
+			}
 			if( vote != Ballot && d.type != PTXOperand::pred ) {
 				return "destination must be a predicate";
 			}
@@ -2070,6 +3246,8 @@ std::string ir::PTXInstruction::valid() const {
 		}
 		default: return "check not implemented for " + toString(opcode); break;
 	}
+	if (opcode != Mma && (d.vec == PTXOperand::v8 || a.vec == PTXOperand::v8 ||
+		b.vec == PTXOperand::v8 || c.vec == PTXOperand::v8)) return "eight-register fragments require mma";
 	return "";
 }
 
@@ -2112,16 +3290,30 @@ std::string ir::PTXInstruction::toString() const {
 					+ b.toString();
 		}
 		case Atom: {
-			std::string result = guard() + "atom." + toString( addressSpace ) 
-				+ "." + toString( atomicOperation ) + "." 
-				+ PTXOperand::toString( type ) + " "
-				+ d.toString() + ", [" + a.toString() + "], " 
+			std::string result = guard() + "atom.";
+			if( semantics != Relaxed ) {
+				result += toString( semantics ) + ".";
+			}
+			if( scope != Level_Invalid ) {
+				// same ".gpu" spelling quirk as fence's printer
+				result += ( ( scope == GlobalLevel ) ? "gpu" : toString( scope ) )
+					+ std::string( "." );
+			}
+			if (addressSpace != Generic) result += toString(addressSpace) + ".";
+			result += toString( atomicOperation ) + ".";
+			if (modifier & noftz) result += "noftz.";
+			if (cacheHint) result += "L2::cache_hint.";
+			result += PTXOperand::toString( type ) + " "
+				+ d.toString() + ", [" + a.toString() + "], "
 				+ b.toString();
 			if( c.addressMode != PTXOperand::Invalid ) {
 				result += ", " + c.toString();
 			}
+			if (q.addressMode != PTXOperand::Invalid) result += ", " + q.toString();
 			return result;
 		}
+		case BarWarp:
+			return guard() + "bar.warp.sync " + b.toString();
 		case Bar: {
 			std::string result = guard() + "bar." + toString(barrierOperation);
 			ir::PTXOperand ir::PTXInstruction::* instrMembers [] = { 
@@ -2162,6 +3354,22 @@ std::string ir::PTXInstruction::toString() const {
 			if( shiftAmount ) result += "shiftamt.";
 			result += PTXOperand::toString( type ) + " " 
 				+ d.toString() + ", " + a.toString();
+			return result;
+		}
+		case Bmsk: {
+			return guard() + "bmsk." + toString(shiftMode) + ".b32 "
+				+ d.toString() + ", " + a.toString() + ", " + b.toString();
+		}
+		case Lop3: {
+			std::string result = guard() + "lop3";
+			if( pq.addressMode != PTXOperand::Invalid ) {
+				result += "." + toString(booleanOperator);
+			}
+			result += ".b32 " + d.toString();
+			if( pq.addressMode != PTXOperand::Invalid ) result += "|" + pq.toString();
+			result += ", " + a.toString() + ", " + b.toString() + ", "
+				+ c.toString() + ", " + immLut.toString();
+			if( pq.addressMode != PTXOperand::Invalid ) result += ", " + q.toString();
 			return result;
 		}
 		case Bra: {
@@ -2218,38 +3426,11 @@ std::string ir::PTXInstruction::toString() const {
 		}
 		case Cvt: {
 			std::string result = guard() + "cvt.";
-			if( PTXOperand::isFloat( d.type )) {
-				if ((d.type == PTXOperand::f32 && a.type == PTXOperand::f64) 
-					|| PTXOperand::isInt(a.type)) {
-					result += modifierString( modifier, carry );
-				}
-			}
-			else {
-				if( modifier & rn ) {
-					result += "rn.";
-				} else if( modifier & rz ) {
-					result += "rz.";
-				} else if( modifier & rm ) {
-					result += "rm.";
-				} else if( modifier & rp ) {
-					result += "rp.";
-				} else if( modifier & rni ) {
-          result += "rni.";
-        } else if( modifier & rzi ) {
-          result += "rzi.";
-        } else if( modifier & rmi ) {
-          result += "rmi.";
-        } else if( modifier & rpi ) {
-          result += "rpi.";
-        }
-
-				if( modifier & ftz ) {
-					result += "ftz.";
-				}
-				if( modifier & sat ) {
-					result += "sat.";
-				}
-			}
+			if( modifier & rni ) result += "rni.";
+			else if( modifier & rzi ) result += "rzi.";
+			else if( modifier & rmi ) result += "rmi.";
+			else if( modifier & rpi ) result += "rpi.";
+			result += modifierString(modifier, carry);
 			
 			PTXOperand::DataType sourceType = a.type;
 	
@@ -2260,6 +3441,11 @@ std::string ir::PTXInstruction::toString() const {
 			result += PTXOperand::toString( type ) + "." 
 				+ PTXOperand::toString( sourceType ) + " " + d.toString() + ", " 
 				+ a.toString();
+			if( type == PTXOperand::f16x2 || type == PTXOperand::bf16x2 ) {
+				result += ", " + b.toString();
+			} else if (b.addressMode != PTXOperand::Invalid) {
+				result += ", " + b.toString();
+			}
 			return result;
 		}
 		case Cvta: {
@@ -2276,13 +3462,21 @@ std::string ir::PTXInstruction::toString() const {
 		}
 		case Div: {
 			std::string result = guard() + "div.";
-			if( divideFull ) {
+			if( modifier & full ) {
 				result += "full.";
 			}
 			result += modifierString( modifier, carry );
 			result += PTXOperand::toString( type ) + " " + d.toString() + ", " 
 				+ a.toString() + ", " + b.toString();
 			return result;
+		}
+		case Dp2a:
+		case Dp4a: {
+			std::string result = guard() + toString(opcode) + ".";
+			if( opcode == Dp2a ) result += modifierString(modifier);
+			return result + PTXOperand::toString(type) + "."
+				+ PTXOperand::toString(bType) + " " + d.toString() + ", "
+				+ a.toString() + ", " + b.toString() + ", " + c.toString();
 		}
 		case Ex2: {
 			std::string result = guard() + "ex2.";
@@ -2301,6 +3495,10 @@ std::string ir::PTXInstruction::toString() const {
 				+ a.toString() + ", " + b.toString() + ", " + c.toString();
 			return result;
 		}
+		case Fns: {
+			return guard() + "fns.b32 " + d.toString() + ", " + a.toString()
+				+ ", " + b.toString() + ", " + c.toString();
+		}
 		case Isspacep: {
 			std::string result = guard() + "isspacep." + toString(addressSpace) 
 				+ " " + d.toString() + ", " + a.toString();
@@ -2310,19 +3508,35 @@ std::string ir::PTXInstruction::toString() const {
 			std::string result = guard() + "ld.";
 			if( volatility == Volatile ) {
 				result += "volatile.";
-			}
-			if( cacheOperation != Ca ) {
-				result += toStringLoad(cacheOperation) + ".";
+			} else if( semantics != Weak ) {
+				if( mmio ) {
+					result += "mmio.";
+				}
+				result += toString( semantics ) + ".";
+				if( scope != Level_Invalid ) {
+					result += ( ( scope == GlobalLevel ) ? "gpu" : toString( scope ) )
+						+ std::string( "." );
+				}
 			}
 			if( addressSpace != Generic ) {
 				result += toString(addressSpace) + ".";
 			}
+			if( cacheOperation != Ca ) {
+				result += toStringLoad(cacheOperation) + ".";
+			}
+			if( l1Evict >= 0 ) result += l1EvictString( l1Evict ) + ".";
+			if( prefetchSize ) result += "L2::" + std::to_string( prefetchSize ) + "B.";
 			if( d.vec != PTXOperand::v1 ) {
 				result += toString( d.vec ) + ".";
 			}
 			result += PTXOperand::toString( type ) + " " + d.toString() + ", [" 
 				+ a.toString() + "]";
 			return result;
+		}
+		case Ldmatrix: {
+			return guard() + "ldmatrix.sync.aligned.m8n8.x" + std::to_string(unsigned(vec)) +
+				(matrixTranspose ? ".trans" : "") + (addressSpace == Shared ? ".shared" : "") +
+				".b16 " + d.toString() + ", [" + a.toString() + "]";
 		}
 		case Ldu: {
 			std::string result = guard() + "ldu.";
@@ -2363,6 +3577,38 @@ std::string ir::PTXInstruction::toString() const {
 				+ a.toString() + ", " + b.toString() + ", " + c.toString();
 			return result;
 		}
+		case Mma: {
+			std::string shapeName;
+			switch (mmaShape) {
+			case MmaM8N8K32:  shapeName = "8n8k32";  break;
+			case MmaM16N8K64: shapeName = "16n8k64"; break;
+			case MmaM8N8K128: shapeName = "8n8k128"; break;
+			case MmaM16N8K128: shapeName = "16n8k128"; break;
+			case MmaM16N8K256: shapeName = "16n8k256"; break;
+			case MmaM8N8K4:   shapeName = "8n8k4";   break;
+			case MmaM16N8K4:  shapeName = "16n8k4";  break;
+			case MmaM16N8K8:  shapeName = "16n8k8";  break;
+			case MmaM8N8K16:  shapeName = "8n8k16";  break;
+			case MmaM16N8K32: shapeName = "16n8k32"; break;
+			default:          shapeName = "16n8k16"; break;
+			}
+			std::string result = guard() +
+				(mmaSparse ? "mma.sp.sync.aligned.m" : "mma.sync.aligned.m") +
+				shapeName +
+				(mmaAColumnMajor ? ".col" : ".row") +
+				(mmaBColumnMajor ? ".col." : ".row.") +
+				((modifier & satfinite) ? "satfinite." : "") +
+				PTXOperand::toString(type) + "." +
+				PTXOperand::toString(a.type) + "." +
+				PTXOperand::toString(b.type) + "." +
+				PTXOperand::toString(c.type) +
+				(a.type == PTXOperand::b1 ? "." + toString(booleanOperator) + ".popc" : "") +
+				(type == PTXOperand::f64 && modifier ? "." + toString((Modifier)modifier) : "") + " " +
+				d.toString() + ", " + a.toString() + ", " +
+				b.toString() + ", " + c.toString();
+			if (mmaSparse) result += ", " + q.toString() + ", " + mmaSelector.toString();
+			return result;
+		}
 		case MadC: {
 			std::string result = guard() + "madc.";
 			result += modifierString( modifier, carry );
@@ -2378,11 +3624,27 @@ std::string ir::PTXInstruction::toString() const {
 		case Membar: {
 			return guard() + "membar." + toString( level );
 		}
+		case Fence: {
+			// fence spells the device-wide scope ".gpu", membar spells
+			// the same GlobalLevel value ".gl" -- toString(Level) can't be reused as-is
+			std::string scope = ( level == GlobalLevel ) ? "gpu" : toString( level );
+			return guard() + "fence." + toString( semantics ) + "." + scope;
+		}
 		case Min: {
 			return guard() + "min." + modifierString(modifier, carry)
 				+ PTXOperand::toString( type ) + " "
 				+ d.toString() + ", " + a.toString() + ", " + b.toString();
 		}
+		case Match:
+			return guard() + "match." + (matchAll ? "all" : "any") + ".sync." + PTXOperand::toString(type) + " " +
+				d.toString() + (pq.addressMode == PTXOperand::Invalid ? "" : "|" + pq.toString()) + ", " + a.toString() + ", " + b.toString();
+		case Redux:
+			return guard() + "redux.sync." + toString(reductionOperation) + "." + PTXOperand::toString(type) +
+				" " + d.toString() + ", " + a.toString() + ", " + b.toString();
+		case Activemask:
+			return guard() + "activemask.b32 " + d.toString();
+		case Movmatrix:
+			return guard() + "movmatrix.sync.aligned.m8n8.trans.b16 " + d.toString() + ", " + a.toString();
 		case Mov: {
 			return guard() + "mov." + PTXOperand::toString( type ) + " "
 				+ d.toString() + ", " + a.toString();
@@ -2410,16 +3672,77 @@ std::string ir::PTXInstruction::toString() const {
 			return guard() + "not." + PTXOperand::toString( type ) + " "
 				+ d.toString() + ", " + a.toString();
 		}
+		case Nanosleep: {
+			return guard() + "nanosleep.u32 " + d.toString();
+		}
+		case Discard: {
+			return guard() + "discard" + ( addressSpace == Global ? ".global" : "" )
+				+ ".L2 [" + d.toString() + "], " + a.toString();
+		}
+		case Applypriority: {
+			return guard() + "applypriority" + ( addressSpace == Global ? ".global" : "" )
+				+ ".L2::evict_normal [" + d.toString() + "], " + a.toString();
+		}
 		case Pmevent: {
-			return guard() + "pmevent." + toString( level );
+			return guard() + (pmeventMask ? "pmevent.mask " : "pmevent ")
+				+ d.toString();
 		}
 		case Popc: {
 			return guard() + "popc." + PTXOperand::toString( type ) + " "
 				+ d.toString() + ", " + a.toString();
 		}
 		case Prefetch: {
+			if (l2Evict >= 0) return guard() + "prefetch." + toString(addressSpace)
+				+ (l2Evict == 1 ? ".L2::evict_last" : ".L2::evict_normal") + " [" + d.toString() + "]";
 			return guard() + "prefetch." + toString(addressSpace) + "." + 
 				PTXInstruction::toString(cacheLevel) + " [" + d.toString() + "]";
+		}
+		case WmmaMma: {
+			unsigned int m,n,k; wmmaDimensions(m,n,k);
+			std::string result = guard() + "wmma.mma" + (a.type == PTXOperand::b1 ? "." + toString(booleanOperator) + ".popc" : "") +
+				".sync.aligned.m" + std::to_string(m) + "n" + std::to_string(n) + "k" + std::to_string(k) + (mmaAColumnMajor ? ".col" : ".row") + (mmaBColumnMajor ? ".col" : ".row");
+			if (a.type == PTXOperand::f64 && modifier) result += "." + toString((Modifier)modifier);
+			result += "." + PTXOperand::toString(type) + (a.type == PTXOperand::f16 ? "" : "." + PTXOperand::toString(a.type) + "." + PTXOperand::toString(b.type)) + "." + PTXOperand::toString(c.type);
+			if (modifier & satfinite) result += ".satfinite";
+			return result + " " + d.toString() + ", " + a.toString() + ", " + b.toString() + ", " + c.toString();
+		}
+		case WmmaLoadA: case WmmaLoadB: case WmmaLoadC: case WmmaStoreD: {
+			unsigned int m,n,k; wmmaDimensions(m,n,k);
+			return guard() + toString(opcode) + ".sync.aligned.m" + std::to_string(m) + "n" + std::to_string(n) + "k" + std::to_string(k) +
+				(mmaAColumnMajor ? ".col" : ".row") + (addressSpace == Generic ? "" : "." + toString(addressSpace)) + "." + PTXOperand::toString(type) + " " +
+				(opcode == WmmaStoreD ? "[" + d.toString() + "], " + a.toString() : d.toString() + ", [" + a.toString() + "]") + (b.addressMode == PTXOperand::Invalid ? "" : ", " + b.toString());
+		}
+		case MbarrierPendingCount: return guard() + toString(opcode) + ".b64 " + d.toString() + ", " + a.toString();
+		case MbarrierArrive:
+		case MbarrierArriveDrop:
+			return guard() + toString(opcode) + (mbarrierNoComplete ? ".noComplete" : "") + (addressSpace == Shared ? ".shared" : "") +
+				".b64 " + d.toString() + ", [" + a.toString() + "]" + (mbarrierNoComplete ? ", " + b.toString() : "");
+		case MbarrierTestWait:
+		case MbarrierTestWaitParity:
+			return guard() + toString(opcode) + (addressSpace == Shared ? ".shared" : "") + ".b64 " + d.toString() + ", [" + a.toString() + "], " + b.toString();
+		case CpAsyncMbarrierArrive:
+		case CpAsyncMbarrierArriveNoInc:
+		case MbarrierInit:
+		case MbarrierInval:
+			return guard() + toString(opcode) + (addressSpace == Shared ? ".shared" : "") + ".b64 [" + a.toString() + "]" +
+				(opcode == MbarrierInit ? ", " + b.toString() : "");
+		case CpAsync: {
+			std::string result = guard() + "cp.async." + (cacheOperation == Cg ? "cg" : "ca") + ".shared.global";
+			// Omit an unused hint to keep a folded source-size literal unambiguous.
+			if (cacheHint && (q.addressMode != PTXOperand::Invalid || c.addressMode != PTXOperand::Immediate)) result += ".L2::cache_hint";
+			if (prefetchSize) result += ".L2::" + std::to_string(prefetchSize) + "B";
+			return result + " [" + d.toString() + "], [" + a.toString() + "], " + b.toString() +
+				(c.addressMode == PTXOperand::Invalid ? "" : ", " + c.toString()) + (q.addressMode == PTXOperand::Invalid ? "" : ", " + q.toString());
+		}
+		case CpAsyncCommitGroup:
+		case CpAsyncWaitAll: return guard() + toString(opcode);
+		case CpAsyncWaitGroup: return guard() + toString(opcode) + " " + a.toString();
+		case Createpolicy: {
+			const std::string start = guard() + "createpolicy.";
+			if (policyMode == PolicyCvt) return start + "cvt.L2.b64 " + d.toString() + ", " + a.toString();
+			const std::string mode = policyMode == PolicyRange ? (addressSpace == Global ? "range.global." : "range.") : "fractional.";
+			return start + mode + toString(primaryPriority) + "." + toString(secondaryPriority) + ".b64 " + d.toString() + ", " +
+				(policyMode == PolicyRange ? "[" + a.toString() + "], " + b.toString() + ", " + c.toString() : a.toString());
 		}
 		case Prefetchu: {
 			return guard() + "prefetchu.L1 [" + d.toString() + "]";
@@ -2447,10 +3770,22 @@ std::string ir::PTXInstruction::toString() const {
 			return result;
 		}
 		case Red: {
-			return guard() + "red." + toString( addressSpace ) + "." 
-				+ toString( reductionOperation ) + "." 
-				+ PTXOperand::toString( type ) + " " + d.toString() + ", " 
-				+ a.toString();
+			std::string result = guard() + "red.";
+			if( semantics != Relaxed ) {
+				result += toString( semantics ) + ".";
+			}
+			if( scope != Level_Invalid ) {
+				result += ( ( scope == GlobalLevel ) ? "gpu" : toString( scope ) )
+					+ std::string( "." );
+			}
+			if (addressSpace != Generic) result += toString(addressSpace) + ".";
+			result += toString( reductionOperation ) + ".";
+			if (modifier & noftz) result += "noftz.";
+			if (cacheHint) result += "L2::cache_hint.";
+			result += PTXOperand::toString( type ) + " [" + a.toString() + "], "
+				+ b.toString();
+			if (q.addressMode != PTXOperand::Invalid) result += ", " + q.toString();
+			return result;
 		}
 		case Rem: {
 			return guard() + "rem." + PTXOperand::toString( type ) + " "
@@ -2501,6 +3836,7 @@ std::string ir::PTXInstruction::toString() const {
 			if( c.addressMode != PTXOperand::Invalid ) {
 				result += toString( booleanOperator ) + ".";
 			}
+			if( ftz & modifier ) result += "ftz.";
 			result += PTXOperand::toString( type ) + " " + d.toString();
 			if( pq.addressMode != PTXOperand::Invalid && !isPt( pq ) ) {
 				result += "|" + pq.toString();
@@ -2517,8 +3853,9 @@ std::string ir::PTXInstruction::toString() const {
 				+ d.toString() + ", " + a.toString() + ", " + b.toString()
 				+ ',' + c.toString();
 		}
-		case Shfl: {
-			std::string result = guard() + "shl." + toString( shuffleMode )
+		case Shfl:
+		case ShflSync: {
+			std::string result = guard() + toString(opcode) + "." + toString( shuffleMode )
 				+ "." +	PTXOperand::toString( type ) + " " + d.toString();
 
 			if( pq.addressMode != PTXOperand::Invalid && !isPt( pq ) ) {
@@ -2527,6 +3864,7 @@ std::string ir::PTXInstruction::toString() const {
 				
 			result += ", " + a.toString() + ", " + b.toString() + ", " +
 				c.toString();
+			if (opcode == ShflSync) result += ", " + q.toString();
 		
 			return result;
 		}
@@ -2562,13 +3900,23 @@ std::string ir::PTXInstruction::toString() const {
 			std::string result = guard() + "st.";
 			if( volatility == Volatile ) {
 				result += "volatile.";
-			}
-			if( cacheOperation != Wb ) {
-				result += toStringStore(cacheOperation) + ".";
+			} else if( semantics != Weak ) {
+				if( mmio ) {
+					result += "mmio.";
+				}
+				result += toString( semantics ) + ".";
+				if( scope != Level_Invalid ) {
+					result += ( ( scope == GlobalLevel ) ? "gpu" : toString( scope ) )
+						+ std::string( "." );
+				}
 			}
 			if( addressSpace != Generic ) {
 				result += toString(addressSpace) + ".";
 			}
+			if( cacheOperation != Wb ) {
+				result += toStringStore(cacheOperation) + ".";
+			}
+			if( l1Evict >= 0 ) result += l1EvictString( l1Evict ) + ".";
 			if( a.vec != PTXOperand::v1 ) {
 				result += toString( a.vec ) + ".";
 			}
@@ -2602,6 +3950,11 @@ std::string ir::PTXInstruction::toString() const {
 				+ "." + PTXOperand::toString(type) + " " + d.toString() 
 				+ ", [" + a.toString() + "]";
 		}
+		case Szext: {
+			return guard() + "szext." + toString(shiftMode) + "."
+				+ PTXOperand::toString(type) + " " + d.toString() + ", "
+				+ a.toString() + ", " + b.toString();
+		}
 		case Sured: {
 			return guard() + "sured" + toString(formatMode) + "." 
 				+ toString(reductionOperation) + "." +
@@ -2615,6 +3968,11 @@ std::string ir::PTXInstruction::toString() const {
 				+ ((vec != Vec::v1)?toString(vec) + ".":"") + PTXOperand::toString(type) 
 				+ toString(clamp) + " [" + d.toString() +", " + a.toString() 
 				+ "], " + b.toString();
+		}
+		case Tanh: {
+			return guard() + "tanh." + modifierString(modifier)
+				+ PTXOperand::toString(type) + " " + d.toString() + ", "
+				+ a.toString();
 		}
 		case TestP: {
 			return guard() + "testp." + toString( floatingPointMode ) 
@@ -2642,9 +4000,9 @@ std::string ir::PTXInstruction::toString() const {
 				+ ", [" + a.toString() + "]";
 		}
 		case Vote: {
-			return guard() + "vote." + toString( vote ) + "."
+			return guard() + (voteSync ? "vote.sync." : "vote.") + toString( vote ) + "."
 				+ PTXOperand::toString( type ) + " "
-				+ d.toString() + ", " + a.toString();
+				+ d.toString() + ", " + a.toString() + (voteSync ? ", " + b.toString() : "");
 		}
 		case Xor: {
 			return guard() + "xor." + PTXOperand::toString( type ) + " "
@@ -2679,16 +4037,16 @@ bool ir::PTXInstruction::isCall() const {
 }
 
 bool ir::PTXInstruction::isLoad() const {
-	return opcode == Ld || opcode == Ldu;
+	return opcode == Ld || opcode == Ldu || opcode == Ldmatrix || opcode == WmmaLoadA || opcode == WmmaLoadB || opcode == WmmaLoadC;
 }
 
 bool ir::PTXInstruction::isStore() const {
-	return opcode == St;
+	return opcode == St || opcode == CpAsync || opcode == WmmaStoreD;
 }
 
 bool ir::PTXInstruction::mayHaveAddressableOperand() const {
-	return opcode == Mov || opcode == Ld || opcode == St || opcode == Cvta
-		|| opcode == Atom || opcode == Ldu;
+	return opcode == WmmaLoadA || opcode == WmmaLoadB || opcode == WmmaLoadC || opcode == WmmaStoreD || opcode == Mov || opcode == Ld || opcode == St || opcode == Cvta
+		|| opcode == Atom || opcode == Red || opcode == Ldu || opcode == Ldmatrix || opcode == Createpolicy || opcode == CpAsync || opcode == MbarrierInit || opcode == MbarrierInval || opcode == MbarrierArrive || opcode == MbarrierArriveDrop || opcode == MbarrierTestWait || opcode == MbarrierTestWaitParity || opcode == CpAsyncMbarrierArrive || opcode == CpAsyncMbarrierArriveNoInc;
 }
 
 bool ir::PTXInstruction::mayHaveRelaxedTypeDestination() const {
@@ -2697,7 +4055,8 @@ bool ir::PTXInstruction::mayHaveRelaxedTypeDestination() const {
 }
 
 bool ir::PTXInstruction::hasSideEffects() const {
-	return opcode == St || opcode == Atom || opcode == Bar
+	return opcode == WmmaStoreD || opcode == MbarrierInit || opcode == MbarrierInval || opcode == MbarrierArrive || opcode == MbarrierArriveDrop || opcode == MbarrierTestWait || opcode == MbarrierTestWaitParity || opcode == CpAsyncMbarrierArrive || opcode == CpAsyncMbarrierArriveNoInc || opcode == CpAsync || opcode == CpAsyncCommitGroup || opcode == CpAsyncWaitGroup || opcode == CpAsyncWaitAll
+		|| opcode == St || opcode == Atom || opcode == Red || opcode == BarWarp || opcode == Bar
 		|| opcode == Bra || opcode == Call || opcode == Exit || opcode == Ldu
 		|| opcode == Membar || opcode == Tex || opcode == Tld4
 		|| opcode == Prefetch || opcode == Sust || opcode == Suq
@@ -2705,7 +4064,10 @@ bool ir::PTXInstruction::hasSideEffects() const {
 }
 
 bool ir::PTXInstruction::canObserveSideEffects() const {
-	if (opcode == Atom) return true;
+	if (opcode == ShflSync || opcode == BarWarp || opcode == Match || opcode == Redux || (opcode == Vote && voteSync)) return true;
+	if (opcode == WmmaMma || opcode == WmmaLoadA || opcode == WmmaLoadB || opcode == WmmaLoadC || opcode == WmmaStoreD) return true;
+	if (opcode == MbarrierInit || opcode == MbarrierInval || opcode == MbarrierArrive || opcode == MbarrierArriveDrop || opcode == MbarrierTestWait || opcode == MbarrierTestWaitParity || opcode == CpAsyncMbarrierArrive || opcode == CpAsyncMbarrierArriveNoInc) return true;
+	if (opcode == CpAsync || opcode == Atom || opcode == Red || opcode == Ldmatrix || opcode == Movmatrix || opcode == Activemask) return true;
 
 	if (opcode == Ld) {
 		if (volatility == Volatile) {
@@ -2723,10 +4085,12 @@ bool ir::PTXInstruction::canObserveSideEffects() const {
 }
 
 bool ir::PTXInstruction::isMemoryInstruction() const {
-	return opcode == St || opcode == Atom
+	return opcode == WmmaLoadA || opcode == WmmaLoadB || opcode == WmmaLoadC || opcode == WmmaStoreD
+		|| opcode == MbarrierInit || opcode == MbarrierInval || opcode == MbarrierArrive || opcode == MbarrierArriveDrop || opcode == MbarrierTestWait || opcode == MbarrierTestWaitParity || opcode == CpAsyncMbarrierArrive || opcode == CpAsyncMbarrierArriveNoInc
+		|| opcode == CpAsync || opcode == St || opcode == Atom || opcode == Red
 		|| opcode == Ldu
 		|| opcode == Tex || opcode == Tld4
-		|| opcode == Prefetch || opcode == Sust || opcode == Ld;
+		|| opcode == Prefetch || opcode == Sust || opcode == Ld || opcode == Ldmatrix;
 }
 
 bool ir::PTXInstruction::isExit() const {

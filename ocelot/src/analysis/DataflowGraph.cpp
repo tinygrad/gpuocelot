@@ -12,6 +12,7 @@
 #include <hydrazine/string.h>
 
 #include <unordered_map>
+#include <stdexcept>
 
 #ifdef REPORT_BASE
 #undef REPORT_BASE
@@ -95,6 +96,11 @@ std::string DataflowGraph::PhiInstruction::toString() const
 
 DataflowGraph::Instruction DataflowGraph::convert( ir::PTXInstruction& i )
 {
+	// TODO: Model q for sparse mma, shfl.sync and cache-hinted atom/red.
+	if (i.opcode == ir::PTXInstruction::ShflSync || (i.opcode == ir::PTXInstruction::Mma && i.mmaSparse) ||
+		((i.opcode == ir::PTXInstruction::Atom || i.opcode == ir::PTXInstruction::Red) && i.cacheHint))
+		throw std::runtime_error(ir::PTXInstruction::toString(i.opcode) +
+			" q operands are not supported by DataflowGraphAnalysis; optimizer support is deferred");
 	Instruction result;
 
 	reportE( REPORT_CONVERT, " Converting instruction \"" 

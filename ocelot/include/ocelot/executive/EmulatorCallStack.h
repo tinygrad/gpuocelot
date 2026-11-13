@@ -89,6 +89,9 @@ class EmulatorCallStack
 		const RegisterType* registerFilePointer(unsigned int thread) const;
 		/*! \brief Get a pointer to local memory for a given thread */
 		void* localMemoryPointer(unsigned int thread);
+		/*! \brief Test whether an address belongs to any active local frame */
+		bool isLocalMemoryAddress(unsigned long long address,
+			unsigned int thread, unsigned int addressBits) const;
 		/*! \brief Get a pointer to shared memory */
 		void* sharedMemoryPointer();
 		/*! \brief Get a pointer to global local memory */

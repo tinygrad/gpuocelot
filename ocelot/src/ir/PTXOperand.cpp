@@ -30,12 +30,16 @@ std::string ir::PTXOperand::toString(Vec index) {
 		case v1: return "v1"; break;
 		case v2: return "v2"; break;
 		case v4: return "v4"; break;
+		case v8: return "v8"; break;
 	}
 	return "";
 }
 
 std::string ir::PTXOperand::toString( DataType type ) {
 	switch( type ) {
+		case s4:   return "s4";   break;
+		case b1:   return "b1";   break;
+		case u4:   return "u4";   break;
 		case s8:   return "s8";   break;
 		case s16:  return "s16";  break;
 		case s32:  return "s32";  break;
@@ -49,7 +53,11 @@ std::string ir::PTXOperand::toString( DataType type ) {
 		case b32:  return "b32";  break;
 		case b64:  return "b64";  break;
 		case f16:  return "f16";  break;
+		case f16x2:return "f16x2";break;
 		case f32:  return "f32";  break;
+		case bf16: return "bf16"; break;
+		case bf16x2:return "bf16x2";break;
+		case tf32: return "tf32"; break;
 		case f64:  return "f64";  break;
 		case pred: return "pred"; break;
 		default: break;
@@ -113,6 +121,9 @@ std::string ir::PTXOperand::toString( SpecialRegister reg ) {
 		case envreg29:     return "%envreg29";     break;
 		case envreg30:     return "%envreg30";     break;
 		case envreg31:     return "%envreg31";     break;
+		case globalTimer:  return "%globaltimer";  break;
+		case totalSmemSize: return "%total_smem_size"; break;
+		case dynamicSmemSize: return "%dynamic_smem_size"; break;
 		default: break;
 	}
 	return "SpecialRegister_invalid";
@@ -149,7 +160,11 @@ bool ir::PTXOperand::isFloat( DataType type ) {
 	bool result = false;
 	switch( type ) {
 		case f16: /* fall through */
+		case f16x2: /* fall through */
 		case f32: /* fall through */
+		case bf16:/* fall through */
+		case bf16x2:/* fall through */
+		case tf32:/* fall through */
 		case f64: result = true;
 		default: break;
 	}
@@ -194,10 +209,14 @@ unsigned int ir::PTXOperand::bytes( DataType type ) {
 		case u16:  /* fall through */
 		case f16:  /* fall through */
 		case b16:  /* fall through */
+		case bf16:  /* fall through */
 		case s16:  return 2; break;
 		case u32:  /* fall through */
 		case b32:  /* fall through */
+		case f16x2: /* fall through */
+		case bf16x2: /* fall through */
 		case f32:  /* fall through */
+		case tf32: /* fall through */
 		case s32:  return 4; break;
 		case f64:  /* fall through */
 		case u64:  /* fall through */
@@ -235,6 +254,7 @@ bool ir::PTXOperand::valid( DataType destination, DataType source ) {
 				case s16: /* fall through */
 				case u16: /* fall through */
 				case f16: /* fall through */
+				case bf16: /* fall through */
 				case b16: return true; break;
 				default: break;
 			}
@@ -345,6 +365,15 @@ bool ir::PTXOperand::valid( DataType destination, DataType source ) {
 			}
 			break;
 		}
+		case f16x2: {
+			return source == b32 || source == f16x2;
+		}
+		case bf16: {
+			return source == b16;
+			break;
+		}
+		case bf16x2: return source == b32;
+		case tf32: return source == b32;
 		case pred: {
 			return source == pred;
 			break;
@@ -539,6 +568,8 @@ bool ir::PTXOperand::relaxedValid( DataType instructionType,
 		}
 		case f32: {
 			switch( operand ) {
+				case b64: /* fall through */
+				case f64: /* fall through */
 				case b32: /* fall through */
 				case f32: return true; break;
 				default: break;
@@ -547,11 +578,32 @@ bool ir::PTXOperand::relaxedValid( DataType instructionType,
 		}
 		case f16: {
 			switch( operand ) {
+				case b64: /* fall through */
+				case f64: /* fall through */
+				case b32: /* fall through */
+				case f32: /* fall through */
 				case b16: /* fall through */
 				case f16: return true; break;
 				default: break;
 			}
 			break;
+		}
+		case f16x2: {
+			return operand == b32 || operand == f16x2
+				|| operand == b64 || operand == f64;
+		}
+		case bf16: {
+			switch( operand ) {
+				case b16: return true; break;
+				default: break;
+			}
+			break;
+		}
+		case bf16x2: {
+			return operand == b32;
+		}
+		case tf32: {
+			return operand == b32;
 		}
 		case pred: {
 			return operand == pred;
@@ -755,11 +807,11 @@ std::string ir::PTXOperand::toString() const {
 	} else if( type == pred ) {
 		switch( condition ) {
 			case PT: return "%pt"; break;
-			case nPT: return "%pt"; break;
+			case nPT: return "!%pt"; break;
 			default:
 			{
 				if( !identifier.empty() ) {
-					return identifier;
+					return (condition == InvPred ? "!" : "") + identifier;
 				}
 				else {
 					std::stringstream stream;
@@ -774,7 +826,8 @@ std::string ir::PTXOperand::toString() const {
 	else if( vec != v1 ) {
 		if( !array.empty() ) {
 			assert( ( vec == v2 && array.size() == 2 ) 
-				|| ( vec == v4 && array.size() == 4 ) );
+				|| ( vec == v4 && array.size() == 4 )
+				|| ( vec == v8 && array.size() == 8 ) );
 			std::string result = "{";
 			for( Array::const_iterator fi = array.begin(); 
 				fi != array.end(); ++fi ) {
@@ -864,5 +917,3 @@ bool ir::PTXOperand::isRegister() const {
 bool ir::PTXOperand::isVector() const {
 	return isRegister() && vec != v1;
 }
-
-

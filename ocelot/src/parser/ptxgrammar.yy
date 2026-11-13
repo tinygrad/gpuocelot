@@ -54,18 +54,32 @@
 %token<text> OPCODE_COPYSIGN OPCODE_COS OPCODE_SQRT OPCODE_ADD OPCODE_RSQRT
 %token<text> OPCODE_MUL OPCODE_SAD OPCODE_SUB OPCODE_EX2 OPCODE_LG2 OPCODE_ADDC
 %token<text> OPCODE_RCP OPCODE_SIN OPCODE_REM OPCODE_MUL24 OPCODE_MAD24
-%token<text> OPCODE_DIV OPCODE_ABS OPCODE_NEG OPCODE_MIN OPCODE_MAX
+%token<text> OPCODE_DIV OPCODE_DP2A OPCODE_DP4A OPCODE_ABS OPCODE_NEG OPCODE_MIN OPCODE_MAX
 %token<text> OPCODE_MAD OPCODE_MADC OPCODE_SET OPCODE_SETP OPCODE_SELP 
 %token<text> OPCODE_SLCT OPCODE_MOV OPCODE_ST OPCODE_CVT OPCODE_AND OPCODE_XOR 
-%token<text> OPCODE_OR OPCODE_CVTA OPCODE_ISSPACEP OPCODE_LDU
-%token<text> OPCODE_SULD OPCODE_TXQ OPCODE_SUST OPCODE_SURED OPCODE_SUQ
+%token<text> OPCODE_OR OPCODE_LOP3 OPCODE_CVTA OPCODE_ISSPACEP OPCODE_LDU
+%token<text> OPCODE_SULD OPCODE_TXQ OPCODE_SUST OPCODE_SURED OPCODE_SUQ OPCODE_SZEXT
 %token<text> OPCODE_BRA OPCODE_CALL OPCODE_RET OPCODE_EXIT OPCODE_TRAP 
 %token<text> OPCODE_BRKPT OPCODE_SUBC OPCODE_TEX OPCODE_LD OPCODE_BARSYNC
-%token<text> OPCODE_ATOM OPCODE_RED OPCODE_NOT OPCODE_CNOT OPCODE_VOTE
-%token<text> OPCODE_SHR OPCODE_SHL OPCODE_FMA OPCODE_MEMBAR OPCODE_PMEVENT
+%token<text> OPCODE_ATOM OPCODE_RED OPCODE_MATCH OPCODE_REDUX OPCODE_NOT OPCODE_CNOT OPCODE_VOTE
+%token<text> OPCODE_SHR OPCODE_SHL OPCODE_FMA OPCODE_MEMBAR OPCODE_PMEVENT OPCODE_PMEVENT_MASK
+%token<text> OPCODE_NANOSLEEP OPCODE_DISCARD OPCODE_APPLYPRIORITY
 %token<text> OPCODE_POPC OPCODE_PRMT OPCODE_CLZ OPCODE_BFIND OPCODE_BREV 
-%token<text> OPCODE_BFI OPCODE_BFE OPCODE_TESTP OPCODE_TLD4 OPCODE_BAR
+%token<text> OPCODE_BFI OPCODE_BFE OPCODE_BMSK OPCODE_FNS OPCODE_TANH OPCODE_TESTP OPCODE_TLD4 OPCODE_BAR
+%token<text> OPCODE_WMMA_MMA
+%type<value> wmmaAlternateType
+%token<text> OPCODE_WMMA_MEMORY
+%token<value> TOKEN_M16N16K16 TOKEN_M8N32K16 TOKEN_M32N8K16 TOKEN_M16N16K8
+%type<value> wmmaType
+%token TOKEN_NO_COMPLETE
+%token<text> OPCODE_MBAR_INIT OPCODE_MBAR_INVAL OPCODE_MBAR_ARRIVE OPCODE_MBAR_PENDING OPCODE_MBAR_WAIT OPCODE_MBAR_CP
+%token<text> OPCODE_CP_ASYNC OPCODE_CP_COMMIT OPCODE_CP_WAIT_GROUP OPCODE_CP_WAIT_ALL
 %token<text> OPCODE_PREFETCH OPCODE_PREFETCHU OPCODE_SHFL OPCODE_SHF
+%token<text> OPCODE_MMA
+%token<text> OPCODE_LDMATRIX OPCODE_MOVMATRIX OPCODE_ACTIVEMASK
+%token<value> TOKEN_M8N8 TOKEN_X1 TOKEN_X2 TOKEN_X4 TOKEN_TRANS
+%type<value> matrixCount
+%token<text> OPCODE_FENCE
 
 %token<value> PREPROCESSOR_INCLUDE PREPROCESSOR_DEFINE PREPROCESSOR_IF 
 %token<value> PREPROCESSOR_IFDEF PREPROCESSOR_ELSE PREPROCESSOR_ENDIF 
@@ -77,26 +91,32 @@
 
 %token<value> TOKEN_MAXNREG TOKEN_MAXNTID TOKEN_MAXNCTAPERSM TOKEN_MINNCTAPERSM 
 %token<value> TOKEN_SM11 TOKEN_SM12 TOKEN_SM13 TOKEN_SM20 TOKEN_MAP_F64_TO_F32
-%token<value> TOKEN_SM21 TOKEN_SM10 TOKEN_SM30 TOKEN_SM35
+%token<value> TOKEN_SM21 TOKEN_SM10 TOKEN_SM30 TOKEN_SM35 TOKEN_SM50 TOKEN_SM86
 %token<value> TOKEN_TEXMODE_INDEPENDENT TOKEN_TEXMODE_UNIFIED
 
 %token<value> TOKEN_CONST TOKEN_GLOBAL TOKEN_LOCAL TOKEN_PARAM TOKEN_PRAGMA TOKEN_PTR
-%token<value> TOKEN_REG TOKEN_SHARED TOKEN_TEXREF TOKEN_CTA TOKEN_SURFREF 
+%token<value> TOKEN_REG TOKEN_SHARED TOKEN_SHARED_CTA TOKEN_TEXREF TOKEN_CTA TOKEN_SURFREF
 %token<value> TOKEN_GL TOKEN_SYS TOKEN_SAMPLERREF
+%token<value> TOKEN_GPU TOKEN_SC TOKEN_ACQ_REL TOKEN_ACQUIRE TOKEN_RELEASE TOKEN_RELAXED
+%token<value> TOKEN_MMIO
 
+%token<value> TOKEN_S4 TOKEN_U4 TOKEN_M8N8K32 TOKEN_M16N8K64
+%token<value> TOKEN_B1 TOKEN_M8N8K128 TOKEN_M16N8K128 TOKEN_M16N8K256
 %token<value> TOKEN_U32 TOKEN_S32 TOKEN_S8 TOKEN_S16 TOKEN_S64 TOKEN_U8 
 %token<value> TOKEN_U16 TOKEN_U64 TOKEN_B8 TOKEN_B16 TOKEN_B32 TOKEN_B64 
-%token<value> TOKEN_F16 TOKEN_F64 TOKEN_F32 TOKEN_PRED
+%token<value> TOKEN_F16 TOKEN_F16X2 TOKEN_F64 TOKEN_F32 TOKEN_BF16 TOKEN_BF16X2
+%token<value> TOKEN_TF32 TOKEN_PRED
 
 %token<value> TOKEN_EQ TOKEN_NE TOKEN_LT TOKEN_LE TOKEN_GT TOKEN_GE
 %token<value> TOKEN_LS TOKEN_HS TOKEN_EQU TOKEN_NEU TOKEN_LTU TOKEN_LEU
 %token<value> TOKEN_GTU TOKEN_GEU TOKEN_NUM TOKEN_NAN
 
 %token<value> TOKEN_HI TOKEN_LO TOKEN_AND TOKEN_OR TOKEN_XOR
-%token<value> TOKEN_RN TOKEN_RM TOKEN_RZ TOKEN_RP TOKEN_SAT TOKEN_VOLATILE
+%token<value> TOKEN_RN TOKEN_RNA TOKEN_RM TOKEN_RZ TOKEN_RP TOKEN_SAT TOKEN_SATFINITE TOKEN_VOLATILE
 %token<value> TOKEN_TAIL TOKEN_UNI TOKEN_ALIGN TOKEN_BYTE TOKEN_WIDE TOKEN_CARRY
 %token<value> TOKEN_RNI TOKEN_RMI TOKEN_RZI TOKEN_RPI
-%token<value> TOKEN_FTZ TOKEN_APPROX TOKEN_FULL TOKEN_SHIFT_AMOUNT
+%token<value> TOKEN_FTZ TOKEN_NOFTZ TOKEN_APPROX TOKEN_FULL TOKEN_SHIFT_AMOUNT
+%token<value> TOKEN_NAN_MODIFIER TOKEN_XORSIGN TOKEN_ABS_MODIFIER TOKEN_RELU
 %token<value> TOKEN_R TOKEN_G TOKEN_B TOKEN_A TOKEN_L
 
 %token<value> TOKEN_TO
@@ -116,7 +136,12 @@
 
 %token<value> TOKEN_CA TOKEN_WB TOKEN_CG TOKEN_CS TOKEN_LU TOKEN_CV TOKEN_WT TOKEN_NC
 
-%token<value> TOKEN_L1 TOKEN_L2
+%token<value> TOKEN_L1 TOKEN_L2 TOKEN_L2_CACHE_HINT TOKEN_L2_PREFETCH
+%token<text> OPCODE_CREATEPOLICY
+%token TOKEN_FRACTIONAL TOKEN_EVICT_NORMAL TOKEN_EVICT_LAST TOKEN_EVICT_FIRST TOKEN_EVICT_UNCHANGED
+%token<value> TOKEN_L1_EVICT
+%token TOKEN_POLICY_RANGE TOKEN_POLICY_CVT
+%type<value> policyPriority
 
 %token<value> TOKEN_P
 
@@ -127,7 +152,8 @@
 
 %token<value> TOKEN_TRAP TOKEN_CLAMP TOKEN_ZERO TOKEN_WRAP
 
-%token<value> TOKEN_ARRIVE TOKEN_RED TOKEN_POPC TOKEN_SYNC
+%token<value> TOKEN_ARRIVE TOKEN_RED TOKEN_POPC TOKEN_SYNC TOKEN_WARP TOKEN_ALIGNED TOKEN_SP
+%token<value> TOKEN_M8N8K4 TOKEN_M16N8K4 TOKEN_M16N8K8 TOKEN_M16N8K16 TOKEN_M8N8K16 TOKEN_M16N8K32 TOKEN_ROW TOKEN_COL
 
 %token<value> TOKEN_BALLOT
 
@@ -135,6 +161,9 @@
 
 %token<value> TOKEN_FINITE TOKEN_INFINITE TOKEN_NUMBER TOKEN_NOT_A_NUMBER
 %token<value> TOKEN_NORMAL TOKEN_SUBNORMAL
+
+%type<value> mmaLayout mmaShape mmaAccumulatorTypeId mmaInputTypeId mmaIntTypeId
+%type<value> mmaOperandList
 
 %token<value> TOKEN_DECIMAL_CONSTANT
 
@@ -260,7 +289,7 @@ singleInitializer : singleList |  '{' singleList '}' | '{' singleListSingle '}'
 	| singleListSingle;
 
 shaderModel : TOKEN_SM10 | TOKEN_SM11 | TOKEN_SM12 | TOKEN_SM13 | TOKEN_SM20
-	| TOKEN_SM21 | TOKEN_SM30 | TOKEN_SM35;
+	| TOKEN_SM21 | TOKEN_SM30 | TOKEN_SM35 | TOKEN_SM50 | TOKEN_SM86;
 	
 floatingPointOption : TOKEN_MAP_F64_TO_F32;
 textureOption: TOKEN_TEXMODE_INDEPENDENT | TOKEN_TEXMODE_UNIFIED;
@@ -302,7 +331,8 @@ pointerDataTypeId: TOKEN_U64 | TOKEN_U32;
 
 dataTypeId : TOKEN_U8 | TOKEN_U16 | TOKEN_U32 | TOKEN_U64 | TOKEN_S8 
 	| TOKEN_S16 | TOKEN_S32 | TOKEN_S64 | TOKEN_B8 | TOKEN_B16 | TOKEN_B32 
-	| TOKEN_B64 | TOKEN_F16 | TOKEN_F32 | TOKEN_F64 | TOKEN_PRED;
+	| TOKEN_B64 | TOKEN_F16 | TOKEN_F32 | TOKEN_F64
+	| TOKEN_BF16 | TOKEN_F16X2 | TOKEN_PRED;
 
 dataType : dataTypeId
 {
@@ -671,19 +701,92 @@ initializable : externOrVisible initializableAddress
 opcode : OPCODE_COS | OPCODE_SQRT | OPCODE_ADD | OPCODE_RSQRT | OPCODE_ADDC
 	| OPCODE_MUL | OPCODE_SAD | OPCODE_SUB | OPCODE_EX2 | OPCODE_LG2
 	| OPCODE_RCP | OPCODE_SIN | OPCODE_REM | OPCODE_MUL24 | OPCODE_MAD24
-	| OPCODE_DIV | OPCODE_ABS | OPCODE_NEG | OPCODE_MIN | OPCODE_MAX
+	| OPCODE_DIV | OPCODE_DP2A | OPCODE_DP4A | OPCODE_ABS | OPCODE_NEG | OPCODE_MIN | OPCODE_MAX
 	| OPCODE_MAD | OPCODE_MADC | OPCODE_SET | OPCODE_SETP | OPCODE_SELP
 	| OPCODE_SLCT | OPCODE_MOV | OPCODE_ST | OPCODE_COPYSIGN | OPCODE_SHFL
 	| OPCODE_SHF | OPCODE_CVT | OPCODE_CVTA | OPCODE_ISSPACEP 
-	| OPCODE_AND | OPCODE_XOR | OPCODE_OR
+	| OPCODE_AND | OPCODE_XOR | OPCODE_OR | OPCODE_LOP3
 	| OPCODE_BRA | OPCODE_CALL | OPCODE_RET | OPCODE_EXIT | OPCODE_TRAP 
 	| OPCODE_BRKPT | OPCODE_SUBC | OPCODE_TEX | OPCODE_LD | OPCODE_LDU
 	| OPCODE_BARSYNC | OPCODE_SULD | OPCODE_TXQ | OPCODE_SUST | OPCODE_SURED 
-	| OPCODE_SUQ | OPCODE_ATOM | OPCODE_RED | OPCODE_NOT | OPCODE_CNOT
-	| OPCODE_VOTE | OPCODE_SHR | OPCODE_SHL | OPCODE_MEMBAR | OPCODE_FMA
-	| OPCODE_PMEVENT | OPCODE_POPC | OPCODE_CLZ | OPCODE_BFIND | OPCODE_BREV
-	| OPCODE_BFI | OPCODE_TESTP | OPCODE_TLD4
-	| OPCODE_PREFETCH | OPCODE_PREFETCHU;
+	| OPCODE_SUQ | OPCODE_SZEXT | OPCODE_ATOM | OPCODE_RED | OPCODE_REDUX | OPCODE_MATCH | OPCODE_NOT | OPCODE_CNOT
+	| OPCODE_VOTE | OPCODE_SHR | OPCODE_SHL | OPCODE_MEMBAR | OPCODE_FENCE | OPCODE_FMA
+	| OPCODE_PMEVENT | OPCODE_NANOSLEEP | OPCODE_DISCARD | OPCODE_APPLYPRIORITY | OPCODE_POPC | OPCODE_CLZ | OPCODE_BFIND | OPCODE_BREV
+	| OPCODE_BFI | OPCODE_BMSK | OPCODE_FNS | OPCODE_TANH | OPCODE_TESTP | OPCODE_TLD4
+	| OPCODE_PREFETCH | OPCODE_PREFETCHU | OPCODE_CREATEPOLICY
+	| OPCODE_MBAR_INIT | OPCODE_MBAR_INVAL | OPCODE_MBAR_ARRIVE | OPCODE_MBAR_PENDING | OPCODE_MBAR_WAIT | OPCODE_MBAR_CP | OPCODE_CP_ASYNC | OPCODE_CP_COMMIT | OPCODE_CP_WAIT_GROUP | OPCODE_CP_WAIT_ALL;
+
+mma : OPCODE_MMA TOKEN_SP TOKEN_SYNC TOKEN_ALIGNED TOKEN_M16N8K8 TOKEN_ROW TOKEN_COL
+	TOKEN_F32 TOKEN_TF32 TOKEN_TF32 TOKEN_F32
+	arrayOperand ',' arrayOperand ',' arrayOperand ',' arrayOperand ',' operand ',' operand ';'
+{
+	state.mma(TOKEN_M16N8K8, TOKEN_F32, TOKEN_TF32, TOKEN_TF32, TOKEN_F32,
+		false, true, true);
+};
+
+mma : OPCODE_MMA TOKEN_SP TOKEN_SYNC TOKEN_ALIGNED sparseMmaShape TOKEN_ROW TOKEN_COL
+	mmaAccumulatorTypeId mmaInputTypeId mmaInputTypeId mmaAccumulatorTypeId
+	arrayOperand ',' arrayOperand ',' arrayOperand ',' arrayOperand ',' operand ',' operand ';'
+{
+	state.mma($<value>5, $<value>8, $<value>9, $<value>10, $<value>11,
+		false, true, true);
+};
+sparseMmaShape : TOKEN_M16N8K16 | TOKEN_M16N8K32 | TOKEN_M16N8K64 | TOKEN_M16N8K128;
+
+mma : OPCODE_MMA TOKEN_SP TOKEN_SYNC TOKEN_ALIGNED sparseMmaShape TOKEN_ROW TOKEN_COL
+	optionalSatfinite TOKEN_S32 sparseIntegerType sparseIntegerType TOKEN_S32
+	arrayOperand ',' arrayOperand ',' arrayOperand ',' arrayOperand ',' operand ',' operand ';'
+{
+	state.mma($<value>5, TOKEN_S32, $<value>10, $<value>11, TOKEN_S32, false, true, true);
+};
+sparseIntegerType : TOKEN_S8 | TOKEN_U8 | TOKEN_S4 | TOKEN_U4;
+
+mma : OPCODE_MMA TOKEN_SYNC TOKEN_ALIGNED mmaShape mmaLayout mmaLayout
+	mmaAccumulatorTypeId mmaInputTypeId mmaInputTypeId mmaAccumulatorTypeId
+	arrayOperand ',' arrayOperand ',' arrayOperand ',' arrayOperand ';'
+{
+	state.mma( $<value>4, $<value>7, $<value>8, $<value>9, $<value>10,
+		$<value>5 == TOKEN_COL, $<value>6 == TOKEN_COL );
+};
+
+mma : OPCODE_MMA TOKEN_SYNC TOKEN_ALIGNED mmaShape mmaLayout mmaLayout
+	optionalSatfinite TOKEN_S32 mmaIntTypeId mmaIntTypeId TOKEN_S32
+	arrayOperand ',' arrayOperand ',' arrayOperand ',' arrayOperand ';'
+{
+	state.mma( $<value>4, $<value>8, $<value>9, $<value>10, $<value>11,
+		$<value>5 == TOKEN_COL, $<value>6 == TOKEN_COL );
+};
+
+mma : OPCODE_MMA TOKEN_SYNC TOKEN_ALIGNED mmaShape mmaLayout mmaLayout
+	TOKEN_F64 TOKEN_F64 TOKEN_F64 TOKEN_F64 optionalFloatRounding
+	arrayOperand ',' arrayOperand ',' arrayOperand ',' arrayOperand ';'
+{ state.mma($<value>4, $<value>7, $<value>8, $<value>9, $<value>10,
+	$<value>5 == TOKEN_COL, $<value>6 == TOKEN_COL); };
+mmaLayout : TOKEN_ROW | TOKEN_COL;
+
+mma : OPCODE_MMA TOKEN_SYNC TOKEN_ALIGNED mmaShape mmaLayout mmaLayout
+	optionalSatfinite TOKEN_S32 TOKEN_B1 TOKEN_B1 TOKEN_S32 mmaBitOp TOKEN_POPC
+	arrayOperand ',' arrayOperand ',' arrayOperand ',' arrayOperand ';'
+{
+	state.mma($<value>4, $<value>8, $<value>9, $<value>10, $<value>11,
+		$<value>5 == TOKEN_COL, $<value>6 == TOKEN_COL);
+	state.boolean($<value>12);
+};
+mmaBitOp : TOKEN_XOR | TOKEN_AND;
+
+mmaShape : TOKEN_M8N8K128 | TOKEN_M16N8K128 | TOKEN_M16N8K256 | TOKEN_M16N8K64 | TOKEN_M8N8K32 | TOKEN_M8N8K4 | TOKEN_M16N8K4 | TOKEN_M16N8K8 | TOKEN_M16N8K16 | TOKEN_M8N8K16 | TOKEN_M16N8K32;
+
+mmaAccumulatorTypeId : TOKEN_F16 | TOKEN_F32;
+
+mmaInputTypeId : TOKEN_F16 | TOKEN_BF16 | TOKEN_TF32;
+
+mmaIntTypeId : TOKEN_S8 | TOKEN_U8 | TOKEN_S4 | TOKEN_U4;
+
+optionalSatfinite : TOKEN_SATFINITE
+{
+	state.modifier( $<value>1 );
+}
+| /* empty string */;
 
 uninitializableDeclaration : uninitializable addressableVariablePrefix 
 	identifier arrayDimensions ';'
@@ -759,7 +862,7 @@ optionalVectorIndex : vectorIndex
 
 optionalVectorIndex : /* empty string */
 {
-
+	state.operand.vIndex = ir::PTXOperand::iAll;
 };
 
 nonLabelOperand : identifier optionalVectorIndex
@@ -769,6 +872,7 @@ nonLabelOperand : identifier optionalVectorIndex
 
 nonLabelOperand : '!' identifier
 {
+	state.operand.vIndex = ir::PTXOperand::iAll;
 	state.nonLabelOperand( $<text>2, @1, true );
 };
 
@@ -815,9 +919,11 @@ memoryOperand : constantOperand | addressableOperand | offsetAddressableOperand;
 branchOperand : labelOperand;
 
 arrayOperand : operand;
-arrayOperand : '{' identifierList '}'
+mmaOperandList : nonLabelOperand { $$ = 1; }
+ | mmaOperandList ',' nonLabelOperand { $$ = $1 + 1; };
+arrayOperand : '{' mmaOperandList '}'
 {
-	state.arrayOperand( @1 );
+	state.arrayOperand( $2, @1 );
 };
 
 guard : TOKEN_PREDICATE_IDENTIFIER
@@ -850,12 +956,12 @@ intRounding : intRoundingToken
 
 optionalFloatRounding : floatRounding | /* empty string */;
 
-instruction : ftzInstruction2 | ftzInstruction3 | approxInstruction2 
-	| basicInstruction3 | bfe | bfi | bfind | brev | branch | addOrSub
-	| addCOrSubC | atom | bar | brkpt | clz | cvt | cvta | isspacep | div | exit
-	| ld | ldu | mad | mad24 | madc | membar | mov | mul24 | mul | notInstruction
-	| pmevent | popc | prefetch | prefetchu | prmt | rcpSqrtInstruction | red
-	| ret | sad | selp | set | setp | slct | st | suld | suq | sured | sust
+instruction : activemask | ftzInstruction2 | ftzInstruction3 | approxInstruction2
+	| basicInstruction3 | bfe | bfi | bfind | bmsk | brev | branch | addOrSub
+	| addCOrSubC | atom | bar | brkpt | clz | cvt | cvta | isspacep | div | dp2a | dp4a | exit
+	| fence | fns | ld | ldu | ldmatrix | lop3 | mad | mad24 | madc | mma | membar | mov | movmatrix | mul24 | mul | notInstruction
+	| wmmaMma | wmmaMemory | mbarrier | cpAsync | cpAsyncWait | pmevent | nanosleep | discard | applypriority | popc | prefetch | prefetchu | createpolicy | prmt | rcpSqrtInstruction | red | redux | match
+	| ret | sad | selp | set | setp | slct | st | suld | suq | sured | sust | szext
 	| testp | tex | tld4 | trap | txq | vote | shfl | shf;
 
 basicInstruction3Opcode : OPCODE_AND | OPCODE_OR | OPCODE_SHF 
@@ -867,8 +973,21 @@ basicInstruction3 : basicInstruction3Opcode dataType operand ',' operand ','
 	state.instruction( $<text>1, $<value>2 );
 };
 
+dp4a : OPCODE_DP4A dataType dataType operand ',' operand ',' operand ',' operand ';'
+{
+	state.instruction( $<text>1, $<value>2 );
+	state.dotType( $<value>3 );
+};
+
+dp2a : OPCODE_DP2A hiOrLo dataType dataType operand ',' operand ',' operand ',' operand ';'
+{
+	state.instruction( $<text>1, $<value>3 );
+	state.modifier( $<value>2 );
+	state.dotType( $<value>4 );
+};
+
 approxInstruction2Opcode : OPCODE_RSQRT | OPCODE_SIN | OPCODE_COS | OPCODE_LG2 
-	| OPCODE_EX2;
+	| OPCODE_EX2 | OPCODE_TANH;
 
 approximate : TOKEN_APPROX
 {
@@ -903,12 +1022,38 @@ ftzInstruction2 : ftzInstruction2Opcode optionalFtz dataType operand ','
 	state.instruction( $<text>1, $<value>3 );
 };
 
+ftzInstruction2 : ftzInstruction2Opcode TOKEN_BF16X2 operand ','
+	operand ';'
+{
+	state.instruction( $<text>1, $<value>2 );
+};
+
 ftzInstruction3Opcode : OPCODE_MAX | OPCODE_MIN;
 
-ftzInstruction3 : ftzInstruction3Opcode optionalFtz dataType operand ',' 
-	operand ',' operand ';'
+optionalNanModifier : TOKEN_NAN_MODIFIER
 {
-	state.instruction( $<text>1, $<value>3 );
+	state.modifier( $<value>1 );
+}
+| /* empty string */;
+
+optionalXorsignAbs : TOKEN_XORSIGN TOKEN_ABS_MODIFIER
+{
+	state.modifier( $<value>1 );
+	state.modifier( $<value>2 );
+}
+| /* empty string */;
+
+minMaxDataTypeId : dataTypeId | TOKEN_BF16X2;
+
+minMaxDataType : minMaxDataTypeId
+{
+	state.dataType( $<value>1 );
+};
+
+ftzInstruction3 : ftzInstruction3Opcode optionalFtz optionalNanModifier
+	optionalXorsignAbs minMaxDataType operand ',' operand ',' operand ';'
+{
+	state.instruction( $<text>1, $<value>5 );
 };
 
 optionalUni : /* empty string */
@@ -1022,22 +1167,40 @@ atomicOperation : atomicOperationId
 	state.atomic( $<value>1 );
 };
 
-atomModifier: addressSpace;
-atomModifier: /* empty string */
-{
-	state.addressSpace(TOKEN_GLOBAL);
-}
+atomicSemantics : TOKEN_RELAXED { state.semantics( $<value>1 ); }
+	| TOKEN_ACQUIRE { state.semantics( $<value>1 ); }
+	| TOKEN_RELEASE { state.semantics( $<value>1 ); }
+	| TOKEN_ACQ_REL { state.semantics( $<value>1 ); }
+	;
 
-atom : OPCODE_ATOM atomModifier atomicOperation dataType operand ',' '[' 
-	memoryOperand ']' ',' operand ';'
+optionalAtomicSemantics : atomicSemantics
+	| /* empty */ { state.semantics( TOKEN_RELAXED ); }
+	;
+
+atomicScope : fenceScopeType { state.scope( $<value>1 ); };
+
+optionalAtomicScope : atomicScope | /* empty */;
+
+atom : OPCODE_ATOM optionalAtomicSemantics optionalAtomicScope atomicAddressSpace
+	atomicOperation optionalNoftz atomicCacheHint dataType operand ',' '['
+	checkedAddress ']' ',' operand ';'
 {
-	state.instruction( $<text>1, $<value>4 );
+	state.instruction( $<text>1, $<value>8 );
+	if (state.statement.instruction.a.addressMode == ir::PTXOperand::Immediate)
+		state.statement.instruction.a.type = ir::PTXOperand::u64;
 };
 
-atom : OPCODE_ATOM atomModifier atomicOperation dataType operand ',' '[' 
-	memoryOperand ']' ',' operand ',' operand ';'
+atom : OPCODE_ATOM optionalAtomicSemantics optionalAtomicScope atomicAddressSpace
+	atomicOperation optionalNoftz atomicCacheHint dataType operand ',' '['
+	checkedAddress ']' ',' operand ',' operand ';'
 {
-	state.instruction( $<text>1, $<value>4 );
+	if (state.statement.instruction.cacheHint) {
+		state.statement.instruction.q = state.operandVector.back().operand;
+		state.operandVector.pop_back();
+	}
+	state.instruction( $<text>1, $<value>8 );
+	if (state.statement.instruction.a.addressMode == ir::PTXOperand::Immediate)
+		state.statement.instruction.a.type = ir::PTXOperand::u64;
 };
 
 shiftAmount : TOKEN_SHIFT_AMOUNT
@@ -1062,19 +1225,47 @@ bfi : OPCODE_BFI dataType operand ',' operand ',' operand
 	state.instruction( $<text>1, $<value>2 );
 };
 
+lop3 : OPCODE_LOP3 TOKEN_B32 operand ',' operand ',' operand ',' operand
+	',' operand ';'
+{
+	state.lop3();
+};
+
+lop3BoolOperator : TOKEN_AND { state.boolean( $<value>1 ); }
+	| TOKEN_OR { state.boolean( $<value>1 ); }
+	;
+
+lop3 : OPCODE_LOP3 lop3BoolOperator TOKEN_B32 operand '|' operand ',' operand
+	',' operand ',' operand ',' operand ',' operand ';'
+{
+	state.lop3();
+};
+
 bfind : OPCODE_BFIND shiftAmount dataType operand ',' operand ';'
 {
 	state.instruction( $<text>1, $<value>3 );
 };
 
-barrierOperation : TOKEN_ARRIVE | TOKEN_RED | TOKEN_SYNC
-{
-	state.barrierOperation( $<value>1, @1 );
-};
+barrierOperation : TOKEN_ARRIVE { state.barrierOperation( $<value>1, @1 ); }
+	| TOKEN_RED { state.barrierOperation( $<value>1, @1 ); }
+	| TOKEN_SYNC { state.barrierOperation( $<value>1, @1 ); }
+	;
 
 optionalBarrierOperator : reductionOperation dataType | /* or nothing */ ;
 
 operandSequence: operand operandSequence | /* empty */ ;
+
+bar : OPCODE_BAR TOKEN_WARP TOKEN_SYNC operand ';'
+{
+	auto mask = state.operandVector.back().operand;
+	state.instruction($<text>1, TOKEN_U32);
+	auto& instr = state.statement.instruction;
+	instr.opcode = ir::PTXInstruction::BarWarp;
+	instr.d = ir::PTXOperand();
+	// All warp synchronization instructions keep the member mask in b.
+	if (mask.addressMode == ir::PTXOperand::Immediate && ir::PTXOperand::isInt(mask.type)) mask.type = ir::PTXOperand::u32;
+	instr.b = mask;
+};
 
 bar : OPCODE_BAR barrierOperation optionalBarrierOperator operandSequence ';'
 {
@@ -1096,6 +1287,11 @@ clz : OPCODE_CLZ dataType operand ',' operand ';'
 	state.instruction( $<text>1, $<value>2 );
 };
 
+fns : OPCODE_FNS TOKEN_B32 operand ',' operand ',' operand ',' operand ';'
+{
+	state.instruction( $<text>1, $<value>2 );
+};
+
 floatRoundingModifier : floatRounding
 {
 	state.modifier( $<value>1 );
@@ -1108,12 +1304,33 @@ intRoundingModifier : intRounding
 
 cvtRoundingModifier : intRoundingModifier | floatRoundingModifier;
 
-cvtModifier : cvtRoundingModifier optionalFtz sat;
-cvtModifier : cvtRoundingModifier optionalFtz;
-cvtModifier : optionalFtz sat;
-cvtModifier : optionalFtz;
+cvtRoundingModifier : TOKEN_RNA
+{
+	state.modifier( $<value>1 );
+};
 
-cvt : OPCODE_CVT cvtModifier dataType dataType operand ',' operand ';'
+optionalCvtRounding : cvtRoundingModifier | /* empty string */;
+optionalRelu : TOKEN_RELU
+{
+	state.modifier( $<value>1 );
+};
+optionalRelu : /* empty string */;
+
+cvtModifier : optionalCvtRounding optionalFtz optionalSaturate optionalRelu;
+
+cvtDataTypeId : dataTypeId | TOKEN_BF16X2 | TOKEN_TF32;
+cvtDataType : cvtDataTypeId
+{
+	state.dataType( $<value>1 );
+};
+
+cvt : OPCODE_CVT cvtModifier cvtDataType cvtDataType operand ',' operand ';'
+{
+	state.instruction( $<text>1, $<value>3 );
+	state.relaxedConvert( $<value>4, @1 );
+};
+
+cvt : OPCODE_CVT cvtModifier cvtDataType cvtDataType operand ',' operand ',' operand ';'
 {
 	state.instruction( $<text>1, $<value>3 );
 	state.relaxedConvert( $<value>4, @1 );
@@ -1147,15 +1364,12 @@ divApproxModifier : TOKEN_APPROX optionalFtz
 	state.modifier($<value>1);
 };
 
-divRnModifier : TOKEN_RN optionalFtz
-{
-	state.modifier($<value>1);
-};
+divRoundingModifier : floatRounding optionalFtz;
 
-divRnModifier : /* empty string */;
+divRoundingModifier : /* empty string */;
 
 divModifier : divFullModifier | divApproxModifier 
-	| divRnModifier;
+	| divRoundingModifier;
 
 div : OPCODE_DIV divModifier dataType operand ',' operand ',' operand ';'
 {
@@ -1167,7 +1381,10 @@ exit : OPCODE_EXIT ';'
 	state.instruction( $<text>1 );
 };
 
-isspacep : OPCODE_ISSPACEP addressSpace operand ',' operand ';'
+isspacepAddressSpace : addressSpace
+	| TOKEN_SHARED_CTA { state.addressSpace( TOKEN_SHARED ); };
+
+isspacep : OPCODE_ISSPACEP isspacepAddressSpace operand ',' operand ';'
 {
 	state.instruction( $<text>1, TOKEN_U32 );
 }
@@ -1184,13 +1401,89 @@ optionalVolatile : /* empty string */
 	state.volatileFlag( false );
 };
 
-ldModifier : optionalVolatile optionalAddressSpace optionalCacheOperation
-	optionalInstructionVectorType;
+mmioLdSemantics : TOKEN_ACQUIRE { state.semantics( $<value>1 ); }
+	| TOKEN_RELAXED { state.semantics( $<value>1 ); }
+	;
+
+mmioStSemantics : TOKEN_RELAXED { state.semantics( $<value>1 ); }
+	| TOKEN_RELEASE { state.semantics( $<value>1 ); }
+	;
+
+ldOrdering : volatileModifier { state.semantics( TOKEN_WEAK ); }
+	| TOKEN_WEAK { state.semantics( $<value>1 ); state.volatileFlag( false ); }
+	| TOKEN_RELAXED fenceScopeType { state.semantics( $<value>1 );
+		state.scope( $<value>2 ); state.volatileFlag( false ); }
+	| TOKEN_ACQUIRE fenceScopeType { state.semantics( $<value>1 );
+		state.scope( $<value>2 ); state.volatileFlag( false ); }
+	| TOKEN_MMIO mmioLdSemantics TOKEN_SYS { state.mmio( true );
+		state.scope( $<value>3 ); state.volatileFlag( false ); }
+	| /* empty */ { state.semantics( TOKEN_WEAK ); state.volatileFlag( false ); }
+	;
+
+stOrdering : volatileModifier { state.semantics( TOKEN_WEAK ); }
+	| TOKEN_WEAK { state.semantics( $<value>1 ); state.volatileFlag( false ); }
+	| TOKEN_RELAXED fenceScopeType { state.semantics( $<value>1 );
+		state.scope( $<value>2 ); state.volatileFlag( false ); }
+	| TOKEN_RELEASE fenceScopeType { state.semantics( $<value>1 );
+		state.scope( $<value>2 ); state.volatileFlag( false ); }
+	| TOKEN_MMIO mmioStSemantics TOKEN_SYS { state.mmio( true );
+		state.scope( $<value>3 ); state.volatileFlag( false ); }
+	| /* empty */ { state.semantics( TOKEN_WEAK ); state.volatileFlag( false ); }
+	;
+
+/* PTX 8.0 ld/st: {.cop} or {.L1::eviction_priority}, then ld's {.L2::{64,128,256}B}.
+   Cache hints only affect performance; the emulator records them for printing. */
+l1Evict : TOKEN_L1_EVICT { state.statement.instruction.l1Evict = $1; };
+ldPrefetchSize : /* empty */ | TOKEN_L2_PREFETCH { state.statement.instruction.prefetchSize = $1; };
+
+ldModifier : ldOrdering optionalAddressSpace optionalCacheOperation ldPrefetchSize
+	optionalInstructionVectorType { state.finalizeMmioAddressSpace(); }
+	| ldOrdering optionalAddressSpace l1Evict ldPrefetchSize
+	optionalInstructionVectorType { state.finalizeMmioAddressSpace(); };
+
+stModifier : stOrdering optionalAddressSpace optionalStoreCacheOperation
+	optionalInstructionVectorType { state.finalizeMmioAddressSpace(); }
+	| stOrdering optionalAddressSpace l1Evict
+	optionalInstructionVectorType { state.finalizeMmioAddressSpace(); };
 
 ld : OPCODE_LD ldModifier dataType arrayOperand ',' '[' memoryOperand ']' ';'
 {
 	state.instruction( $<text>1, $<value>3 );
 };
+
+activemask : OPCODE_ACTIVEMASK TOKEN_B32 nonLabelOperand ';'
+{
+	state.instruction($<text>1, TOKEN_B32);
+};
+
+movmatrix : OPCODE_MOVMATRIX TOKEN_SYNC TOKEN_ALIGNED TOKEN_M8N8 TOKEN_TRANS TOKEN_B16
+	nonLabelOperand ',' nonLabelOperand ';'
+{
+	state.instruction($<text>1, TOKEN_B16);
+	state.statement.instruction.matrixTranspose = true;
+};
+
+matrixCount : TOKEN_X1 | TOKEN_X2 | TOKEN_X4;
+matrixTranspose : TOKEN_TRANS { state.statement.instruction.matrixTranspose = true; }
+	| /* empty */ { state.statement.instruction.matrixTranspose = false; };
+matrixSpace : TOKEN_SHARED { state.addressSpace(TOKEN_SHARED); }
+	| TOKEN_SHARED_CTA { state.addressSpace(TOKEN_SHARED); }
+	| /* empty */ { state.statement.instruction.addressSpace = ir::PTXInstruction::Generic; };
+ldmatrix : OPCODE_LDMATRIX TOKEN_SYNC TOKEN_ALIGNED TOKEN_M8N8 matrixCount
+	matrixTranspose matrixSpace TOKEN_B16 arrayOperand ',' '[' checkedAddress ']' ';'
+{
+	state.instruction($<text>1, TOKEN_B16);
+	auto& instruction = state.statement.instruction;
+	instruction.vec = static_cast<ir::PTXOperand::Vec>($5);
+	if (instruction.a.addressMode == ir::PTXOperand::Immediate) instruction.a.type = ir::PTXOperand::u64;
+};
+
+checkedAddress : identifier optionalVectorIndex { state.checkedAddress($<text>1, 0, @1); }
+	| identifier optionalVectorIndex TOKEN_DECIMAL_CONSTANT { state.checkedNegativeOffset($<text>1, $<value>3, @1); }
+	| identifier optionalVectorIndex '+' TOKEN_DECIMAL_CONSTANT { state.checkedAddress($<text>1, $<value>4, @1); }
+	| identifier optionalVectorIndex '-' TOKEN_DECIMAL_CONSTANT { state.checkedAddress($<text>1, $<value>4, @1, true); }
+	| TOKEN_DECIMAL_CONSTANT { state.checkedImmediate($<value>1, @1); }
+	| TOKEN_UNSIGNED_DECIMAL_CONSTANT { state.checkedImmediate($<uvalue>1, @1); };
 
 ldu : OPCODE_LDU ldModifier dataType arrayOperand ',' '[' memoryOperand ']' ';'
 {
@@ -1209,6 +1502,7 @@ mulModifier : roundHiLoWide optionalFtz optionalSaturate
 
 mulModifier : hiOrLo TOKEN_CARRY
 {
+	state.modifier( $<value>1 );
 	state.carry( true );
 };
 
@@ -1217,12 +1511,19 @@ mulModifier : optionalFtz optionalSaturate
 	state.carry( false );
 };
 
-madOpcode : OPCODE_MAD | OPCODE_FMA;
-
-mad : madOpcode mulModifier dataType operand ',' operand 
+mad : OPCODE_MAD mulModifier dataType operand ',' operand
 	',' operand ',' operand ';'
 {
 	state.instruction( $<text>1, $<value>3 );
+};
+
+/* fma also takes .relu (f16/f16x2/bf16/bf16x2) and the .bf16x2 type (PTX 7.0, sm_80). */
+fmaDataTypeId : dataTypeId | TOKEN_BF16X2;
+
+mad : OPCODE_FMA mulModifier optionalRelu fmaDataTypeId operand ',' operand
+	',' operand ',' operand ';'
+{
+	state.instruction( $<text>1, $<value>4 );
 };
 
 mad24Modifier : optionalSaturate;
@@ -1247,6 +1548,7 @@ madc : OPCODE_MADC madCModifier dataType operand ',' operand
 	',' operand ',' operand ';'
 {
 	state.instruction( $<text>1, $<value>3 );
+	state.madcCarryIn();
 };
 
 membarSpaceType : TOKEN_GL | TOKEN_CTA | TOKEN_SYS;
@@ -1261,12 +1563,43 @@ membar : OPCODE_MEMBAR membarSpace ';'
 	state.instruction( $<text>1 );
 };
 
+fenceSemanticsType : TOKEN_SC | TOKEN_ACQ_REL;
+
+fenceSemantics : fenceSemanticsType
+{
+	state.semantics( $<value>1 );
+};
+
+optionalFenceSemantics : fenceSemantics | /* empty */;
+
+fenceScopeType : TOKEN_CTA | TOKEN_GPU | TOKEN_SYS;
+
+fenceScope : fenceScopeType
+{
+	state.level( $<value>1 );
+};
+
+fence : OPCODE_FENCE optionalFenceSemantics fenceScope ';'
+{
+	state.instruction( $<text>1 );
+};
+
 movIndexedOperand : identifier '[' TOKEN_DECIMAL_CONSTANT ']'
 {
 	state.indexedOperand( $<text>1, @1, $<value>3 );
 };
 
-movSourceOperand : arrayOperand | offsetAddressableOperand | movIndexedOperand;
+movVectorOperand : '{' operand ',' operand '}'
+{
+	state.vectorOperand(2);
+};
+
+movVectorOperand : '{' operand ',' operand ',' operand ',' operand '}'
+{
+	state.vectorOperand(4);
+};
+
+movSourceOperand : operand | offsetAddressableOperand | movIndexedOperand | movVectorOperand;
 
 mov : OPCODE_MOV dataType arrayOperand ',' movSourceOperand ';'
 {
@@ -1297,9 +1630,34 @@ notInstruction : notOpcode dataType operand ',' operand ';'
 	state.instruction( $<text>1, $<value>2 );
 };
 
-pmevent : OPCODE_PMEVENT operand
+pmevent : OPCODE_PMEVENT operand ';'
 {
 	state.instruction( $<text>1 );
+};
+
+pmevent : OPCODE_PMEVENT_MASK operand ';'
+{
+	state.pmeventMask( true );
+	state.instruction( "pmevent" );
+};
+
+nanosleep : OPCODE_NANOSLEEP dataType operand ';'
+{
+	state.instruction( $<text>1, $<value>2 );
+};
+
+/* discard{.global}.L2 [a], 128; (sm_80) */
+discard : OPCODE_DISCARD optionalAddressSpace cacheLevel '[' memoryOperand ']' ',' operand ';'
+{
+	state.instruction( $<text>1 );
+};
+
+/* applypriority{.global}.L2::evict_normal [a], 128; (sm_80) */
+applypriority : OPCODE_APPLYPRIORITY optionalAddressSpace TOKEN_EVICT_NORMAL '[' memoryOperand ']' ',' operand ';'
+{
+	state.instruction( $<text>1 );
+	state.statement.instruction.cacheLevel = ir::PTXInstruction::L2;
+	state.statement.instruction.l2Evict = 0;
 };
 
 popc : OPCODE_POPC dataType operand ',' operand ';'
@@ -1320,15 +1678,156 @@ permuteMode : /* empty string */
 	state.defaultPermute();
 };
 
-cacheLevel : TOKEN_L1 | TOKEN_L2
+cacheLevel : TOKEN_L1 { state.cacheLevel( $<value>1 ); }
+	| TOKEN_L2 { state.cacheLevel( $<value>1 ); }
+	;
+
+policyPriority : TOKEN_EVICT_NORMAL { $$ = ir::PTXInstruction::EvictNormal; }
+	| TOKEN_EVICT_LAST { $$ = ir::PTXInstruction::EvictLast; }
+	| TOKEN_EVICT_FIRST { $$ = ir::PTXInstruction::EvictFirst; }
+	| TOKEN_EVICT_UNCHANGED { $$ = ir::PTXInstruction::EvictUnchanged; };
+policyPriorities : policyPriority { state.statement.instruction.primaryPriority = ir::PTXInstruction::CachePriority($1); }
+	| policyPriority policyPriority { state.statement.instruction.primaryPriority = ir::PTXInstruction::CachePriority($1); state.statement.instruction.secondaryPriority = ir::PTXInstruction::CachePriority($2); };
+policyFraction : /* empty */ { state.operandVector.push_back(ir::PTXOperand(1.0f)); }
+	| ',' operand;
+createpolicy : OPCODE_CREATEPOLICY TOKEN_FRACTIONAL policyPriorities TOKEN_B64 operand policyFraction ';'
 {
-	state.cacheLevel( $<value>1 );
+	const auto fraction = state.operandVector.back().operand;
+	state.instruction($1, TOKEN_B64);
+	state.statement.instruction.a = fraction;
+	if (fraction.addressMode == ir::PTXOperand::Immediate && fraction.type == ir::PTXOperand::f64)
+		state.statement.instruction.a = ir::PTXOperand(float(fraction.imm_float));
 };
+
+createpolicy : OPCODE_CREATEPOLICY TOKEN_POLICY_CVT TOKEN_L2 TOKEN_B64 operand ',' operand ';'
+{
+	const auto property = state.operandVector.back().operand;
+	state.instruction($1, TOKEN_B64); state.statement.instruction.policyMode = ir::PTXInstruction::PolicyCvt;
+	state.statement.instruction.a = property;
+};
+createpolicy : OPCODE_CREATEPOLICY TOKEN_POLICY_RANGE optionalAddressSpace policyPriorities TOKEN_B64 operand ',' '[' checkedAddress ']' ',' operand ',' operand ';'
+{
+	const auto primary = state.operandVector[state.operandVector.size() - 2].operand, total = state.operandVector.back().operand;
+	state.instruction($1, TOKEN_B64); auto& ins = state.statement.instruction; ins.policyMode = ir::PTXInstruction::PolicyRange;
+	ins.b = primary; ins.c = total;
+	if (ins.a.addressMode == ir::PTXOperand::Immediate) ins.a.type = ir::PTXOperand::u64;
+	for (auto* size : {&ins.b,&ins.c}) {
+		if (size->addressMode == ir::PTXOperand::Special && size->special == ir::PTXOperand::warpSize) *size = ir::PTXOperand(ir::WARP_SZ,ir::PTXOperand::u32);
+		else if (size->addressMode == ir::PTXOperand::Immediate && ir::PTXOperand::isInt(size->type)) size->type = ir::PTXOperand::u32;
+	}
+};
+
+wmmaMmaModifiers : wmmaShape mmaLayout mmaLayout { state.statement.instruction.mmaAColumnMajor = $2 == TOKEN_COL; state.statement.instruction.mmaBColumnMajor = $3 == TOKEN_COL; }
+ | mmaLayout mmaLayout wmmaShape { state.statement.instruction.mmaAColumnMajor = $1 == TOKEN_COL; state.statement.instruction.mmaBColumnMajor = $2 == TOKEN_COL; };
+wmmaAlternateType : TOKEN_BF16 | TOKEN_TF32;
+wmmaMmaTypes : mmaAccumulatorTypeId mmaAccumulatorTypeId {
+ auto& ins = state.statement.instruction; ins.type = parser::PTXParser::tokenToDataType($1); ins.c.type = parser::PTXParser::tokenToDataType($2); ins.a.type = ins.b.type = ir::PTXOperand::f16;
+} | TOKEN_F32 wmmaAlternateType wmmaAlternateType TOKEN_F32 {
+ auto& ins = state.statement.instruction; ins.type = ins.c.type = ir::PTXOperand::f32; ins.a.type = parser::PTXParser::tokenToDataType($2); ins.b.type = parser::PTXParser::tokenToDataType($3);
+} | TOKEN_S32 mmaIntTypeId mmaIntTypeId TOKEN_S32 {
+ auto& ins = state.statement.instruction; ins.type = ins.c.type = ir::PTXOperand::s32; ins.a.type = parser::PTXParser::tokenToDataType($2); ins.b.type = parser::PTXParser::tokenToDataType($3);
+} | TOKEN_S32 TOKEN_B1 TOKEN_B1 TOKEN_S32 {
+ auto& ins = state.statement.instruction; ins.type = ins.c.type = ir::PTXOperand::s32; ins.a.type = ins.b.type = ir::PTXOperand::b1;
+} | TOKEN_F64 TOKEN_F64 TOKEN_F64 TOKEN_F64 {
+ auto& ins = state.statement.instruction; ins.type = ins.c.type = ins.a.type = ins.b.type = ir::PTXOperand::f64;
+};
+wmmaMma : OPCODE_WMMA_MMA TOKEN_SYNC TOKEN_ALIGNED wmmaMmaModifiers optionalFloatRounding wmmaMmaTypes optionalSatfinite arrayOperand ',' arrayOperand ',' arrayOperand ',' arrayOperand ';' {
+ const auto format = state.statement.instruction; state.instruction($1,TOKEN_B32); auto& ins = state.statement.instruction;
+ ins.type = ins.d.type = format.type; ins.a.type = format.a.type; ins.b.type = format.b.type; ins.c.type = format.c.type;
+ ins.booleanOperator = std::string($1) == "wmma.mma.xor.popc" ? ir::PTXInstruction::BoolXor : std::string($1) == "wmma.mma.and.popc" ? ir::PTXInstruction::BoolAnd : ir::PTXInstruction::BoolNop;
+};
+
+wmmaShape : TOKEN_M16N16K16 { state.statement.instruction.mmaShape = ir::PTXInstruction::MmaM16N16K16; }
+ | TOKEN_M8N32K16 { state.statement.instruction.mmaShape = ir::PTXInstruction::MmaM8N32K16; }
+ | TOKEN_M32N8K16 { state.statement.instruction.mmaShape = ir::PTXInstruction::MmaM32N8K16; }
+ | TOKEN_M16N16K8 { state.statement.instruction.mmaShape = ir::PTXInstruction::MmaM16N16K8; }
+ | TOKEN_M8N8K4 { state.statement.instruction.mmaShape = ir::PTXInstruction::MmaM8N8K4; }
+ | TOKEN_M8N8K32 { state.statement.instruction.mmaShape = ir::PTXInstruction::MmaM8N8K32; }
+ | TOKEN_M8N8K128 { state.statement.instruction.mmaShape = ir::PTXInstruction::MmaM8N8K128; }
+;
+wmmaLayout : TOKEN_ROW { state.statement.instruction.mmaAColumnMajor = false; } | TOKEN_COL { state.statement.instruction.mmaAColumnMajor = true; };
+wmmaSpace : TOKEN_GLOBAL { state.addressSpace(TOKEN_GLOBAL); } | TOKEN_SHARED { state.addressSpace(TOKEN_SHARED); } | TOKEN_SHARED_CTA { state.addressSpace(TOKEN_SHARED); };
+wmmaOptionalSpace : wmmaSpace | /* empty */ { state.noAddressSpace(); };
+wmmaMemoryModifiers : wmmaShape wmmaLayout wmmaOptionalSpace | wmmaLayout wmmaShape wmmaOptionalSpace
+ | wmmaShape wmmaSpace wmmaLayout | wmmaLayout wmmaSpace wmmaShape | wmmaSpace wmmaShape wmmaLayout | wmmaSpace wmmaLayout wmmaShape;
+wmmaType : dataTypeId | TOKEN_TF32 | TOKEN_S4 | TOKEN_U4 | TOKEN_B1;
+wmmaStride : /* empty */ | ',' operand;
+wmmaMemory : OPCODE_WMMA_MEMORY TOKEN_SYNC TOKEN_ALIGNED wmmaMemoryModifiers wmmaType arrayOperand ',' '[' checkedAddress ']' wmmaStride ';' {
+ const auto address = state.operandVector[2].operand; auto stride = state.operandVector.size() == 4 ? state.operandVector[3].operand : ir::PTXOperand();
+ if (stride.addressMode == ir::PTXOperand::Special && stride.special == ir::PTXOperand::warpSize) stride = ir::PTXOperand(ir::WARP_SZ,ir::PTXOperand::u32);
+ state.instruction($1,$5); state.statement.instruction.a = address; state.statement.instruction.b = stride;
+} | OPCODE_WMMA_MEMORY TOKEN_SYNC TOKEN_ALIGNED wmmaMemoryModifiers wmmaType '[' checkedAddress ']' ',' arrayOperand wmmaStride ';' {
+ const auto address = state.operandVector[1].operand; auto stride = state.operandVector.size() == 4 ? state.operandVector[3].operand : ir::PTXOperand();
+ if (stride.addressMode == ir::PTXOperand::Special && stride.special == ir::PTXOperand::warpSize) stride = ir::PTXOperand(ir::WARP_SZ,ir::PTXOperand::u32);
+ state.instruction($1,$5); state.statement.instruction.d = address; state.statement.instruction.b = stride;
+};
+
+mbarrierAcquire : /* empty */ | TOKEN_ACQUIRE;
+mbarrierRelease : /* empty */ | TOKEN_RELEASE;
+mbarrierScope : /* empty */ | TOKEN_CTA;
+mbarrierArrival : mbarrierRelease mbarrierScope matrixSpace TOKEN_B64 operand ',' '[' checkedAddress ']'
+ | TOKEN_NO_COMPLETE mbarrierRelease mbarrierScope matrixSpace TOKEN_B64 operand ',' '[' checkedAddress ']' ',' operand { state.statement.instruction.mbarrierNoComplete = true; };
+mbarrier : OPCODE_MBAR_WAIT mbarrierAcquire mbarrierScope matrixSpace TOKEN_B64 operand ',' '[' checkedAddress ']' ',' operand ';' {
+ const auto address = state.operandVector[2].operand, token = state.operandVector[3].operand;
+ state.instruction($1,TOKEN_B64); state.statement.instruction.a = address; state.statement.instruction.b = token;
+} | OPCODE_MBAR_PENDING TOKEN_B64 operand ',' operand ';' { state.instruction($1,TOKEN_B64); }
+ | OPCODE_MBAR_ARRIVE mbarrierArrival ';' {
+ const auto address = state.operandVector[2].operand;
+ auto count = state.operandVector.size() == 4 ? state.operandVector[3].operand : ir::PTXOperand(1,ir::PTXOperand::u32);
+ if (count.addressMode == ir::PTXOperand::Special && count.special == ir::PTXOperand::warpSize) count = ir::PTXOperand(ir::WARP_SZ,ir::PTXOperand::u32);
+ state.instruction($1,TOKEN_B64); state.statement.instruction.a = address; state.statement.instruction.b = count;
+} | OPCODE_MBAR_INIT matrixSpace TOKEN_B64 '[' checkedAddress ']' ',' operand ';' {
+	auto count = state.operandVector.back().operand;
+	if (count.addressMode == ir::PTXOperand::Special && count.special == ir::PTXOperand::warpSize) count = ir::PTXOperand(ir::WARP_SZ,ir::PTXOperand::u32);
+	state.instruction($1, TOKEN_B64); auto& ins = state.statement.instruction;
+	ins.a = ins.d; ins.b = count; ins.d = ir::PTXOperand();
+} | OPCODE_MBAR_CP matrixSpace TOKEN_B64 '[' checkedAddress ']' ';' {
+ state.instruction($1,TOKEN_B64); state.statement.instruction.a = state.statement.instruction.d; state.statement.instruction.d = ir::PTXOperand();
+} | OPCODE_MBAR_INVAL matrixSpace TOKEN_B64 '[' checkedAddress ']' ';' {
+	state.instruction($1, TOKEN_B64); state.statement.instruction.a = state.statement.instruction.d; state.statement.instruction.d = ir::PTXOperand();
+};
+
+cpAsyncCache : TOKEN_CA { state.cacheOperation($1); } | TOKEN_CG { state.cacheOperation($1); };
+cpAsyncShared : TOKEN_SHARED | TOKEN_SHARED_CTA;
+cpAsyncSource : /* empty */ | ',' operand | ',' operand ',' operand;
+cpAsyncPrefetch : /* empty */ | TOKEN_L2_PREFETCH { state.statement.instruction.prefetchSize = $1; };
+cpAsync : OPCODE_CP_ASYNC cpAsyncCache cpAsyncShared TOKEN_GLOBAL atomicCacheHint cpAsyncPrefetch '[' checkedAddress ']' ',' '[' checkedAddress ']' ',' operand cpAsyncSource ';' {
+	const auto dst = state.operandVector[1].operand, src = state.operandVector[2].operand, size = state.operandVector[3].operand;
+	auto sourceSize = ir::PTXOperand(), policy = ir::PTXOperand();
+	if (state.operandVector.size() == 6) {
+		sourceSize = state.operandVector[4].operand; policy = state.operandVector.back().operand;
+	} else if (state.operandVector.size() == 5) {
+		const auto extra = state.operandVector.back().operand;
+		if (state.statement.instruction.cacheHint && extra.type != ir::PTXOperand::pred && extra.bytes() == 8) policy = extra;
+		else sourceSize = extra;
+	}
+	state.instruction($1, TOKEN_B32);
+	auto& ins = state.statement.instruction; ins.pq = ir::PTXOperand(); ins.q = policy; ins.c = sourceSize; ins.d = dst; ins.a = src; ins.b = size; ins.addressSpace = ir::PTXInstruction::Shared;
+};
+
+cpAsyncWait : OPCODE_CP_COMMIT ';' { state.instruction($1); }
+ | OPCODE_CP_WAIT_ALL ';' { state.instruction($1); }
+ | OPCODE_CP_WAIT_GROUP operand ';' {
+	auto count = state.operandVector.back().operand;
+	if (count.addressMode == ir::PTXOperand::Special && count.special == ir::PTXOperand::warpSize) count = ir::PTXOperand(ir::WARP_SZ, ir::PTXOperand::u32);
+	state.instruction($1); state.statement.instruction.a = count;
+	state.statement.instruction.d = ir::PTXOperand();
+ };
 
 prefetch : OPCODE_PREFETCH addressSpace cacheLevel '[' memoryOperand ']' ';'
 {
 	state.instruction( $<text>1 );
 };
+
+/* prefetch.global.L2::{evict_last,evict_normal} [a] (PTX 7.4, sm_80). */
+prefetch : OPCODE_PREFETCH addressSpace prefetchEvict '[' memoryOperand ']' ';'
+{
+	state.instruction( $<text>1 );
+	state.statement.instruction.cacheLevel = ir::PTXInstruction::L2;
+};
+
+prefetchEvict : TOKEN_EVICT_NORMAL { state.statement.instruction.l2Evict = 0; }
+	| TOKEN_EVICT_LAST { state.statement.instruction.l2Evict = 1; };
 
 prefetchu : OPCODE_PREFETCHU cacheLevel '[' memoryOperand ']' ';'
 {
@@ -1347,7 +1846,7 @@ rcpSqrtModifier : TOKEN_APPROX optionalFtz
 };
 
 rcpSqrtModifier : /* empty string */;
-rcpSqrtModifier : TOKEN_RN optionalFtz
+rcpSqrtModifier : floatRoundingToken optionalFtz
 {
 	state.modifier( $<value>1 );
 };
@@ -1368,10 +1867,68 @@ reductionOperation : reductionOperationId
 	state.reduction( $<value>1 );
 };
 
-red : OPCODE_RED addressSpace reductionOperation dataType operand ',' 
-	operand ';'
+reductionSemantics : TOKEN_RELAXED { state.semantics( $<value>1 ); }
+	| TOKEN_RELEASE { state.semantics( $<value>1 ); }
+	;
+
+optionalReductionSemantics : reductionSemantics
+	| /* empty */ { state.semantics( TOKEN_RELAXED ); }
+	;
+
+matchMode : TOKEN_ANY | TOKEN_ALL;
+
+match : OPCODE_MATCH matchMode TOKEN_SYNC dataType predicatePair ',' operand ',' operand ';'
 {
-	state.instruction( $<text>1, $<value>4 );
+	const auto operands = state.operandVector;
+	state.instruction($<text>1, $<value>4);
+	auto& instr = state.statement.instruction;
+	instr.matchAll = $<value>2 == TOKEN_ALL;
+	instr.pq = operands.size() == 5 ? operands[2].operand : ir::PTXOperand();
+	instr.a = operands[operands.size() - 2].operand;
+	if (instr.a.addressMode == ir::PTXOperand::Immediate) instr.a.type = instr.type;
+	instr.b = operands.back().operand;
+	if (instr.b.addressMode == ir::PTXOperand::Immediate && ir::PTXOperand::isInt(instr.b.type)) instr.b.type = ir::PTXOperand::u32;
+};
+
+redux : OPCODE_REDUX TOKEN_SYNC reductionOperation dataType operand ',' operand ',' operand ';'
+{
+	auto mask = state.operandVector.back().operand;
+	state.instruction($<text>1, $<value>4);
+	if (mask.addressMode == ir::PTXOperand::Immediate && ir::PTXOperand::isInt(mask.type)) mask.type = ir::PTXOperand::u32;
+	state.statement.instruction.b = mask;
+};
+
+redAddress : '[' checkedAddress ']' | operand;
+
+atomicAddressSpace : optionalAddressSpace
+	| TOKEN_SHARED_CTA { state.addressSpace(TOKEN_SHARED); };
+
+optionalNoftz : /* empty */
+	| TOKEN_NOFTZ { state.modifier($1); };
+
+atomicCacheHint : /* empty */
+	| TOKEN_L2_CACHE_HINT { state.statement.instruction.cacheHint = true; };
+atomicCachePolicy : /* empty */
+	| ',' operand { state.statement.instruction.q = state.operandVector.back().operand; state.operandVector.pop_back(); };
+
+red : OPCODE_RED optionalReductionSemantics optionalAtomicScope atomicAddressSpace
+	reductionOperation optionalNoftz atomicCacheHint dataType redAddress ','
+	operand atomicCachePolicy ';'
+{
+	const auto value = state.operandVector.back().operand;
+	state.instruction( $<text>1, $<value>8 );
+	auto& instr = state.statement.instruction;
+	instr.b = value;
+	if (value.addressMode == ir::PTXOperand::Special && value.special == ir::PTXOperand::warpSize)
+		instr.b = ir::PTXOperand(ir::WARP_SZ, ir::PTXOperand::u64);
+	if (instr.b.addressMode == ir::PTXOperand::Immediate) {
+		if (instr.type == ir::PTXOperand::f32 && instr.b.type == ir::PTXOperand::f64) {
+			instr.b.imm_single = static_cast<ir::PTXF32>(instr.b.imm_float);
+			instr.b.type = ir::PTXOperand::f32;
+		} else if (ir::PTXOperand::isInt(instr.b.type) && !ir::PTXOperand::isFloat(instr.type)) instr.b.type = instr.type;
+	}
+	instr.a = instr.d;
+	instr.d = ir::PTXOperand();
 };
 
 ret : OPCODE_RET optionalUni ';'
@@ -1465,11 +2022,40 @@ shf : OPCODE_SHF shfDirection shfMode TOKEN_B32 operand ',' operand ',' operand 
     state.shiftMode( $<value>3 );
 }; 
 
+szext : OPCODE_SZEXT shfMode dataType operand ',' operand ',' operand ';'
+{
+	state.instruction( $<text>1, $<value>3 );
+	state.shiftMode( $<value>2 );
+};
+
+bmsk : OPCODE_BMSK shfMode TOKEN_B32 operand ',' operand ',' operand ';'
+{
+	state.instruction( $<text>1, $<value>3 );
+	state.shiftMode( $<value>2 );
+};
+
 shuffleModifierId : TOKEN_UP | TOKEN_DOWN | TOKEN_BFLY | TOKEN_IDX;
 
 shuffleModifier : shuffleModifierId
 {
 	state.shuffle( $<value>1 );
+};
+
+shfl : OPCODE_SHFL TOKEN_SYNC shuffleModifier dataType predicatePair ',' operand ',' operand ',' operand ',' operand ';'
+{
+	const auto operands = state.operandVector;
+	state.instruction($<text>1, $<value>4);
+	auto& instr = state.statement.instruction;
+	instr.opcode = ir::PTXInstruction::ShflSync;
+	instr.pq = operands.size() == 7 ? operands[2].operand : ir::PTXOperand();
+	const unsigned first = operands.size() - 4;
+	instr.a = operands[first].operand;
+	instr.b = operands[first + 1].operand;
+	instr.c = operands[first + 2].operand;
+	instr.q = operands.back().operand;
+	if (instr.a.addressMode == ir::PTXOperand::Immediate && ir::PTXOperand::isInt(instr.a.type)) instr.a.type = ir::PTXOperand::b32;
+	for (auto* control : {&instr.b, &instr.c, &instr.q})
+		if (control->addressMode == ir::PTXOperand::Immediate && ir::PTXOperand::isInt(control->type)) control->type = ir::PTXOperand::u32;
 };
 
 shfl : OPCODE_SHFL shuffleModifier dataType predicatePair ',' operand ','
@@ -1485,7 +2071,7 @@ slct : OPCODE_SLCT optionalFtz dataType dataType operand ',' operand ','
 	state.convertC( $<value>4, @1 );
 };
 
-st : OPCODE_ST ldModifier dataType '[' memoryOperand ']' ',' arrayOperand ';'
+st : OPCODE_ST stModifier dataType '[' memoryOperand ']' ',' arrayOperand ';'
 {
 	state.instruction( $<text>1, $<value>3 );
 };
@@ -1535,13 +2121,17 @@ tld4 : OPCODE_TLD4 colorComponent TOKEN_2D TOKEN_V4 dataType dataType
 // Surface sampling 
 // 
 
-surfaceQuery : TOKEN_WIDTH | TOKEN_HEIGHT | TOKEN_DEPTH
-	| TOKEN_CHANNEL_DATA_TYPE | TOKEN_CHANNEL_ORDER | TOKEN_NORMALIZED_COORDS
-	| TOKEN_FILTER_MODE | TOKEN_ADDR_MODE_0 | TOKEN_ADDR_MODE_1
-	| TOKEN_ADDR_MODE_2
-{
-	state.surfaceQuery( $<value>1 );
-};
+surfaceQuery : TOKEN_WIDTH { state.surfaceQuery( $<value>1 ); }
+	| TOKEN_HEIGHT { state.surfaceQuery( $<value>1 ); }
+	| TOKEN_DEPTH { state.surfaceQuery( $<value>1 ); }
+	| TOKEN_CHANNEL_DATA_TYPE { state.surfaceQuery( $<value>1 ); }
+	| TOKEN_CHANNEL_ORDER { state.surfaceQuery( $<value>1 ); }
+	| TOKEN_NORMALIZED_COORDS { state.surfaceQuery( $<value>1 ); }
+	| TOKEN_FILTER_MODE { state.surfaceQuery( $<value>1 ); }
+	| TOKEN_ADDR_MODE_0 { state.surfaceQuery( $<value>1 ); }
+	| TOKEN_ADDR_MODE_1 { state.surfaceQuery( $<value>1 ); }
+	| TOKEN_ADDR_MODE_2 { state.surfaceQuery( $<value>1 ); }
+	;
 
 txq : OPCODE_TXQ surfaceQuery dataType operand ',' '[' operand ']' ';'
 {
@@ -1555,22 +2145,32 @@ suq : OPCODE_SUQ surfaceQuery dataType operand ',' '[' operand ']' ';'
 	state.surfaceQuery( $<value>2 );
 };
 
-cacheOperation : TOKEN_CA | TOKEN_CG | TOKEN_CS | TOKEN_CV | TOKEN_NC
-{
-	state.cacheOperation( $<value>1 );
-};
+cacheOperation : TOKEN_CA { state.cacheOperation( $<value>1 ); }
+	| TOKEN_CG { state.cacheOperation( $<value>1 ); }
+	| TOKEN_CS { state.cacheOperation( $<value>1 ); }
+	| TOKEN_CV { state.cacheOperation( $<value>1 ); }
+	| TOKEN_NC { state.cacheOperation( $<value>1 ); }
+	| TOKEN_LU { state.cacheOperation( $<value>1 ); }
+	;
 
 optionalCacheOperation : cacheOperation | /* empty */;
 
-clampOperation : TOKEN_CLAMP | TOKEN_ZERO | TOKEN_TRAP
-{
-	state.clampOperation( $<value>1 );
-};
+storeCacheOperation : TOKEN_WB { state.cacheOperation( $<value>1 ); }
+	| TOKEN_CG { state.cacheOperation( $<value>1 ); }
+	| TOKEN_CS { state.cacheOperation( $<value>1 ); }
+	| TOKEN_WT { state.cacheOperation( $<value>1 ); }
+	;
 
-formatMode : TOKEN_B | TOKEN_P
-{
-	state.formatMode( $<value>1 );
-};
+optionalStoreCacheOperation : storeCacheOperation | /* empty */;
+
+clampOperation : TOKEN_CLAMP { state.clampOperation( $<value>1 ); }
+	| TOKEN_ZERO { state.clampOperation( $<value>1 ); }
+	| TOKEN_TRAP { state.clampOperation( $<value>1 ); }
+	;
+
+formatMode : TOKEN_B { state.formatMode( $<value>1 ); }
+	| TOKEN_P { state.formatMode( $<value>1 ); }
+	;
 
 suld : OPCODE_SULD formatMode geometry optionalCacheOperation 
 	instructionVectorType dataType clampOperation arrayOperand ',' 
@@ -1615,6 +2215,15 @@ voteOperation : voteOperationId
 };
 
 voteDataType : TOKEN_PRED | TOKEN_B32;
+
+vote : OPCODE_VOTE TOKEN_SYNC voteOperation voteDataType operand ',' operand ',' operand ';'
+{
+	auto mask = state.operandVector.back().operand;
+	state.instruction($<text>1, $<value>4);
+	if (mask.addressMode == ir::PTXOperand::Immediate && ir::PTXOperand::isInt(mask.type)) mask.type = ir::PTXOperand::u32;
+	state.statement.instruction.b = mask;
+	state.statement.instruction.voteSync = true;
+};
 
 vote : OPCODE_VOTE voteOperation voteDataType operand ',' operand ';'
 {

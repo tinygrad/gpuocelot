@@ -142,6 +142,31 @@ namespace executive
 		return (RegisterType*)_stackBase(_localMemoryBase 
 			+ thread * localMemorySize());
 	}
+
+	bool EmulatorCallStack::isLocalMemoryAddress(unsigned long long address,
+		unsigned int thread, unsigned int addressBits) const
+	{
+		assert(thread < _threadCount);
+		const unsigned long long mask = addressBits == 32
+			? 0xffffffffull : ~0ull;
+		address &= mask;
+		unsigned int stackPointer = 0;
+		for (unsigned int frame = 0; frame < _localMemorySizes.size(); ++frame)
+		{
+			const unsigned int localSize = _localMemorySizes[frame];
+			const unsigned int localBase = stackPointer
+				+ align(3 * sizeof(unsigned int))
+				+ _stackFrameSizes[frame + 1] * _threadCount
+				+ thread * localSize;
+			const unsigned long long base =
+				reinterpret_cast<unsigned long long>(_stackBase(localBase)) & mask;
+			if (address >= base && address - base < localSize) return true;
+			stackPointer += (_stackFrameSizes[frame + 1]
+				+ _registerFileSizes[frame] * sizeof(RegisterType) + localSize)
+				* _threadCount + align(3 * sizeof(unsigned int));
+		}
+		return false;
+	}
 	
 	void* EmulatorCallStack::sharedMemoryPointer()
 	{

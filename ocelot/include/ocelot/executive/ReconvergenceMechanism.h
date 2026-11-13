@@ -86,6 +86,10 @@ public:
 	virtual void eval_Vote(CTAContext &context,
 		const ir::PTXInstruction &instr);
 
+	//! Wait for named warp members, then execute the collective.
+	virtual void eval_WarpSync(CTAContext &context,
+		const ir::PTXInstruction &instr);
+
 	/*! 
 		\brief updates the active context to the next instruction
 	*/
@@ -142,6 +146,7 @@ public:
 		const ir::PTXInstruction &instr);
 	void eval_Exit(CTAContext &context,
 		const ir::PTXInstruction &instr);
+	void eval_WarpSync(CTAContext &context, const ir::PTXInstruction &instr);
 	bool nextInstruction(CTAContext &context,
 		const ir::PTXInstruction &instr, const ir::PTXInstruction::Opcode &);
 
@@ -154,6 +159,7 @@ private:
 	enum Token
 	{
 		Call,
+		BarrierContinuation,
 		Branch
 	};
 
@@ -171,6 +177,10 @@ private:
 	PCStack pcStack;
 	TokenStack tokenStack;
 	unsigned int reconvergeEvents;
+	bool yielded = false;
+	RuntimeStack pendingBar;
+	RuntimeStack pendingVote;
+	int voteBoundary = 0;
 };
 
 class ReconvergenceBarrier: public ReconvergenceMechanism {

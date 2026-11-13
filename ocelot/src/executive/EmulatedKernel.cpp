@@ -265,7 +265,7 @@ void executive::EmulatedKernel::constructInstructionSequence() {
 	After emitting the instruction sequence, visit each memory move operation 
 	and replace references to parameters with offsets into parameter memory.
 
-	Data movement instructions: ld, st
+	Address-bearing instructions: ld, st, cvta
 */
 void executive::EmulatedKernel::updateParamReferences() {
 	using namespace std;
@@ -274,7 +274,9 @@ void executive::EmulatedKernel::updateParamReferences() {
 		i_it != instructions.end(); ++i_it) {
 		ir::PTXInstruction& instr = *i_it;
 		if (instr.addressSpace == ir::PTXInstruction::Param) {
-			if (instr.opcode == ir::PTXInstruction::Ld 
+			if ((instr.opcode == ir::PTXInstruction::Ld
+				|| (instr.opcode == ir::PTXInstruction::Cvta
+					&& !instr.toAddrSpace))
 				&& instr.a.addressMode == ir::PTXOperand::Address) {
 				
 				ir::Parameter *pParam = getParameter(instr.a.identifier);

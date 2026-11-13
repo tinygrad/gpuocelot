@@ -81,6 +81,11 @@ ir::PTXU64 EmulatedKernelScheduler::argumentMemory() const
 	return (ir::PTXU64)_getExecutingContext()->argumentMemory.data();
 }
 
+ir::PTXU64 EmulatedKernelScheduler::argumentMemorySize() const
+{
+	return _getExecutingContext()->argumentMemory.size();
+}
+
 void EmulatedKernelScheduler::_scheduler()
 {
 	while(!_executingContexts.empty())
@@ -270,5 +275,4 @@ void EmulatedKernelScheduler::Context::_yieldBarrier()
 }
 
 }
-
 

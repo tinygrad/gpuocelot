@@ -451,14 +451,22 @@ namespace executive {
 
 	public:
 		/*Handlers for each instruction */
+		void eval_WmmaMma(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_WmmaMemory(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_MbarrierPendingCount(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Mbarrier(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_CpAsync(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Abs(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Add(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_AddC(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_And(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Atom(CTAContext &context, const ir::PTXInstruction &instr);
+		void evalAtomicRMW(CTAContext &context, const ir::PTXInstruction &instr,
+			ir::PTXInstruction::AtomicOperation operation, bool writeback);
 		void eval_Bar(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Bfi(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Bfind(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Bmsk(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Bfe(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Bra(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Brev(CTAContext &context, const ir::PTXInstruction &instr);
@@ -472,19 +480,29 @@ namespace executive {
 		void eval_Cvt(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Cvta(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Div(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Dp(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Ex2(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Exit(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Fma(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Fns(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Mma(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Isspacep(CTAContext &context,
 			const ir::PTXInstruction &instr);
 		void eval_Ld(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Ldu(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Ldmatrix(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Lg2(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Lop3(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Mad24(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Mad(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_MadC(CTAContext &context, const ir::PTXInstruction &instr);
+		void madWithCarry(CTAContext &context, const ir::PTXInstruction &instr, bool carryIn);
 		void eval_Max(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Membar(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Fence(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Min(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Activemask(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Movmatrix(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Mov(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Mul24(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Mul(CTAContext &context, const ir::PTXInstruction &instr);
@@ -520,11 +538,18 @@ namespace executive {
 		void eval_Sured(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Sust(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Suq(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Szext(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Tanh(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_TestP(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Tex(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Trap(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Txq(CTAContext &context, const ir::PTXInstruction &instr);
-		void eval_Vote(CTAContext &context, const ir::PTXInstruction &instr);		
+		// Calculate synchronized vote results after the scheduler releases its lanes.
+		void eval_Vote(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Redux(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Match(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_Shfl(CTAContext &context, const ir::PTXInstruction &instr);
+		void eval_WarpSync(CTAContext &context, const ir::PTXInstruction &instr);
 		void eval_Xor(CTAContext &context, const ir::PTXInstruction &instr);		
 		void eval_Reconverge(CTAContext &context,
 			const ir::PTXInstruction &instr);	
@@ -562,4 +587,3 @@ namespace executive {
 }
 
 #endif
-

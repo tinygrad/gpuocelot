@@ -178,9 +178,9 @@ PTXKernel::RegisterVector PTXKernel::getReferencedRegisters() const
 				const ir::PTXInstruction&>(**instruction);
 			
 			const ir::PTXOperand* operands[] = {&ptx.pq, &ptx.d, &ptx.a, &ptx.b,
-				&ptx.c, &ptx.pg};
+				&ptx.c, &ptx.pg, &ptx.q};
 
-			for( unsigned int i = 0; i < 6; ++i )
+			for( unsigned int i = 0; i < 7; ++i )
 			{
 				const ir::PTXOperand& d = *operands[i];
 				if( d.addressMode != ir::PTXOperand::Register &&
@@ -350,9 +350,12 @@ void PTXKernel::constructCFG( ControlFlowGraph &cfg,
 				if (edge.type != ControlFlowGraph::Edge::Invalid) {
 					cfg.insert_edge(edge);
 				}
+				// A predicated exit/ret leaves only some threads: it branches to the
+				// exit block and the remaining threads fall through to the next block.
+				const bool partial = statement.instruction.pg.condition != ir::PTXOperand::PT;
 				edge.head = block;
 				edge.tail = cfg.get_exit_block();
-				if (hasExit)
+				if (hasExit || partial)
 				{
 					edge.type = ControlFlowGraph::Edge::Branch;
 				}
@@ -365,7 +368,13 @@ void PTXKernel::constructCFG( ControlFlowGraph &cfg,
 				
 				block = cfg.insert_block(
 					ControlFlowGraph::BasicBlock(cfg.newId()));
-				edge.type = ControlFlowGraph::Edge::Invalid;
+				if (partial) {
+					edge.tail = block;
+					edge.type = ControlFlowGraph::Edge::FallThrough;
+				}
+				else {
+					edge.type = ControlFlowGraph::Edge::Invalid;
+				}
 			}
 		}
 		else if( statement.directive == PTXStatement::Param )
@@ -450,20 +459,21 @@ PTXKernel::RegisterMap PTXKernel::assignRegisters( ControlFlowGraph& cfg )
 			instruction != block->instructions.end(); ++instruction) {
 			PTXInstruction& instr = *static_cast<PTXInstruction*>(
 				*instruction);
-			PTXOperand PTXInstruction:: * operands[] = 
-			{ &PTXInstruction::a, &PTXInstruction::b, &PTXInstruction::c, 
-				&PTXInstruction::d, &PTXInstruction::pg, 
-				&PTXInstruction::pq };
-	
+			PTXOperand PTXInstruction:: * operands[] =
+			{ &PTXInstruction::a, &PTXInstruction::b, &PTXInstruction::c,
+				&PTXInstruction::d, &PTXInstruction::pg,
+				&PTXInstruction::pq, &PTXInstruction::q };
+
 			report( " For instruction '" << instr.toString() << "'" );
-	
-			for (int i = 0; i < 6; i++) {
+
+			for (int i = 0; i < 7; i++) {
 				if ((instr.*operands[i]).addressMode 
 					== PTXOperand::Invalid) {
 					continue;
 				}
 				if ((instr.*operands[i]).type == PTXOperand::pred
-					&& (instr.*operands[i]).condition == PTXOperand::PT) {
+					&& ((instr.*operands[i]).condition == PTXOperand::PT
+					|| (instr.*operands[i]).condition == PTXOperand::nPT)) {
 					continue;
 				}
 				if ((instr.*operands[i]).isRegister()

@@ -233,7 +233,7 @@ namespace executive {
 		TextureVector textures;
 
 		/*! A handle to the current scheduler, or 0 if none is executing */
-		EmulatedKernelScheduler* scheduler;
+		EmulatedKernelScheduler* scheduler = nullptr;
 
 	private:
 		/*! Maps program counter to the kernel that begins there */

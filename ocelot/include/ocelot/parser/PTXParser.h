@@ -137,6 +137,7 @@ namespace parser
 				
 				private:
 					void _setImmediateTypes();
+					void _setMovVectorImmediateTypes();
 					std::string _nameInContext( const std::string& name );
 				
 					OperandWrapper* _getOperand( const std::string& name );
@@ -236,10 +237,15 @@ namespace parser
 					void constantOperand( double value );
 					void indexedOperand( const std::string& name, 
 						YYLTYPE& location, long long int value );
+					void vectorOperand( unsigned int elements );
 					void addressableOperand( const std::string& name, 
 						long long int value, YYLTYPE& location, 
 						bool invert );
 					void arrayOperand( YYLTYPE& location );
+					void checkedAddress(const std::string&, long long, YYLTYPE&, bool subtract = false);
+					void checkedImmediate(long long unsigned, YYLTYPE&);
+					void checkedNegativeOffset(const std::string&, long long, YYLTYPE&);
+					void arrayOperand( unsigned int elements, YYLTYPE& location );
 					void returnOperand();
 					void guard( const std::string& name, YYLTYPE& one, 
 						bool invert );
@@ -259,6 +265,11 @@ namespace parser
 					void vote( int token );
 					void shuffle( int token );
 					void level( int token );
+					void semantics( int token );
+					void scope( int token );
+					void mmio( bool condition );
+					void pmeventMask( bool condition );
+					void finalizeMmioAddressSpace();
 					void permute( int token );
 					void floatingPointMode( int token );
 					void defaultPermute();
@@ -267,12 +278,17 @@ namespace parser
 					void instruction();
 					void instruction( const std::string& opcode, int dataType );
 					void instruction( const std::string& opcode );
+					void dotType( int token );
+					void lop3();
+					void mma( int shape, int accumulatorType, int aType, int bType, int cType,
+						bool aColumnMajor = false, bool bColumnMajor = true, bool sparse = false );
 					void tex( int dataType );
 					void tld4( int dataType );
 					void callPrototypeName( const std::string& identifier );
 					void call( const std::string& identifier,
 						YYLTYPE& location );
 					void carryIn();
+					void madcCarryIn();
 					void relaxedConvert( int token, YYLTYPE& location );
 					void cvtaTo();
 					void convert( int token, YYLTYPE& location );
@@ -345,6 +361,7 @@ namespace parser
 			static ir::PTXInstruction::VoteMode tokenToVoteMode( int );
 			static ir::PTXInstruction::ShuffleMode tokenToShuffleMode( int );
 			static ir::PTXInstruction::Level tokenToLevel( int );
+			static ir::PTXInstruction::Semantics tokenToSemantics( int );
 			static ir::PTXInstruction::PermuteMode tokenToPermuteMode( int );
 			static ir::PTXInstruction::FloatingPointMode
 				tokenToFloatingPointMode( int);
@@ -366,4 +383,3 @@ namespace parser
 }
 
 #endif
-
