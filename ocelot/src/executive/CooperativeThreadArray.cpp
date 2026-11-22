@@ -27,10 +27,14 @@
 
 // Standard Library Includes
 #include <cassert>
+#include <cfenv>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <climits>
 #include <algorithm>
+#include <limits>
+#include <iostream>
 #include <sstream>
 
 // Preprocessor Macros
@@ -103,6 +107,8 @@
 #define REPORT_VOTE       1
 #define REPORT_XOR        1
 
+using ir::WARP_SZ;
+
 template <typename T>
 static T CTAAbs(T a) {
 	if (a < 0) {
@@ -112,10 +118,119 @@ static T CTAAbs(T a) {
 }
 
 template<typename T>
+static bool addressInRange(T address, T base, T size) {
+	return address >= base && address - base < size;
+}
+
+template <typename T>
+static T CTARemainder(T a, T b) {
+	if (b == 0) {
+		report("warning: rem by zero is unspecified by PTX; Ocelot returns 0");
+		return 0;
+	}
+	return a % b;
+}
+
+// hydrazine's classifiers take float only; std::fpclassify keeps f64 exact.
+template<typename T>
 bool issubnormal_(T r0)
 {
-	return !hydrazine::isnormal(r0) && !hydrazine::isnan(r0)
-		&& !hydrazine::isinf(r0) && r0 != (T)0;
+	return std::fpclassify(r0) == FP_SUBNORMAL;
+}
+
+// Extended-precision helpers: CC.CF is the carry for add and the borrow for sub.
+template <typename U>
+static void addWithCarry(U a, U b, U carryIn, U& d, U& carryOut)
+{
+	const U sum = a + b;
+	d = sum + carryIn;
+	carryOut = (sum < a) | (d < sum);
+}
+
+template <typename U>
+static void subWithBorrow(U a, U b, U borrowIn, U& d, U& borrowOut)
+{
+	d = a - b - borrowIn;
+	borrowOut = (a < b) | ((a == b) & (borrowIn != 0));
+}
+
+static int setRoundingMode(int modifier)
+{
+	const int previous = hydrazine::fegetround();
+	int rounding = FE_TONEAREST;
+	if (modifier & ir::PTXInstruction::rz) rounding = FE_TOWARDZERO;
+	else if (modifier & ir::PTXInstruction::rm) rounding = FE_DOWNWARD;
+	else if (modifier & ir::PTXInstruction::rp) rounding = FE_UPWARD;
+	hydrazine::fesetround(rounding);
+	return previous;
+}
+
+template<typename T>
+static T roundedAdd(T a, T b, int modifier)
+{
+	const int previous = setRoundingMode(modifier);
+	T d = a + b;
+	hydrazine::fesetround(previous);
+	return d;
+}
+
+template<typename T>
+static T roundedSub(T a, T b, int modifier)
+{
+	const int previous = setRoundingMode(modifier);
+	T d = a - b;
+	hydrazine::fesetround(previous);
+	return d;
+}
+
+template<typename T>
+static T roundedMul(T a, T b, int modifier)
+{
+	const int previous = setRoundingMode(modifier);
+	T d = a * b;
+	hydrazine::fesetround(previous);
+	return d;
+}
+
+template<typename T>
+static T roundedDiv(T a, T b, int modifier)
+{
+	const int previous = setRoundingMode(modifier);
+	T d = a / b;
+	hydrazine::fesetround(previous);
+	return d;
+}
+
+template<typename T>
+static T roundedSqrt(T a, int modifier)
+{
+	const int previous = setRoundingMode(modifier);
+	T d = std::sqrt(a);
+	hydrazine::fesetround(previous);
+	return d;
+}
+
+template<typename T>
+static T roundedFma(T a, T b, T c, int modifier)
+{
+	const int previous = setRoundingMode(modifier);
+	T d = std::fma(a, b, c);
+	hydrazine::fesetround(previous);
+	return d;
+}
+
+// Truncate a * b + c to f32 and force the last bit to 1 if any bits were lost
+// (round-to-odd), so the later RNE to bf16 cannot see a false tie.
+static ir::PTXF32 fmaF32OneRound(ir::PTXF32 a, ir::PTXF32 b, ir::PTXF32 c)
+{
+	std::feclearexcept(FE_INEXACT);
+	const int previous = setRoundingMode(ir::PTXInstruction::rz);
+	volatile ir::PTXF32 d = static_cast<ir::PTXF32>(
+		static_cast<double>(a) * b + c); // bf16 product is exact in double
+	const ir::PTXU32 lost = std::fetestexcept(FE_INEXACT) ? 1U : 0U;
+	hydrazine::fesetround(previous);
+	return hydrazine::bit_cast<ir::PTXF32>(
+		hydrazine::bit_cast<ir::PTXU32>(static_cast<ir::PTXF32>(d)) | lost);
 }
 
 static executive::ReconvergenceMechanism*
@@ -230,50 +345,18 @@ ir::PTXU32 executive::CooperativeThreadArray::getSpecialValue(
 	assert( reg != ir::PTXOperand::pm3 );
 	assert( reg != ir::PTXOperand::smId );
 	assert( reg != ir::PTXOperand::nsmId );
-	assert( reg != ir::PTXOperand::gridId );
 
-	//
-	// some special registers are not warp-agnostic, so we give the option to specify
-	// a constant-size warp in the Ocelot configuration. If this value is 0 or larger
-	// than the CTA size, the warpSize is assumed to be the CTA size
-	//
-	int warpSize = api::OcelotConfiguration::get().executive.warpSize;
-	if (warpSize == 0 || warpSize > threadCount) {
-		warpSize = threadCount;
-	}
+	// PTX warp identity and lane masks describe 32 physical lane positions.
+	const int lane = threadId % WARP_SZ;
+	const ir::PTXU32 laneBit = ir::PTXU32(1) << lane;
 
 	switch( reg ) {
-		case ir::PTXOperand::laneId: {
-			return (threadId % warpSize);
-		}
-		case ir::PTXOperand::lanemask_eq: {
-			return (1 << (threadId % warpSize));
-		}
-		case ir::PTXOperand::lanemask_lt: // fall through
-		case ir::PTXOperand::lanemask_le: {
-			// we must assume this->currentEvent.active has been updated
-			unsigned int mask = (reg == ir::PTXOperand::lanemask_le ?
-				(1 << (threadId % warpSize)) : 0);
-			int baseId = 0;
-			for (int tWarpId = (threadId / warpSize);
-				tWarpId < threadId; ++tWarpId) {
-				mask |= ((currentEvent.active[tWarpId] ? 1 : 0) << baseId);
-				++baseId;
-			}
-			return mask;
-		}
-		case ir::PTXOperand::lanemask_gt: // fall through
-		case ir::PTXOperand::lanemask_ge: {
-			// we must assume this->currentEvent.active has been updated
-			unsigned int mask = (reg == ir::PTXOperand::lanemask_ge ?
-				(1 << (threadId % warpSize)) : 0);
-			int endThreadId = (threadId + warpSize - 1)/warpSize;
-			for (int tWarpId = threadId + 1; tWarpId < endThreadId; ++tWarpId) {
-				mask |= (currentEvent.active[tWarpId] ? 1 : 0);
-				mask <<= 1;
-			}
-			return mask;
-		}
+		case ir::PTXOperand::laneId: return lane;
+		case ir::PTXOperand::lanemask_eq: return laneBit;
+		case ir::PTXOperand::lanemask_lt: return laneBit - 1;
+		case ir::PTXOperand::lanemask_le: return (laneBit - 1) | laneBit;
+		case ir::PTXOperand::lanemask_gt: return ~((laneBit - 1) | laneBit);
+		case ir::PTXOperand::lanemask_ge: return ~(laneBit - 1);
 		case ir::PTXOperand::tid: {
 			switch( index ) {
 				case ir::PTXOperand::ix: {
@@ -306,10 +389,11 @@ ir::PTXU32 executive::CooperativeThreadArray::getSpecialValue(
 			}
 			break;
 		}
-		case ir::PTXOperand::warpId: return 0;
-		case ir::PTXOperand::warpSize: {
-			return blockDim.z * blockDim.y * blockDim.x;
-		}
+		case ir::PTXOperand::warpId: return threadId / WARP_SZ;
+		case ir::PTXOperand::gridId: return 0;
+		case ir::PTXOperand::totalSmemSize: return kernel->totalSharedMemorySize();
+		case ir::PTXOperand::dynamicSmemSize: return kernel->externSharedMemorySize();
+		case ir::PTXOperand::warpSize: return WARP_SZ;
 		case ir::PTXOperand::ctaId: {
 			switch( index ) {
 				case ir::PTXOperand::ix: {
@@ -370,6 +454,156 @@ static ir::PTXF32 ftz(int modifier, ir::PTXF32 f) {
 			? hydrazine::copysign(0.0f, f) : f;
 	}
 	return f;
+}
+
+static ir::PTXF32 minMaxF32(int modifier, ir::PTXF32 a,
+	ir::PTXF32 b, bool maximum) {
+	const bool xorSign = std::signbit(a) != std::signbit(b);
+	if (modifier & ir::PTXInstruction::xorsign) {
+		a = std::fabs(a);
+		b = std::fabs(b);
+	}
+	ir::PTXF32 d;
+	if ((modifier & ir::PTXInstruction::nan)
+		&& (hydrazine::isnan(a) || hydrazine::isnan(b))) {
+		d = hydrazine::bit_cast<ir::PTXF32>(0x7fffffffU);
+	} else if (hydrazine::isnan(a)) {
+		d = b;
+	} else if (hydrazine::isnan(b)) {
+		d = a;
+	} else if (a == 0 && b == 0) {
+		d = maximum ? (std::signbit(a) ? b : a) : (std::signbit(a) ? a : b);
+	} else {
+		d = maximum ? (a > b ? a : b) : (a < b ? a : b);
+	}
+	d = ftz(modifier, d);
+	return (modifier & ir::PTXInstruction::xorsign) && !hydrazine::isnan(d)
+		? hydrazine::copysign(d, xorSign ? -1.0f : 1.0f) : d;
+}
+
+static ir::PTXU16 ftzF16(int modifier, ir::PTXU16 bits)
+{
+	const bool subnormal = (bits & 0x7c00u) == 0 && (bits & 0x03ffu) != 0;
+	if ((modifier & ir::PTXInstruction::ftz) && subnormal) {
+		return bits & 0x8000u; // preserve sign: +0 or -0
+	}
+	return bits;
+}
+
+static ir::PTXF32 f16ToF32(ir::PTXU16 bits) {
+	ir::PTXF16 half;
+	std::memcpy(&half, &bits, sizeof(half));
+	return static_cast<ir::PTXF32>(half);
+}
+
+static ir::PTXF32 bf16ToF32(ir::PTXU16 bits) {
+	return hydrazine::bit_cast<ir::PTXF32>(static_cast<ir::PTXU32>(bits) << 16);
+}
+
+// PTX half formats use sign/magnitude masks; CUDA defines 0x7fff as canonical NaN.
+static const ir::PTXU16 halfSignMask = 0x8000u;
+static const ir::PTXU16 halfMagnitudeMask = 0x7fffu;
+static const ir::PTXU16 halfCanonicalNan = 0x7fffu;
+static const ir::PTXU16 f16ExponentMask = 0x7c00u;
+static const ir::PTXU16 f16MantissaMask = 0x03ffu;
+static const ir::PTXU16 bf16ExponentMask = 0x7f80u;
+static const ir::PTXU16 bf16MantissaMask = 0x007fu;
+
+static bool isNanHalf(ir::PTXU16 value, ir::PTXOperand::DataType type) {
+	const bool bfloat = type == ir::PTXOperand::bf16 || type == ir::PTXOperand::bf16x2;
+	const ir::PTXU16 exponentMask = bfloat ? bf16ExponentMask : f16ExponentMask;
+	const ir::PTXU16 mantissaMask = bfloat ? bf16MantissaMask : f16MantissaMask;
+	return (value & exponentMask) == exponentMask && (value & mantissaMask) != 0;
+}
+
+static ir::PTXU16 minMaxHalf(ir::PTXOperand::DataType type, int modifier,
+	ir::PTXU16 a, ir::PTXU16 b, bool maximum) {
+	const bool isF16 = type == ir::PTXOperand::f16 || type == ir::PTXOperand::f16x2;
+	if (isF16) {
+		a = ftzF16(modifier, a);
+		b = ftzF16(modifier, b);
+	}
+	ir::PTXU16 xorSign = 0;
+	if (modifier & ir::PTXInstruction::xorsign) {
+		xorSign = (a ^ b) & halfSignMask;
+		a &= halfMagnitudeMask;
+		b &= halfMagnitudeMask;
+	}
+	const bool aNan = isNanHalf(a, type);
+	const bool bNan = isNanHalf(b, type);
+	const bool bothZero = ((a | b) & halfMagnitudeMask) == 0;
+	if (aNan && bNan) {
+		return halfCanonicalNan;
+	}
+	if ((modifier & ir::PTXInstruction::nan) && (aNan || bNan)) {
+		return halfCanonicalNan;
+	}
+	ir::PTXU16 d;
+	if (aNan) {
+		d = b;
+	}
+	else if (bNan) {
+		d = a;
+	}
+	else if (bothZero) {
+		d = maximum ? (a & b) : (a | b);
+	}
+	else {
+		const ir::PTXF32 aValue = isF16 ? f16ToF32(a) : bf16ToF32(a);
+		const ir::PTXF32 bValue = isF16 ? f16ToF32(b) : bf16ToF32(b);
+		d = maximum ? (aValue > bValue ? a : b) : (aValue < bValue ? a : b);
+	}
+	if (modifier & ir::PTXInstruction::xorsign) {
+		return (d & halfMagnitudeMask) | xorSign;
+	}
+	return d;
+}
+
+static ir::PTXF32 tf32FromF32(ir::PTXF32 value) {
+	ir::PTXU32 bits = hydrazine::bit_cast<ir::PTXU32>(value);
+	if ((bits & 0x7f800000u) == 0x7f800000u) return value;
+	const ir::PTXU32 discarded = bits & 0x1fffu;
+	bits &= ~0x1fffu;
+	if (discarded > 0x1000u ||
+		(discarded == 0x1000u && (bits & 0x2000u))) {
+		bits += 0x2000u;
+	}
+	return hydrazine::bit_cast<ir::PTXF32>(bits);
+}
+
+static ir::PTXU32 tf32FromF32Rna(ir::PTXF32 value) {
+	// Model TF32 by retaining the upper 10 f32 fraction bits.
+	const ir::PTXU32 exponentMask = 0x7f800000u;
+	const ir::PTXU32 discardedMask = (1u << 13) - 1;
+	const ir::PTXU32 halfway = 1u << 12;
+	const ir::PTXU32 retainedUnit = 1u << 13;
+	ir::PTXU32 bits = hydrazine::bit_cast<ir::PTXU32>(value);
+	if ((bits & exponentMask) == exponentMask) return bits;
+	const ir::PTXU32 discarded = bits & discardedMask;
+	bits &= ~discardedMask;
+	if (discarded >= halfway) bits += retainedUnit;
+	return bits;
+}
+
+template< typename Source >
+static ir::PTXU16 toF16(Source value, int modifier);
+
+static ir::PTXU16 mmaHalfBits(executive::CooperativeThreadArray& cta,
+	int threadID, const ir::PTXOperand& operand, unsigned int half)
+{
+	if (operand.bytes() == 4) {
+		return static_cast<ir::PTXU16>(
+			(cta.operandAsB32(threadID, operand) >> (half * 16)) & 0xffffu);
+	}
+	return cta.operandAsU16(threadID, operand);
+}
+
+static ir::PTXF32 mmaHalf(executive::CooperativeThreadArray& cta,
+	int threadID, const ir::PTXOperand& operand, unsigned int half,
+	ir::PTXOperand::DataType type)
+{
+	ir::PTXU16 bits = mmaHalfBits(cta, threadID, operand, half);
+	return type == ir::PTXOperand::bf16 ? bf16ToF32(bits) : f16ToF32(bits);
 }
 
 void executive::CooperativeThreadArray::trace() {
@@ -475,10 +709,14 @@ void executive::CooperativeThreadArray::execute(int PC) {
 				eval_Atom(context, instr); break;
 			case ir::PTXInstruction::Bar:
 				eval_Bar(context, instr); break;
+			case ir::PTXInstruction::BarWarp:
+				eval_WarpSync(context, instr); break;
 			case ir::PTXInstruction::Bfi:
 				eval_Bfi(context, instr); break;
 			case ir::PTXInstruction::Bfind:
 				eval_Bfind(context, instr); break;
+			case ir::PTXInstruction::Bmsk:
+				eval_Bmsk(context, instr); break;
 			case ir::PTXInstruction::Bfe:
 				eval_Bfe(context, instr); break;
 			case ir::PTXInstruction::Bra:
@@ -503,30 +741,49 @@ void executive::CooperativeThreadArray::execute(int PC) {
 				eval_Cvta(context, instr); break;
 			case ir::PTXInstruction::Div:
 				eval_Div(context, instr); break;
+			case ir::PTXInstruction::Dp2a:
+			case ir::PTXInstruction::Dp4a:
+				eval_Dp(context, instr); break;
 			case ir::PTXInstruction::Ex2:
 				eval_Ex2(context, instr); break;
 			case ir::PTXInstruction::Exit:
 				eval_Exit(context, instr); break;
 			case ir::PTXInstruction::Fma:
 				eval_Fma(context, instr); break;
+			case ir::PTXInstruction::Fns:
+				eval_Fns(context, instr); break;
+			case ir::PTXInstruction::Mma:
+				eval_Mma(context, instr); break;
 			case ir::PTXInstruction::Isspacep:
 				eval_Isspacep(context, instr); break;
 			case ir::PTXInstruction::Ld:
 				eval_Ld(context, instr); break;
 			case ir::PTXInstruction::Lg2:
 				eval_Lg2(context, instr); break;
+			case ir::PTXInstruction::Lop3:
+				eval_Lop3(context, instr); break;
+			case ir::PTXInstruction::Ldmatrix:
+				eval_Ldmatrix(context, instr); break;
 			case ir::PTXInstruction::Ldu:
 				eval_Ldu(context, instr); break;
 			case ir::PTXInstruction::Mad24:
 				eval_Mad24(context, instr); break;
+			case ir::PTXInstruction::MadC:
+				eval_MadC(context, instr); break;
 			case ir::PTXInstruction::Mad:
 				eval_Mad(context, instr); break;
 			case ir::PTXInstruction::Max:
 				eval_Max(context, instr); break;
 			case ir::PTXInstruction::Membar:
 				eval_Membar(context, instr); break;
+			case ir::PTXInstruction::Fence:
+				eval_Fence(context, instr); break;
 			case ir::PTXInstruction::Min:
 				eval_Min(context, instr); break;
+			case ir::PTXInstruction::Activemask:
+				eval_Activemask(context, instr); break;
+			case ir::PTXInstruction::Movmatrix:
+				eval_Movmatrix(context, instr); break;
 			case ir::PTXInstruction::Mov:
 				eval_Mov(context, instr); break;
 			case ir::PTXInstruction::Mul24:
@@ -545,6 +802,42 @@ void executive::CooperativeThreadArray::execute(int PC) {
 				eval_Popc(context, instr); break;
 			case ir::PTXInstruction::Prefetch:
 				eval_Prefetch(context, instr); break;
+			case ir::PTXInstruction::WmmaMma:
+				eval_WmmaMma(context, instr); break;
+			case ir::PTXInstruction::WmmaLoadA:
+			case ir::PTXInstruction::WmmaLoadB:
+			case ir::PTXInstruction::WmmaLoadC:
+			case ir::PTXInstruction::WmmaStoreD:
+				eval_WmmaMemory(context, instr); break;
+			case ir::PTXInstruction::MbarrierPendingCount:
+				eval_MbarrierPendingCount(context, instr); break;
+			case ir::PTXInstruction::MbarrierInit:
+			case ir::PTXInstruction::MbarrierInval:
+			case ir::PTXInstruction::CpAsyncMbarrierArrive:
+			case ir::PTXInstruction::CpAsyncMbarrierArriveNoInc:
+			case ir::PTXInstruction::MbarrierTestWait:
+			case ir::PTXInstruction::MbarrierTestWaitParity:
+			case ir::PTXInstruction::MbarrierArrive:
+			case ir::PTXInstruction::MbarrierArriveDrop:
+				eval_Mbarrier(context, instr); break;
+			case ir::PTXInstruction::CpAsync:
+				eval_CpAsync(context, instr); break;
+			case ir::PTXInstruction::CpAsyncCommitGroup:
+			case ir::PTXInstruction::CpAsyncWaitGroup:
+			case ir::PTXInstruction::CpAsyncWaitAll:
+				// Copies complete immediately in the CTA emulator.
+				trace();
+				break;
+			case ir::PTXInstruction::Nanosleep:
+			case ir::PTXInstruction::Discard:
+			case ir::PTXInstruction::Applypriority:
+				// Hints with no architectural effect on the emulated CTA.
+				trace();
+				break;
+			case ir::PTXInstruction::Createpolicy:
+				// Cache hints are not modeled by the CTA emulator; no policy is needed.
+				trace();
+				break;
 			case ir::PTXInstruction::Prefetchu:
 				eval_Prefetchu(context, instr); break;
 			case ir::PTXInstruction::Prmt:
@@ -585,19 +878,34 @@ void executive::CooperativeThreadArray::execute(int PC) {
 				eval_Sub(context, instr); break;
 			case ir::PTXInstruction::SubC:
 				eval_SubC(context, instr); break;
+			case ir::PTXInstruction::Szext:
+				eval_Szext(context, instr); break;
+			case ir::PTXInstruction::Tanh:
+				eval_Tanh(context, instr); break;
 			case ir::PTXInstruction::TestP:
 				eval_TestP(context, instr); break;
 			case ir::PTXInstruction::Tex:
 				eval_Tex(context, instr); break;
 			case ir::PTXInstruction::Trap:
 				eval_Trap(context, instr); break;
-			case ir::PTXInstruction::Vote:
-				eval_Vote(context, instr); break;
+			case ir::PTXInstruction::ShflSync:
+				eval_WarpSync(context, instr); break;
+			case ir::PTXInstruction::Match:
+			case ir::PTXInstruction::Redux:
+			case ir::PTXInstruction::Vote: {
+				const bool warpSync = instr.voteSync || instr.opcode == ir::PTXInstruction::Redux || instr.opcode == ir::PTXInstruction::Match;
+				if (warpSync) eval_WarpSync(context, instr);
+				else reconvergenceMechanism->eval_Vote(context, instr);
+				break;
+			}
 			case ir::PTXInstruction::Xor:
 				eval_Xor(context, instr); break;
 			case ir::PTXInstruction::Reconverge:
 				eval_Reconverge(context, instr); break;
 			default:
+				std::cerr << "Error: opcode at pc " << context.PC << " - "
+					<< ir::PTXInstruction::toString(instr.opcode)
+					<< " not supported." << std::endl;
 				assertM(false, "Opcode at pc "
 					<< context.PC << " - "
 					<< ir::PTXInstruction::toString(instr.opcode)
@@ -1657,12 +1965,30 @@ void executive::CooperativeThreadArray::setFunctionParameter(int threadID,
 void executive::CooperativeThreadArray::eval_Abs(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
-	if (instr.type == ir::PTXOperand::f32) {
+	if (instr.type == ir::PTXOperand::f16 || instr.type == ir::PTXOperand::bf16) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			ir::PTXU16 a = operandAsU16(threadID, instr.a);
+			if (instr.type == ir::PTXOperand::f16) a = ftzF16(instr.modifier, a);
+			setRegAsB16(threadID, instr.d.reg, a & 0x7fff);
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f16x2 || instr.type == ir::PTXOperand::bf16x2) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			ir::PTXU32 a = operandAsU32(threadID, instr.a);
+			if (instr.type == ir::PTXOperand::f16x2)
+				a = static_cast<ir::PTXU32>(ftzF16(instr.modifier, a)) |
+					(static_cast<ir::PTXU32>(ftzF16(instr.modifier, a >> 16)) << 16);
+			setRegAsU32(threadID, instr.d.reg, a & 0x7fff7fffu);
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f32) {
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 
 			if (!context.predicated(threadID, instr)) continue;
 			ir::PTXF32 d, a = operandAsF32(threadID, instr.a);
-			d = ftz(instr.modifier, CTAAbs(a));
+			d = ftz(instr.modifier, std::fabs(a));  // abs(-0) is +0
 			setRegAsF32(threadID, instr.d.reg, d);
 		}
 	}
@@ -1670,7 +1996,8 @@ void executive::CooperativeThreadArray::eval_Abs(CTAContext &context,
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
 			ir::PTXF64 d, a = operandAsF64(threadID, instr.a);
-			d = CTAAbs(a);
+			// abs(-0) is +0; PTX passes f64 NaN inputs through unchanged.
+			d = std::isnan(a) ? a : std::fabs(a);
 			setRegAsF64(threadID, instr.d.reg, d);
 		}
 	}
@@ -1717,12 +2044,46 @@ void executive::CooperativeThreadArray::eval_Abs(CTAContext &context,
 void executive::CooperativeThreadArray::eval_Add(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
-	if (instr.type == ir::PTXOperand::f32) {
+	if (instr.type == ir::PTXOperand::f16x2) {
+		const int effectiveModifier = instr.modifier | ir::PTXInstruction::rn;
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			ir::PTXU32 a = operandAsU32(threadID, instr.a);
+			ir::PTXU32 b = operandAsU32(threadID, instr.b);
+			ir::PTXU16 al = static_cast<ir::PTXU16>(a), ah = a >> 16;
+			ir::PTXU16 bl = static_cast<ir::PTXU16>(b), bh = b >> 16;
+			ir::PTXU16 dl = ftzF16(effectiveModifier, toF16(
+				roundedAdd(f16ToF32(ftzF16(effectiveModifier, al)),
+					f16ToF32(ftzF16(effectiveModifier, bl)), effectiveModifier),
+				effectiveModifier));
+			ir::PTXU16 dh = ftzF16(effectiveModifier, toF16(
+				roundedAdd(f16ToF32(ftzF16(effectiveModifier, ah)),
+					f16ToF32(ftzF16(effectiveModifier, bh)), effectiveModifier),
+				effectiveModifier));
+			setRegAsU32(threadID, instr.d.reg, static_cast<ir::PTXU32>(dl) |
+				(static_cast<ir::PTXU32>(dh) << 16));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f16) {
+		const int effectiveModifier = instr.modifier | ir::PTXInstruction::rn;
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+
+			ir::PTXF32 a = f16ToF32(ftzF16(effectiveModifier,
+				operandAsU16(threadID, instr.a)));
+			ir::PTXF32 b = f16ToF32(ftzF16(effectiveModifier,
+				operandAsU16(threadID, instr.b)));
+			ir::PTXU16 d = toF16(roundedAdd(a, b, effectiveModifier), effectiveModifier);
+			setRegAsB16(threadID, instr.d.reg, ftzF16(effectiveModifier, d));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f32) {
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
 			ir::PTXF32 d, a = ftz(instr.modifier, operandAsF32(threadID, instr.a)),
 				b = ftz(instr.modifier, operandAsF32(threadID, instr.b));
-			d = ftz(instr.modifier, sat(instr.modifier, a + b));
+			d = ftz(instr.modifier, sat(instr.modifier,
+				roundedAdd(a, b, instr.modifier)));
 			setRegAsF32(threadID, instr.d.reg, d);
 		}
 	}
@@ -1731,7 +2092,7 @@ void executive::CooperativeThreadArray::eval_Add(CTAContext &context,
 			if (!context.predicated(threadID, instr)) continue;
 			ir::PTXF64 d, a = operandAsF64(threadID, instr.a),
 				b = operandAsF64(threadID, instr.b);
-			d = a + b;
+			d = roundedAdd(a, b, instr.modifier);
 			setRegAsF64(threadID, instr.d.reg, d);
 		}
 	}
@@ -1756,8 +2117,9 @@ void executive::CooperativeThreadArray::eval_Add(CTAContext &context,
 				d = (ir::PTXS32)temp;
 			}
 			else if (instr.carry & ir::PTXInstruction::CC) {
-				ir::PTXS32 carry = 0;
-				hydrazine::add(d, carry, a, b, carry);
+				ir::PTXU32 sum, carry;
+				addWithCarry<ir::PTXU32>(a, b, 0, sum, carry);
+				d = sum;
 				setRegAsU32(threadID, instr.pq.reg, carry);
 			}
 			else {
@@ -1771,7 +2133,15 @@ void executive::CooperativeThreadArray::eval_Add(CTAContext &context,
 			if (!context.predicated(threadID, instr)) continue;
 			ir::PTXS64 d, a = operandAsS64(threadID, instr.a),
 				b = operandAsS64(threadID, instr.b);
-			d = a + b;
+			if (instr.carry & ir::PTXInstruction::CC) {
+				ir::PTXU64 sum, carry;
+				addWithCarry<ir::PTXU64>(a, b, 0, sum, carry);
+				d = sum;
+				setRegAsU32(threadID, instr.pq.reg, carry);
+			}
+			else {
+				d = a + b;
+			}
 			setRegAsS64(threadID, instr.d.reg, d);
 		}
 	}
@@ -1790,8 +2160,8 @@ void executive::CooperativeThreadArray::eval_Add(CTAContext &context,
 			ir::PTXU32 d, a = operandAsU32(threadID, instr.a),
 				b = operandAsU32(threadID, instr.b);
 			if (instr.carry & ir::PTXInstruction::CC) {
-				ir::PTXU32 carry = 0;
-				hydrazine::add(d, carry, a, b, carry);
+				ir::PTXU32 carry;
+				addWithCarry<ir::PTXU32>(a, b, 0, d, carry);
 				setRegAsU32(threadID, instr.pq.reg, carry);
 			}
 			else {
@@ -1805,7 +2175,14 @@ void executive::CooperativeThreadArray::eval_Add(CTAContext &context,
 			if (!context.predicated(threadID, instr)) continue;
 			ir::PTXU64 d, a = operandAsU64(threadID, instr.a),
 				b = operandAsU64(threadID, instr.b);
-			d = a + b;
+			if (instr.carry & ir::PTXInstruction::CC) {
+				ir::PTXU64 carry;
+				addWithCarry<ir::PTXU64>(a, b, 0, d, carry);
+				setRegAsU32(threadID, instr.pq.reg, carry);
+			}
+			else {
+				d = a + b;
+			}
 			setRegAsU64(threadID, instr.d.reg, d);
 		}
 	}
@@ -1831,7 +2208,7 @@ void executive::CooperativeThreadArray::eval_AddC(CTAContext &context,
 				b = operandAsU32(threadID, instr.b);
 
 			ir::PTXU32 carry = getRegAsU32(threadID, instr.c.reg);
-			hydrazine::add(d, carry, a, b, carry);
+			addWithCarry<ir::PTXU32>(a, b, carry, d, carry);
 
 			setRegAsU32(threadID, instr.d.reg, d);
 
@@ -1849,13 +2226,30 @@ void executive::CooperativeThreadArray::eval_AddC(CTAContext &context,
 				a = operandAsS32(threadID, instr.a),
 				b = operandAsS32(threadID, instr.b);
 
-			ir::PTXS32 carry = getRegAsS32(threadID, instr.c.reg);
-			hydrazine::add(d, carry, a, b, carry);
+			ir::PTXU32 carry = getRegAsU32(threadID, instr.c.reg), sum;
+			addWithCarry<ir::PTXU32>(a, b, carry, sum, carry);
+			d = sum;
 
 			setRegAsS32(threadID, instr.d.reg, d);
 
 			if (instr.carry & ir::PTXInstruction::CC) {
 				setRegAsS32(threadID, instr.pq.reg, carry);
+			}
+		}
+	} break;
+
+	case ir::PTXOperand::u64:
+	case ir::PTXOperand::s64:
+	{
+		for (int threadID = 0; threadID  < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			ir::PTXU64 d, carry,
+				a = operandAsU64(threadID, instr.a),
+				b = operandAsU64(threadID, instr.b);
+			addWithCarry<ir::PTXU64>(a, b, getRegAsU32(threadID, instr.c.reg), d, carry);
+			setRegAsU64(threadID, instr.d.reg, d);
+			if (instr.carry & ir::PTXInstruction::CC) {
+				setRegAsU32(threadID, instr.pq.reg, carry);
 			}
 		}
 	} break;
@@ -1917,9 +2311,36 @@ void executive::CooperativeThreadArray::eval_And(CTAContext &context,
 
 */
 void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir::PTXInstruction &instr) {
+	evalAtomicRMW(context, instr, instr.atomicOperation, instr.d.addressMode != ir::PTXOperand::BitBucket);
+}
+
+// atom writes the pre-update value back to instr.d; red performs the same
+// read-modify-write but discards it (writeback == false). red carries its
+// operation in instr.reductionOperation (a distinct enum/op set from atom's
+// instr.atomicOperation), so the caller resolves and passes the operation
+// explicitly rather than this function reading instr.atomicOperation itself.
+void executive::CooperativeThreadArray::evalAtomicRMW(CTAContext &context,
+	const ir::PTXInstruction &instr, ir::PTXInstruction::AtomicOperation operation,
+	bool writeback) {
 	size_t elementSize = 0;
+	const auto genericSource = [&](const char* source) {
+		const bool address32 = instr.a.bytes() == sizeof(ir::PTXU32);
+		if (address32) {
+			const ir::PTXU32 address = (ir::PTXU64)source;
+			const auto* shared = (const char*)functionCallStack.sharedMemoryPointer();
+			const ir::PTXU32 offset = address - ir::PTXU32((ir::PTXU64)shared);
+			if (offset < functionCallStack.sharedMemorySize()) return shared + offset;
+			return (const char*)(ir::PTXU64)address;
+		}
+		return source;
+	};
 
 	switch (instr.type) {
+		case ir::PTXOperand::b16:
+		case ir::PTXOperand::f16:
+			elementSize = sizeof(ir::PTXU16);
+			break;
+		case ir::PTXOperand::f16x2:
 		case ir::PTXOperand::f32:		// fall through
 		case ir::PTXOperand::b32:		// fall through
 		case ir::PTXOperand::s32:		// fall through
@@ -1929,7 +2350,9 @@ void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir:
 			}
 			break;
 		case ir::PTXOperand::b64:		// fall through
-		case ir::PTXOperand::u64:
+		case ir::PTXOperand::u64:		// fall through
+		case ir::PTXOperand::s64:		// fall through
+		case ir::PTXOperand::f64:
 			{
 				elementSize = sizeof(ir::PTXU64);
 			}
@@ -1962,6 +2385,7 @@ void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir:
 						context.PC, instr);
 			}
 
+			if (instr.addressSpace == ir::PTXInstruction::Generic) source = genericSource(source);
 			currentEvent.memory_addresses.push_back((ir::PTXU64)source);
 		}
 	}
@@ -1991,6 +2415,9 @@ void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir:
 		}
 
 		switch (instr.addressSpace) {
+			case ir::PTXInstruction::Generic:
+				source = genericSource(source);
+				break;
 			case ir::PTXInstruction::Global:
 				{
 
@@ -2006,64 +2433,96 @@ void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir:
 					context.PC, instr);
 		}
 
-		switch (instr.atomicOperation) {
+		switch (operation) {
 			case ir::PTXInstruction::AtomicAnd:
 				{
-					if(instr.type != ir::PTXOperand::b32
-						&& instr.type != ir::PTXOperand::s32
-						&& instr.type != ir::PTXOperand::u32) {
+					if (instr.type == ir::PTXOperand::b32) {
+						ir::PTXB32 d = *((ir::PTXB32*)source);
+						if (writeback) setRegAsB32(threadID, instr.d.reg, d);
+						ir::PTXB32 b = operandAsB32(threadID, instr.b);
+						*((ir::PTXB32*)source) = d & b;
+						reportE(REPORT_ATOM, "Atomically updated " << d
+							<< " to " << *((ir::PTXB32*)source) );
+					}
+					else if (instr.type == ir::PTXOperand::b64) {
+						ir::PTXB64 d = *((ir::PTXB64*)source);
+						if (writeback) setRegAsB64(threadID, instr.d.reg, d);
+						ir::PTXB64 b = operandAsB64(threadID, instr.b);
+						*((ir::PTXB64*)source) = d & b;
+						reportE(REPORT_ATOM, "Atomically updated " << d
+							<< " to " << *((ir::PTXB64*)source) );
+					}
+					else {
 						throw RuntimeException("invalid data type",
 							context.PC, instr);
 					}
-					ir::PTXB32 d = *((ir::PTXB32*)source);
-					setRegAsB32(threadID, instr.d.reg, d);
-					ir::PTXB32 b = operandAsB32(threadID, instr.b);
-					*((ir::PTXB32*)source) = d & b;
-					reportE(REPORT_ATOM, "Atomically updated " << d << " to "
-						<< *((ir::PTXB32*)source) );
 				}
 				break;
 			case ir::PTXInstruction::AtomicOr:
 				{
-					if(instr.type != ir::PTXOperand::b32
-						&& instr.type != ir::PTXOperand::s32
-						&& instr.type != ir::PTXOperand::u32) {
+					if (instr.type == ir::PTXOperand::b32) {
+						ir::PTXB32 d = *((ir::PTXB32*)source);
+						if (writeback) setRegAsB32(threadID, instr.d.reg, d);
+						ir::PTXB32 b = operandAsB32(threadID, instr.b);
+						*((ir::PTXB32*)source) = d | b;
+						reportE(REPORT_ATOM, "Atomically updated " << d
+							<< " to " << *((ir::PTXB32*)source) );
+					}
+					else if (instr.type == ir::PTXOperand::b64) {
+						ir::PTXB64 d = *((ir::PTXB64*)source);
+						if (writeback) setRegAsB64(threadID, instr.d.reg, d);
+						ir::PTXB64 b = operandAsB64(threadID, instr.b);
+						*((ir::PTXB64*)source) = d | b;
+						reportE(REPORT_ATOM, "Atomically updated " << d
+							<< " to " << *((ir::PTXB64*)source) );
+					}
+					else {
 						throw RuntimeException("invalid data type",
 							context.PC, instr);
 					}
-					ir::PTXB32 d = *((ir::PTXB32*)source);
-					setRegAsB32(threadID, instr.d.reg, d);
-					ir::PTXB32 b = operandAsB32(threadID, instr.b);
-					*((ir::PTXB32*)source) = d | b;
-					reportE(REPORT_ATOM, "Atomically updated " << d << " to "
-						<< *((ir::PTXB32*)source) );
 				}
 				break;
 			case ir::PTXInstruction::AtomicXor:
 				{
-					if(instr.type != ir::PTXOperand::b32
-						&& instr.type != ir::PTXOperand::s32
-						&& instr.type != ir::PTXOperand::u32) {
+					if (instr.type == ir::PTXOperand::b32) {
+						ir::PTXB32 d = *((ir::PTXB32*)source);
+						if (writeback) setRegAsB32(threadID, instr.d.reg, d);
+						ir::PTXB32 b = operandAsB32(threadID, instr.b);
+						*((ir::PTXB32*)source) = d ^ b;
+						reportE(REPORT_ATOM, "Atomically updated " << d
+							<< " to " << *((ir::PTXB32*)source) );
+					}
+					else if (instr.type == ir::PTXOperand::b64) {
+						ir::PTXB64 d = *((ir::PTXB64*)source);
+						if (writeback) setRegAsB64(threadID, instr.d.reg, d);
+						ir::PTXB64 b = operandAsB64(threadID, instr.b);
+						*((ir::PTXB64*)source) = d ^ b;
+						reportE(REPORT_ATOM, "Atomically updated " << d
+							<< " to " << *((ir::PTXB64*)source) );
+					}
+					else {
 						throw RuntimeException("invalid data type",
 							context.PC, instr);
 					}
-					ir::PTXB32 d = *((ir::PTXB32*)source);
-					setRegAsB32(threadID, instr.d.reg, d);
-					ir::PTXB32 b = operandAsB32(threadID, instr.b);
-					*((ir::PTXB32*)source) = d ^ b;
-					reportE(REPORT_ATOM, "Atomically updated " << d << " to "
-						<< *((ir::PTXB32*)source) );
 				}
 				break;
 			case ir::PTXInstruction::AtomicCas:
 				{
-					if (instr.type == ir::PTXOperand::b32
+					if (instr.type == ir::PTXOperand::b16) {
+						ir::PTXU16 old;
+						std::memcpy(&old, source, sizeof(old));
+						const ir::PTXU16 compare = operandAsU16(threadID, instr.b), replacement = operandAsU16(threadID, instr.c);
+						const ir::PTXU16 result = old == compare ? replacement : old;
+						std::memcpy((char*)source, &result, sizeof(result));
+						if (writeback) setRegAsB16(threadID, instr.d.reg, old);
+					}
+					else if (instr.type == ir::PTXOperand::b32
 						|| instr.type == ir::PTXOperand::s32
 						|| instr.type == ir::PTXOperand::u32) {
 						ir::PTXB32 d = *((ir::PTXB32*)source);
-						setRegAsB32(threadID, instr.d.reg, d);
 						ir::PTXB32 b = operandAsB32(threadID, instr.b);
 						ir::PTXB32 c = operandAsB32(threadID, instr.c);
+						if (writeback) setRegAsB32(threadID, instr.d.reg, d);
 						*((ir::PTXB32*)source) = (d==b) ? c : d;
 						reportE(REPORT_ATOM, "Atomically updated " << d
 							<< " to " << *((ir::PTXB32*)source) );
@@ -2072,9 +2531,9 @@ void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir:
 						|| instr.type == ir::PTXOperand::s64
 						|| instr.type == ir::PTXOperand::u64) {
 						ir::PTXB64 d = *((ir::PTXB64*)source);
-						setRegAsB64(threadID, instr.d.reg, d);
 						ir::PTXB64 b = operandAsB64(threadID, instr.b);
 						ir::PTXB64 c = operandAsB64(threadID, instr.c);
+						if (writeback) setRegAsB64(threadID, instr.d.reg, d);
 						*((ir::PTXB64*)source) = (d==b) ? c : d;
 						reportE(REPORT_ATOM, "Atomically updated " << d
 							<< " to " << *((ir::PTXB64*)source) );
@@ -2091,7 +2550,7 @@ void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir:
 						|| instr.type == ir::PTXOperand::s32
 						|| instr.type == ir::PTXOperand::u32) {
 						ir::PTXB32 d = *((ir::PTXB32*)source);
-						setRegAsB32(threadID, instr.d.reg, d);
+						if (writeback) setRegAsB32(threadID, instr.d.reg, d);
 						ir::PTXB32 b = operandAsB32(threadID, instr.b);
 						*((ir::PTXB32*)source) = b;
 						reportE(REPORT_ATOM, "Atomically updated " << d
@@ -2101,7 +2560,7 @@ void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir:
 						|| instr.type == ir::PTXOperand::s64
 						|| instr.type == ir::PTXOperand::u64) {
 						ir::PTXB64 d = *((ir::PTXB64*)source);
-						setRegAsB64(threadID, instr.d.reg, d);
+						if (writeback) setRegAsB64(threadID, instr.d.reg, d);
 						ir::PTXB64 b = operandAsB64(threadID, instr.b);
 						*((ir::PTXB64*)source) = b;
 						reportE(REPORT_ATOM, "Atomically updated " << d
@@ -2115,9 +2574,25 @@ void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir:
 				break;
 			case ir::PTXInstruction::AtomicAdd:
 				{
-					if (instr.type == ir::PTXOperand::u32) {
+					if (instr.type == ir::PTXOperand::f16 || instr.type == ir::PTXOperand::f16x2) {
+						const ir::PTXU32 value = elementSize == 2 ? operandAsU16(threadID, instr.b) : operandAsU32(threadID, instr.b);
+						ir::PTXU32 original = 0;
+						for (size_t half = 0; half < elementSize / 2; ++half) {
+							ir::PTXU16 old;
+							std::memcpy(&old, source + 2 * half, sizeof(old));
+							original |= ir::PTXU32(old) << (16 * half);
+							const ir::PTXU16 result = toF16(roundedAdd<double>(f16ToF32(old),
+								f16ToF32(ir::PTXU16(value >> (16 * half))), ir::PTXInstruction::rn), ir::PTXInstruction::rn);
+							std::memcpy((char*)source + 2 * half, &result, sizeof(result));
+						}
+						if (writeback) {
+							if (elementSize == 2) setRegAsB16(threadID, instr.d.reg, original);
+							else setRegAsB32(threadID, instr.d.reg, original);
+						}
+					}
+					else if (instr.type == ir::PTXOperand::u32) {
 						ir::PTXU32 d = *((ir::PTXU32*)source);
-						setRegAsU32(threadID, instr.d.reg, d);
+						if (writeback) setRegAsU32(threadID, instr.d.reg, d);
 						ir::PTXU32 b = operandAsU32(threadID, instr.b);
 						*((ir::PTXU32*)source) = b + d;
 						reportE(REPORT_ATOM, "Atomically updated " << d
@@ -2125,27 +2600,43 @@ void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir:
 					}
 					else if (instr.type == ir::PTXOperand::s32) {
 						ir::PTXS32 d = *((ir::PTXS32*)source);
-						setRegAsS32(threadID, instr.d.reg, d);
+						if (writeback) setRegAsS32(threadID, instr.d.reg, d);
 						ir::PTXS32 b = operandAsS32(threadID, instr.b);
 						*((ir::PTXS32*)source) = b + d;
 						reportE(REPORT_ATOM, "Atomically updated " << d
 							<< " to " << *((ir::PTXS32*)source) );
 					}
 					else if (instr.type == ir::PTXOperand::f32) {
-						ir::PTXF32 d = *((ir::PTXF32*)source);
-						setRegAsF32(threadID, instr.d.reg, d);
-						ir::PTXF32 b = operandAsF32(threadID, instr.b);
-						*((ir::PTXF32*)source) = b + d;
+						ir::PTXF32 d;
+						std::memcpy(&d, source, sizeof(d));
+						const ir::PTXF32 b = operandAsF32(threadID, instr.b);
+						const bool shared = instr.addressSpace == ir::PTXInstruction::Shared ||
+							(instr.addressSpace == ir::PTXInstruction::Generic && addressInRange<ir::PTXU64>(
+								(ir::PTXU64)source, (ir::PTXU64)functionCallStack.sharedMemoryPointer(), functionCallStack.sharedMemorySize()));
+						const int modifiers = ir::PTXInstruction::rn | (shared ? 0 : ir::PTXInstruction::ftz);
+						const ir::PTXF32 result = ftz(modifiers, roundedAdd(ftz(modifiers, d), ftz(modifiers, b), modifiers));
+						std::memcpy((char*)source, &result, sizeof(result));
+						if (writeback) setRegAsF32(threadID, instr.d.reg, d);
 						reportE(REPORT_ATOM, "Atomically updated " << d
-							<< " to " << *((ir::PTXF32*)source) );
+							<< " to " << result );
 					}
 					else if (instr.type == ir::PTXOperand::u64) {
 						ir::PTXU64 d = *((ir::PTXU64*)source);
-						setRegAsU64(threadID, instr.d.reg, d);
+						if (writeback) setRegAsU64(threadID, instr.d.reg, d);
 						ir::PTXU64 b = operandAsU64(threadID, instr.b);
 						*((ir::PTXU64*)source) = b + d;
 						reportE(REPORT_ATOM, "Atomically updated " << d
 							<< " to " << *((ir::PTXU64*)source) );
+					}
+					else if (instr.type == ir::PTXOperand::f64) {
+						ir::PTXF64 d;
+						std::memcpy(&d, source, sizeof(d));
+						const ir::PTXF64 b = operandAsF64(threadID, instr.b);
+						const ir::PTXF64 result = roundedAdd(d, b, ir::PTXInstruction::rn);
+						std::memcpy((char*)source, &result, sizeof(result));
+						if (writeback) setRegAsF64(threadID, instr.d.reg, d);
+						reportE(REPORT_ATOM, "Atomically updated " << d
+							<< " to " << result );
 					}
 					else {
 						throw RuntimeException("invalid data type",
@@ -2160,7 +2651,7 @@ void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir:
 							context.PC, instr);
 					}
 					ir::PTXU32 d = *((ir::PTXU32*)source);
-					setRegAsU32(threadID, instr.d.reg, d);
+					if (writeback) setRegAsU32(threadID, instr.d.reg, d);
 					ir::PTXU32 b = operandAsU32(threadID, instr.b);
 					*((ir::PTXU32*)source) = (d >= b) ? 0 : d + 1;
 					reportE(REPORT_ATOM, "Atomically updated " << d
@@ -2174,7 +2665,7 @@ void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir:
 							context.PC, instr);
 					}
 					ir::PTXU32 d = *((ir::PTXU32*)source);
-					setRegAsU32(threadID, instr.d.reg, d);
+					if (writeback) setRegAsU32(threadID, instr.d.reg, d);
 					ir::PTXU32 b = operandAsU32(threadID, instr.b);
 					*((ir::PTXU32*)source) = ((d == 0) || (d > b)) ? b : d - 1;
 					reportE(REPORT_ATOM, "Atomically updated " << d
@@ -2185,7 +2676,7 @@ void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir:
 				{
 					if (instr.type == ir::PTXOperand::u32) {
 						ir::PTXU32 d = *((ir::PTXU32*)source);
-						setRegAsU32(threadID, instr.d.reg, d);
+						if (writeback) setRegAsU32(threadID, instr.d.reg, d);
 						ir::PTXU32 b = operandAsU32(threadID, instr.b);
 						*((ir::PTXU32*)source) = min(b, d);
 						reportE(REPORT_ATOM, "Atomically updated " << d
@@ -2193,19 +2684,27 @@ void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir:
 					}
 					else if (instr.type == ir::PTXOperand::s32) {
 						ir::PTXS32 d = *((ir::PTXS32*)source);
-						setRegAsS32(threadID, instr.d.reg, d);
+						if (writeback) setRegAsS32(threadID, instr.d.reg, d);
 						ir::PTXS32 b = operandAsS32(threadID, instr.b);
 						*((ir::PTXS32*)source) = min(b, d);
 						reportE(REPORT_ATOM, "Atomically updated " << d
 							<< " to " << *((ir::PTXS32*)source) );
 					}
-					else if (instr.type == ir::PTXOperand::f32) {
-						ir::PTXF32 d = *((ir::PTXF32*)source);
-						setRegAsF32(threadID, instr.d.reg, d);
-						ir::PTXF32 b = operandAsF32(threadID, instr.b);
-						*((ir::PTXF32*)source) = min(b, d);
+					else if (instr.type == ir::PTXOperand::u64) {
+						ir::PTXU64 d = *((ir::PTXU64*)source);
+						if (writeback) setRegAsU64(threadID, instr.d.reg, d);
+						ir::PTXU64 b = operandAsU64(threadID, instr.b);
+						*((ir::PTXU64*)source) = min(b, d);
 						reportE(REPORT_ATOM, "Atomically updated " << d
-							<< " to " << *((ir::PTXF32*)source) );
+							<< " to " << *((ir::PTXU64*)source) );
+					}
+					else if (instr.type == ir::PTXOperand::s64) {
+						ir::PTXS64 d = *((ir::PTXS64*)source);
+						if (writeback) setRegAsS64(threadID, instr.d.reg, d);
+						ir::PTXS64 b = operandAsS64(threadID, instr.b);
+						*((ir::PTXS64*)source) = min(b, d);
+						reportE(REPORT_ATOM, "Atomically updated " << d
+							<< " to " << *((ir::PTXS64*)source) );
 					}
 					else {
 						throw RuntimeException("invalid data type",
@@ -2217,7 +2716,7 @@ void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir:
 				{
 					if (instr.type == ir::PTXOperand::u32) {
 						ir::PTXU32 d = *((ir::PTXU32*)source);
-						setRegAsU32(threadID, instr.d.reg, d);
+						if (writeback) setRegAsU32(threadID, instr.d.reg, d);
 						ir::PTXU32 b = operandAsU32(threadID, instr.b);
 						*((ir::PTXU32*)source) = max(b, d);
 						reportE(REPORT_ATOM, "Atomically updated " << d
@@ -2225,19 +2724,27 @@ void executive::CooperativeThreadArray::eval_Atom(CTAContext &context, const ir:
 					}
 					else if (instr.type == ir::PTXOperand::s32) {
 						ir::PTXS32 d = *((ir::PTXS32*)source);
-						setRegAsS32(threadID, instr.d.reg, d);
+						if (writeback) setRegAsS32(threadID, instr.d.reg, d);
 						ir::PTXS32 b = operandAsS32(threadID, instr.b);
 						*((ir::PTXS32*)source) = max(b, d);
 						reportE(REPORT_ATOM, "Atomically updated " << d
 							<< " to " << *((ir::PTXS32*)source) );
 					}
-					else if (instr.type == ir::PTXOperand::f32) {
-						ir::PTXF32 d = *((ir::PTXF32*)source);
-						setRegAsF32(threadID, instr.d.reg, d);
-						ir::PTXF32 b = operandAsF32(threadID, instr.b);
-						*((ir::PTXF32*)source) = max(b, d);
+					else if (instr.type == ir::PTXOperand::u64) {
+						ir::PTXU64 d = *((ir::PTXU64*)source);
+						if (writeback) setRegAsU64(threadID, instr.d.reg, d);
+						ir::PTXU64 b = operandAsU64(threadID, instr.b);
+						*((ir::PTXU64*)source) = max(b, d);
 						reportE(REPORT_ATOM, "Atomically updated " << d
-							<< " to " << *((ir::PTXF32*)source) );
+							<< " to " << *((ir::PTXU64*)source) );
+					}
+					else if (instr.type == ir::PTXOperand::s64) {
+						ir::PTXS64 d = *((ir::PTXS64*)source);
+						if (writeback) setRegAsS64(threadID, instr.d.reg, d);
+						ir::PTXS64 b = operandAsS64(threadID, instr.b);
+						*((ir::PTXS64*)source) = max(b, d);
+						reportE(REPORT_ATOM, "Atomically updated " << d
+							<< " to " << *((ir::PTXS64*)source) );
 					}
 					else {
 						throw RuntimeException("invalid data type",
@@ -2263,7 +2770,7 @@ void executive::CooperativeThreadArray::eval_Bfi(CTAContext &context, const
 			ir::PTXB32 a = operandAsB32(threadID, instr.a);
 			ir::PTXU32 b = operandAsU32(threadID, instr.b);
 			ir::PTXU32 c = operandAsU32(threadID, instr.c);
-			ir::PTXB32 d = hydrazine::bitFieldInsert(pq, a, b, c);
+			ir::PTXB32 d = hydrazine::bitFieldInsert(pq, a, b & 0xff, c & 0xff);
 			setRegAsB32(threadID, instr.d.reg, d);
 		}
 		break;
@@ -2275,7 +2782,7 @@ void executive::CooperativeThreadArray::eval_Bfi(CTAContext &context, const
 			ir::PTXB64 a = operandAsB64(threadID, instr.a);
 			ir::PTXU32 b = operandAsU32(threadID, instr.b);
 			ir::PTXU32 c = operandAsU32(threadID, instr.c);
-			ir::PTXB64 d = hydrazine::bitFieldInsert(pq, a, b, c);
+			ir::PTXB64 d = hydrazine::bitFieldInsert(pq, a, b & 0xff, c & 0xff);
 			setRegAsB64(threadID, instr.d.reg, d);
 		}
 		break;
@@ -2307,7 +2814,10 @@ void executive::CooperativeThreadArray::eval_Bfind(CTAContext &context,
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
 
-			ir::PTXS32 a = operandAsS32(threadID, instr.a);
+			const ir::PTXS32 signedA = operandAsS32(threadID, instr.a);
+			const ir::PTXU32 a = signedA < 0
+				? ~static_cast<ir::PTXU32>(signedA)
+				: static_cast<ir::PTXU32>(signedA);
 			ir::PTXU32 d = hydrazine::bfind(a, instr.shiftAmount);
 			setRegAsU32(threadID, instr.d.reg, d);
 		}
@@ -2317,7 +2827,10 @@ void executive::CooperativeThreadArray::eval_Bfind(CTAContext &context,
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
 
-			ir::PTXS64 a = operandAsS64(threadID, instr.a);
+			const ir::PTXS64 signedA = operandAsS64(threadID, instr.a);
+			const ir::PTXU64 a = signedA < 0
+				? ~static_cast<ir::PTXU64>(signedA)
+				: static_cast<ir::PTXU64>(signedA);
 			ir::PTXU32 d = hydrazine::bfind(a, instr.shiftAmount);
 			setRegAsU32(threadID, instr.d.reg, d);
 		}
@@ -2336,6 +2849,31 @@ void executive::CooperativeThreadArray::eval_Bfind(CTAContext &context,
 	default: {
 		throw RuntimeException("unsupported data type", context.PC, instr);
 	}
+	}
+}
+
+void executive::CooperativeThreadArray::eval_Bmsk(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	trace();
+	for (int threadID = 0; threadID < threadCount; ++threadID) {
+		if (!context.predicated(threadID, instr)) continue;
+
+		const ir::PTXU32 a = operandAsU32(threadID, instr.a);
+		const ir::PTXU32 b = operandAsU32(threadID, instr.b);
+		const ir::PTXU32 a1 = a & 0x1f;
+		const ir::PTXU32 b1 = b & 0x1f;
+		const ir::PTXU32 sum = a1 + b1;
+		const bool positionOverflow = instr.shiftMode ==
+			ir::PTXInstruction::ShiftMode::Clamp && a >= 32;
+		const bool widthOverflow = instr.shiftMode ==
+			ir::PTXInstruction::ShiftMode::Clamp && b >= 32;
+		const ir::PTXU32 mask0 = positionOverflow ? 0 : (~0u << a1);
+		ir::PTXU32 mask1 = 0;
+		if (sum < 32 && !positionOverflow && !widthOverflow) {
+			mask1 = b1 == 0 ? ~0u : (~0u << sum);
+		}
+
+		setRegAsU32(threadID, instr.d.reg, mask0 & ~mask1);
 	}
 }
 
@@ -2378,19 +2916,11 @@ void executive::CooperativeThreadArray::eval_Bfe(CTAContext &context,
 			|| instr.type == ir::PTXOperand::s32);
 		bool isSigned = (instr.type == ir::PTXOperand::s32
 			|| instr.type == ir::PTXOperand::s64);
-
-		ir::PTXU32 pos    = operandAsU32(tid, instr.b);
-		ir::PTXU32 len    = operandAsU32(tid, instr.c);
-		ir::PTXU64 a      = operandAsU64(tid, instr.a);
-		ir::PTXU64 mask   = ((1 << len) - 1);
-		ir::PTXU32 msb	  = min((pos+len-1), size32bit ? 31 : 63);
-		ir::PTXU32 sign   = ((a>>(msb))&1);
-		ir::PTXU64 result = 0;
-
-		if (isSigned) {
-			result = (sign ? -1 : 0) & (~mask);
-		}
-		result |= ((a >> pos) & mask);
+		ir::PTXU64 result = size32bit
+			? hydrazine::bfe<ir::PTXU32>(operandAsU32(tid, instr.a),
+				operandAsU32(tid, instr.b), operandAsU32(tid, instr.c), isSigned)
+			: hydrazine::bfe<ir::PTXU64>(operandAsU64(tid, instr.a),
+				operandAsU32(tid, instr.b), operandAsU32(tid, instr.c), isSigned);
 		if (size32bit) {
 			setRegAsU32(tid, instr.d.reg,
 				hydrazine::bit_cast<ir::PTXU32, ir::PTXU64>(result));
@@ -2500,7 +3030,9 @@ void executive::CooperativeThreadArray::eval_Reconverge(
 void executive::CooperativeThreadArray::eval_Brkpt(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
-	context.executionState = CTAContext::Break;
+	if (context.predicateMask(instr).any()) {
+		context.executionState = CTAContext::Break;
+	}
 }
 
 void executive::CooperativeThreadArray::copyArgument(const ir::PTXOperand& s,
@@ -2845,6 +3377,42 @@ void executive::CooperativeThreadArray::eval_CNot(CTAContext &context,
 	}
 }
 
+void executive::CooperativeThreadArray::eval_Fns(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	trace();
+	for (int threadID = 0; threadID < threadCount; ++threadID) {
+		if (!context.predicated(threadID, instr)) continue;
+
+		const ir::PTXU32 mask = operandAsB32(threadID, instr.a);
+		const ir::PTXU32 base = operandAsB32(threadID, instr.b);
+		const ir::PTXS32 offset = operandAsS32(threadID, instr.c);
+		ir::PTXU32 result = 0xffffffffu;
+		if (base > 31) {
+			report("warning: fns base outside 0..31 is undefined by PTX; "
+				"Ocelot returns 0xffffffff");
+		}
+		else if (offset == 0) {
+			if ((mask >> base) & 1u) result = base;
+		}
+		else {
+			int pos = static_cast<int>(base);
+			ir::PTXS64 count = std::abs(static_cast<ir::PTXS64>(offset)) - 1;
+			const int inc = offset > 0 ? 1 : -1;
+			while (pos >= 0 && pos < 32) {
+				if ((mask >> pos) & 1u) {
+					if (count == 0) {
+						result = pos;
+						break;
+					}
+					--count;
+				}
+				pos += inc;
+			}
+		}
+		setRegAsB32(threadID, instr.d.reg, result);
+	}
+}
+
 void executive::CooperativeThreadArray::eval_CopySign(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
@@ -2891,8 +3459,9 @@ void executive::CooperativeThreadArray::eval_Cos(CTAContext &context,
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
 
-			ir::PTXF32 d, a = operandAsF32(threadID, instr.a);
-			d = (ir::PTXF32)cos(a);
+			ir::PTXF32 d,
+				a = ftz(instr.modifier, operandAsF32(threadID, instr.a));
+			d = ftz(instr.modifier, (ir::PTXF32)cos(a));
 			setRegAsF32(threadID, instr.d.reg, d);
 		}
 	}
@@ -2910,6 +3479,40 @@ void executive::CooperativeThreadArray::eval_Cos(CTAContext &context,
 	}
 }
 
+template< typename Destination, typename Source >
+static Destination cvtInteger(Source value, int modifier) {
+	if( !(modifier & ir::PTXInstruction::sat) ) {
+		return static_cast<Destination>(value);
+	}
+
+	if( std::numeric_limits<Source>::is_signed ) {
+		const ir::PTXS64 signedValue = static_cast<ir::PTXS64>(value);
+		if( signedValue < 0 ) {
+			if( !std::numeric_limits<Destination>::is_signed ) return 0;
+
+			const ir::PTXS64 minimum = static_cast<ir::PTXS64>(
+				(std::numeric_limits<Destination>::min)());
+			return signedValue < minimum
+				? (std::numeric_limits<Destination>::min)()
+				: static_cast<Destination>(value);
+		}
+	}
+
+	const ir::PTXU64 unsignedValue = static_cast<ir::PTXU64>(value);
+	const ir::PTXU64 maximum = static_cast<ir::PTXU64>(
+		(std::numeric_limits<Destination>::max)());
+	return unsignedValue > maximum
+		? (std::numeric_limits<Destination>::max)()
+		: static_cast<Destination>(value);
+}
+
+template< typename Float >
+static Float cvtSaturate(Float value, int modifier) {
+	if( !(modifier & ir::PTXInstruction::sat) ) return value;
+	if( hydrazine::isnan(value) || value <= 0 ) return 0;
+	return value >= 1 ? 1 : value;
+}
+
 template< typename Int >
 static ir::PTXF32 toF32(Int value, int modifier) {
 	int mode = hydrazine::fegetround();
@@ -2922,7 +3525,7 @@ static ir::PTXF32 toF32(Int value, int modifier) {
 	} else if (modifier & ir::PTXInstruction::rp) {
 		hydrazine::fesetround(FE_UPWARD);
 	}
-	ir::PTXF32 d = value;
+	ir::PTXF32 d = cvtSaturate(static_cast<ir::PTXF32>(value), modifier);
 	hydrazine::fesetround(mode);
 	return d;
 }
@@ -2939,17 +3542,67 @@ static ir::PTXF64 toF64(Int value, int modifier) {
 	} else if (modifier & ir::PTXInstruction::rp) {
 		hydrazine::fesetround(FE_UPWARD);
 	}
-	ir::PTXF64 d = value;
+	ir::PTXF64 d = cvtSaturate(static_cast<ir::PTXF64>(value), modifier);
 	hydrazine::fesetround(mode);
 	return d;
 }
 
+template< typename Source >
+static ir::PTXU16 toF16(Source value, int modifier) {
+	if( (modifier & ir::PTXInstruction::relu) && hydrazine::isnan(value) ) {
+		return 0x7fff;
+	}
+	if( (modifier & ir::PTXInstruction::relu) && value < 0 ) value = 0;
+	int mode = hydrazine::fegetround();
+	if (modifier & ir::PTXInstruction::rn) {
+		hydrazine::fesetround(FE_TONEAREST);
+	} else if (modifier & ir::PTXInstruction::rz) {
+		hydrazine::fesetround(FE_TOWARDZERO);
+	} else if (modifier & ir::PTXInstruction::rm) {
+		hydrazine::fesetround(FE_DOWNWARD);
+	} else if (modifier & ir::PTXInstruction::rp) {
+		hydrazine::fesetround(FE_UPWARD);
+	}
+	ir::PTXF16 half = value;
+	if( modifier & ir::PTXInstruction::sat ) {
+		half = cvtSaturate(static_cast<ir::PTXF32>(half), modifier);
+	}
+	hydrazine::fesetround(mode);
+	ir::PTXU16 bits;
+	std::memcpy(&bits, &half, sizeof(bits));
+	return bits;
+}
+
+static ir::PTXU16 f32ToBF16(ir::PTXF32 value, int modifier) {
+	if( (modifier & ir::PTXInstruction::relu) && value < 0 ) value = 0;
+	ir::PTXU32 bits = hydrazine::bit_cast<ir::PTXU32>(value);
+	if ((bits & 0x7fffffffU) > 0x7f800000U) {
+		// NVIDIA canonical NaN
+		return 0x7fffU;
+	}
+	ir::PTXU16 upper = static_cast<ir::PTXU16>(bits >> 16);
+	if( modifier & ir::PTXInstruction::rz ) return upper;
+	ir::PTXU16 lower = static_cast<ir::PTXU16>(bits & 0xffffU);
+	if (lower > 0x8000U) {
+		return upper + 1U;
+	} else if (lower < 0x8000U) {
+		return upper;
+	}
+	return upper + (upper & 1U);
+}
+
+static ir::PTXU16 f32ToBF16Rn(ir::PTXF32 value) {
+	return f32ToBF16(value, ir::PTXInstruction::rn);
+}
+
 template< typename Float >
-static Float roundToInt(Float a, int modifier, executive::CTAContext &context,
-	const ir::PTXInstruction &instr) {
+static Float roundToInt(Float a, int modifier) {
 	Float fd = 0;
 	if (modifier & ir::PTXInstruction::rni) {
+		const int previous = hydrazine::fegetround();
+		hydrazine::fesetround(FE_TONEAREST);
 		fd = hydrazine::nearbyintf(a);
+		hydrazine::fesetround(previous);
 	} else if (modifier & ir::PTXInstruction::rzi) {
 		fd = hydrazine::trunc(a);
 	} else if (modifier & ir::PTXInstruction::rmi) {
@@ -2963,12 +3616,47 @@ static Float roundToInt(Float a, int modifier, executive::CTAContext &context,
 	return fd;
 }
 
+template< typename Float >
+static Float roundToInt(Float a, int modifier, executive::CTAContext &,
+	const ir::PTXInstruction &) {
+	return roundToInt(a, modifier);
+}
+
+template< typename Destination, typename Float >
+static Destination cvtFloatToInteger(Float value, int modifier) {
+	// Match PTX 9.3: NaN converts to 0, except f64 sources or
+	// 64-bit destinations produce the destination's high bit. PTX 8.0 says 0.
+	if (value != value) {
+		if (sizeof(Float) < 8 && sizeof(Destination) < 8) return 0;
+		return static_cast<Destination>(1ull << (sizeof(Destination) * CHAR_BIT - 1));
+	}
+	const Float rounded = roundToInt(value, modifier);
+	const int bits = sizeof(Destination) * CHAR_BIT;
+	const int magnitudeBits = std::numeric_limits<Destination>::is_signed
+		? bits - 1 : bits;
+	const Float upper = std::ldexp(Float(1), magnitudeBits);
+	if (rounded >= upper) return (std::numeric_limits<Destination>::max)();
+	if (std::numeric_limits<Destination>::is_signed && rounded
+		< -upper) return (std::numeric_limits<Destination>::min)();
+	if (!std::numeric_limits<Destination>::is_signed && rounded < 0) return 0;
+	return static_cast<Destination>(rounded);
+}
+
 /*!
 
 */
 void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
+	auto setCvtB16 = [this](int threadID, ir::PTXOperand::RegisterType reg,
+		ir::PTXU16 value) {
+		setRegAsU64(threadID, reg, value);
+	};
+	auto setCvtF32 = [this](int threadID, ir::PTXOperand::RegisterType reg,
+		ir::PTXF32 value) {
+		setRegAsU64(threadID, reg,
+			hydrazine::bit_cast<ir::PTXU32>(value));
+	};
 	for (int threadID = 0; threadID < threadCount; threadID++) {
 		if (!context.predicated(threadID, instr)) continue;
 
@@ -2977,12 +3665,40 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 		if (instr.a.relaxedType != ir::PTXOperand::TypeSpecifier_invalid) {
 			sourceType = instr.a.relaxedType;
 		}
+		if( instr.type == ir::PTXOperand::f16x2 ) {
+			const ir::PTXU32 d =
+				static_cast<ir::PTXU32>(toF16(
+					operandAsF32(threadID, instr.a), instr.modifier)) << 16
+				| toF16(operandAsF32(threadID, instr.b), instr.modifier);
+			setRegAsU64(threadID, instr.d.reg, d);
+			continue;
+		}
+		if( instr.type == ir::PTXOperand::bf16x2 ) {
+			const ir::PTXU32 d =
+				static_cast<ir::PTXU32>(f32ToBF16(
+					operandAsF32(threadID, instr.a), instr.modifier)) << 16
+				| f32ToBF16(operandAsF32(threadID, instr.b), instr.modifier);
+			setRegAsU64(threadID, instr.d.reg, d);
+			continue;
+		}
+		if( instr.type == ir::PTXOperand::tf32 ) {
+			setRegAsU64(threadID, instr.d.reg,
+				tf32FromF32Rna(operandAsF32(threadID, instr.a)));
+			continue;
+		}
 
 		switch (sourceType) {
 			case ir::PTXOperand::b8: // fall through
 			case ir::PTXOperand::u8:
 			{
 				switch (instr.type) {
+					case ir::PTXOperand::f16:
+						{
+							setCvtB16(threadID, instr.d.reg,
+								toF16(operandAsB8(threadID, instr.a),
+								instr.modifier));
+						}
+						break;
 					case ir::PTXOperand::pred: // fall through
 					case ir::PTXOperand::b8: // fall through
 					case ir::PTXOperand::u8: // fall through
@@ -3001,17 +3717,14 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 						break;
 					case ir::PTXOperand::s8:
 						{
-							ir::PTXU8 a = operandAsU8(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = min(a, CHAR_MAX);
-							}
-							ir::PTXS8 d = a;
+							ir::PTXS8 d = cvtInteger<ir::PTXS8>(
+								operandAsU8(threadID, instr.a), instr.modifier);
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::f32:
 						{
-							setRegAsF32(threadID, instr.d.reg,
+							setCvtF32(threadID, instr.d.reg,
 								toF32(operandAsB8(threadID, instr.a),
 								instr.modifier));
 						}
@@ -3033,6 +3746,13 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 			case ir::PTXOperand::s8:
 			{
 				switch (instr.type) {
+					case ir::PTXOperand::f16:
+						{
+							setCvtB16(threadID, instr.d.reg,
+								toF16(operandAsS8(threadID, instr.a),
+								instr.modifier));
+						}
+						break;
 					case ir::PTXOperand::s8: // fall through
 					case ir::PTXOperand::s16: // fall through
 					case ir::PTXOperand::s32: // fall through
@@ -3044,24 +3764,34 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 						break;
 					case ir::PTXOperand::pred: // fall through
 					case ir::PTXOperand::u8: // fall through
-					case ir::PTXOperand::b8: // fall through
+					case ir::PTXOperand::b8:
+						{
+							setRegAsU64(threadID, instr.d.reg,
+								cvtInteger<ir::PTXU8>(
+									operandAsS8(threadID, instr.a), instr.modifier));
+						}
+						break;
 					case ir::PTXOperand::b16: // fall through
-					case ir::PTXOperand::u16: // fall through
+					case ir::PTXOperand::u16:
+						setRegAsU64(threadID, instr.d.reg,
+							cvtInteger<ir::PTXU16>(
+								operandAsS8(threadID, instr.a), instr.modifier));
+						break;
 					case ir::PTXOperand::b32: // fall through
-					case ir::PTXOperand::u32: // fall through
+					case ir::PTXOperand::u32:
+						setRegAsU64(threadID, instr.d.reg,
+							cvtInteger<ir::PTXU32>(
+								operandAsS8(threadID, instr.a), instr.modifier));
+						break;
 					case ir::PTXOperand::b64: // fall through
 					case ir::PTXOperand::u64:
-						{
-							ir::PTXS8 a = operandAsS8(threadID, instr.a);
-							if (instr.modifier & ir::PTXInstruction::sat) {
-								a = max(a, 0);
-							}
-							setRegAsU64(threadID, instr.d.reg, a);
-						}
+						setRegAsU64(threadID, instr.d.reg,
+							cvtInteger<ir::PTXU64>(
+								operandAsS8(threadID, instr.a), instr.modifier));
 						break;
 					case ir::PTXOperand::f32:
 						{
-							setRegAsF32(threadID, instr.d.reg,
+							setCvtF32(threadID, instr.d.reg,
 								toF32(operandAsS8(threadID, instr.a),
 								instr.modifier));
 						}
@@ -3084,12 +3814,19 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 			case ir::PTXOperand::u16:
 			{
 				switch (instr.type) {
+					case ir::PTXOperand::f16:
+						{
+							setCvtB16(threadID, instr.d.reg,
+								toF16(operandAsB16(threadID, instr.a),
+								instr.modifier));
+						}
+						break;
 					case ir::PTXOperand::pred: // fall through
 					case ir::PTXOperand::b8: // fall through
 					case ir::PTXOperand::u8:
 						{
-							ir::PTXU16 a = operandAsU16(threadID, instr.a);
-							ir::PTXU8 d = a;
+							ir::PTXU8 d = cvtInteger<ir::PTXU8>(
+								operandAsU16(threadID, instr.a), instr.modifier);
 							setRegAsU64(threadID, instr.d.reg, d);
 						}
 						break;
@@ -3108,27 +3845,21 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 						break;
 					case ir::PTXOperand::s8:
 						{
-							ir::PTXU16 a = operandAsU16(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = min(a, CHAR_MAX);
-							}
-							ir::PTXS8 d = a;
+							ir::PTXS8 d = cvtInteger<ir::PTXS8>(
+								operandAsU16(threadID, instr.a), instr.modifier);
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::s16:
 						{
-							ir::PTXU16 a = operandAsU16(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = min(a, SHRT_MAX);
-							}
-							ir::PTXS16 d = a;
+							ir::PTXS16 d = cvtInteger<ir::PTXS16>(
+								operandAsU16(threadID, instr.a), instr.modifier);
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::f32:
 						{
-							setRegAsF32(threadID, instr.d.reg,
+							setCvtF32(threadID, instr.d.reg,
 								toF32(operandAsB16(threadID, instr.a),
 								instr.modifier));
 						}
@@ -3151,10 +3882,17 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 			{
 				// s16 to one of the following
 				switch (instr.type) {
+					case ir::PTXOperand::f16:
+						{
+							setCvtB16(threadID, instr.d.reg,
+								toF16(operandAsS16(threadID, instr.a),
+								instr.modifier));
+						}
+						break;
 					case ir::PTXOperand::s8:
 						{
-							ir::PTXS16 a = operandAsS16(threadID, instr.a);
-							ir::PTXS8 d = a;
+							ir::PTXS8 d = cvtInteger<ir::PTXS8>(
+								operandAsS16(threadID, instr.a), instr.modifier);
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
@@ -3170,31 +3908,32 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 					case ir::PTXOperand::u8: // fall through
 					case ir::PTXOperand::b8:
 						{
-							ir::PTXS16 a = operandAsS16(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = max(a, 0);
-							}
-							ir::PTXU8 d = a;
+							ir::PTXU8 d = cvtInteger<ir::PTXU8>(
+								operandAsS16(threadID, instr.a), instr.modifier);
 							setRegAsU64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::b16: // fall through
-					case ir::PTXOperand::u16: // fall through
+					case ir::PTXOperand::u16:
+						setRegAsU64(threadID, instr.d.reg,
+							cvtInteger<ir::PTXU16>(
+								operandAsS16(threadID, instr.a), instr.modifier));
+						break;
 					case ir::PTXOperand::b32: // fall through
-					case ir::PTXOperand::u32: // fall through
+					case ir::PTXOperand::u32:
+						setRegAsU64(threadID, instr.d.reg,
+							cvtInteger<ir::PTXU32>(
+								operandAsS16(threadID, instr.a), instr.modifier));
+						break;
 					case ir::PTXOperand::b64: // fall through
 					case ir::PTXOperand::u64:
-						{
-							ir::PTXS16 a = operandAsS16(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = max(a, 0);
-							}
-							setRegAsU64(threadID, instr.d.reg, a);
-						}
+						setRegAsU64(threadID, instr.d.reg,
+							cvtInteger<ir::PTXU64>(
+								operandAsS16(threadID, instr.a), instr.modifier));
 						break;
 					case ir::PTXOperand::f32:
 						{
-							setRegAsF32(threadID, instr.d.reg,
+							setCvtF32(threadID, instr.d.reg,
 								toF32(operandAsS16(threadID, instr.a),
 								instr.modifier));
 						}
@@ -3217,20 +3956,27 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 			case ir::PTXOperand::u32:
 			{
 				switch (instr.type) {
+					case ir::PTXOperand::f16:
+						{
+							setCvtB16(threadID, instr.d.reg,
+								toF16(operandAsU32(threadID, instr.a),
+								instr.modifier));
+						}
+						break;
 					case ir::PTXOperand::pred: // fall through
 					case ir::PTXOperand::b8: // fall through
 					case ir::PTXOperand::u8:
 						{
-							ir::PTXU32 a = operandAsU32(threadID, instr.a);
-							ir::PTXU8 d = a;
+							ir::PTXU8 d = cvtInteger<ir::PTXU8>(
+								operandAsU32(threadID, instr.a), instr.modifier);
 							setRegAsU64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::u16: // fall through
 					case ir::PTXOperand::b16:
 						{
-							ir::PTXU32 a = operandAsU32(threadID, instr.a);
-							ir::PTXU16 d = a;
+							ir::PTXU16 d = cvtInteger<ir::PTXU16>(
+								operandAsU32(threadID, instr.a), instr.modifier);
 							setRegAsU64(threadID, instr.d.reg, d);
 						}
 						break;
@@ -3246,37 +3992,28 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 						break;
 					case ir::PTXOperand::s8:
 						{
-							ir::PTXU32 a = operandAsU32(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = min(a, CHAR_MAX);
-							}
-							ir::PTXS8 d = a;
+							ir::PTXS8 d = cvtInteger<ir::PTXS8>(
+								operandAsU32(threadID, instr.a), instr.modifier);
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::s16:
 						{
-							ir::PTXU32 a = operandAsU32(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = min(a, SHRT_MAX);
-							}
-							ir::PTXS16 d = a;
+							ir::PTXS16 d = cvtInteger<ir::PTXS16>(
+								operandAsU32(threadID, instr.a), instr.modifier);
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::s32:
 						{
-							ir::PTXU32 a = operandAsU32(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = min(a, INT_MAX);
-							}
-							ir::PTXS32 d = a;
+							ir::PTXS32 d = cvtInteger<ir::PTXS32>(
+								operandAsU32(threadID, instr.a), instr.modifier);
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::f32:
 						{
-							setRegAsF32(threadID, instr.d.reg,
+							setCvtF32(threadID, instr.d.reg,
 								toF32(operandAsU32(threadID, instr.a),
 								instr.modifier));
 						}
@@ -3298,52 +4035,53 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 			case ir::PTXOperand::s32:
 			{
 				switch (instr.type) {
+					case ir::PTXOperand::f16:
+						{
+							setCvtB16(threadID, instr.d.reg,
+								toF16(operandAsS32(threadID, instr.a),
+								instr.modifier));
+						}
+						break;
 					case ir::PTXOperand::pred: // fall through
 					case ir::PTXOperand::b8: // fall through
 					case ir::PTXOperand::u8:
 						{
-							ir::PTXS32 a = operandAsS32(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = max(a, 0);
-							}
-							ir::PTXU8 d = a;
-							setRegAsS64(threadID, instr.d.reg, d);
+							ir::PTXU8 d = cvtInteger<ir::PTXU8>(
+								operandAsS32(threadID, instr.a), instr.modifier);
+							setRegAsU64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::u16: // fall through
 					case ir::PTXOperand::b16:
 						{
-							ir::PTXS32 a = operandAsS32(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = max(a, 0);
-							}
-							ir::PTXU16 d = a;
-							setRegAsS64(threadID, instr.d.reg, d);
+							ir::PTXU16 d = cvtInteger<ir::PTXU16>(
+								operandAsS32(threadID, instr.a), instr.modifier);
+							setRegAsU64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::b32: // fall through
-					case ir::PTXOperand::u32: // fall through
+					case ir::PTXOperand::u32:
+						setRegAsU64(threadID, instr.d.reg,
+							cvtInteger<ir::PTXU32>(
+								operandAsS32(threadID, instr.a), instr.modifier));
+						break;
 					case ir::PTXOperand::b64: // fall through
 					case ir::PTXOperand::u64:
-						{
-							ir::PTXS32 a = operandAsS32(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = max(a, 0);
-							}
-							setRegAsS64(threadID, instr.d.reg, a);
-						}
+						setRegAsU64(threadID, instr.d.reg,
+							cvtInteger<ir::PTXU64>(
+								operandAsS32(threadID, instr.a), instr.modifier));
 						break;
 					case ir::PTXOperand::s8:
 						{
-							ir::PTXS32 a = operandAsS32(threadID, instr.a);
-							ir::PTXS8 d = a;
+							ir::PTXS8 d = cvtInteger<ir::PTXS8>(
+								operandAsS32(threadID, instr.a), instr.modifier);
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::s16:
 						{
-							ir::PTXS32 a = operandAsS32(threadID, instr.a);
-							ir::PTXS16 d = a;
+							ir::PTXS16 d = cvtInteger<ir::PTXS16>(
+								operandAsS32(threadID, instr.a), instr.modifier);
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
@@ -3356,7 +4094,7 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 						break;
 					case ir::PTXOperand::f32:
 						{
-							setRegAsF32(threadID, instr.d.reg,
+							setCvtF32(threadID, instr.d.reg,
 								toF32(operandAsS32(threadID, instr.a),
 								instr.modifier));
 						}
@@ -3378,38 +4116,36 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 			case ir::PTXOperand::s64:
 			{
 				switch (instr.type) {
+					case ir::PTXOperand::f16:
+						{
+							setCvtB16(threadID, instr.d.reg,
+								toF16(operandAsS64(threadID, instr.a),
+								instr.modifier));
+						}
+						break;
 					case ir::PTXOperand::pred: // fall through
 					case ir::PTXOperand::b8: // fall through
 					case ir::PTXOperand::u8: // fall through
 						{
-							ir::PTXS64 a = operandAsS64(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = max(a, 0);
-							}
-							ir::PTXU8 d = a;
-							setRegAsS64(threadID, instr.d.reg, d);
+							ir::PTXU8 d = cvtInteger<ir::PTXU8>(
+								operandAsS64(threadID, instr.a), instr.modifier);
+							setRegAsU64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::u16: // fall through
 					case ir::PTXOperand::b16: // fall through
 						{
-							ir::PTXS64 a = operandAsS64(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = max(a, 0);
-							}
-							ir::PTXU16 d = a;
-							setRegAsS64(threadID, instr.d.reg, d);
+							ir::PTXU16 d = cvtInteger<ir::PTXU16>(
+								operandAsS64(threadID, instr.a), instr.modifier);
+							setRegAsU64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::b32: // fall through
 					case ir::PTXOperand::u32:
 						{
-							ir::PTXS64 a = operandAsS64(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = max(a, 0);
-							}
-							ir::PTXU32 d = a;
-							setRegAsS64(threadID, instr.d.reg, d);
+							ir::PTXU32 d = cvtInteger<ir::PTXU32>(
+								operandAsS64(threadID, instr.a), instr.modifier);
+							setRegAsU64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::b64: // fall through
@@ -3424,22 +4160,22 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 						break;
 					case ir::PTXOperand::s8:
 						{
-							ir::PTXS64 a = operandAsS64(threadID, instr.a);
-							ir::PTXS8 d = a;
+							ir::PTXS8 d = cvtInteger<ir::PTXS8>(
+								operandAsS64(threadID, instr.a), instr.modifier);
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::s16:
 						{
-							ir::PTXS64 a = operandAsS64(threadID, instr.a);
-							ir::PTXS16 d = a;
+							ir::PTXS16 d = cvtInteger<ir::PTXS16>(
+								operandAsS64(threadID, instr.a), instr.modifier);
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::s32:
 						{
-							ir::PTXS64 a = operandAsS64(threadID, instr.a);
-							ir::PTXS32 d = a;
+							ir::PTXS32 d = cvtInteger<ir::PTXS32>(
+								operandAsS64(threadID, instr.a), instr.modifier);
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
@@ -3451,7 +4187,7 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 						break;
 					case ir::PTXOperand::f32:
 						{
-							setRegAsF32(threadID, instr.d.reg,
+							setCvtF32(threadID, instr.d.reg,
 								toF32(operandAsS64(threadID, instr.a),
 								instr.modifier));
 						}
@@ -3474,28 +4210,35 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 			case ir::PTXOperand::u64:
 			{
 				switch (instr.type) {
+					case ir::PTXOperand::f16:
+						{
+							setCvtB16(threadID, instr.d.reg,
+								toF16(operandAsU64(threadID, instr.a),
+								instr.modifier));
+						}
+						break;
 					case ir::PTXOperand::pred: // fall through
 					case ir::PTXOperand::b8: // fall through
 					case ir::PTXOperand::u8:
 						{
-							ir::PTXU64 a = operandAsU64(threadID, instr.a);
-							ir::PTXU8 d = a;
+							ir::PTXU8 d = cvtInteger<ir::PTXU8>(
+								operandAsU64(threadID, instr.a), instr.modifier);
 							setRegAsU64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::b16: // fall through
 					case ir::PTXOperand::u16:
 						{
-							ir::PTXU64 a = operandAsU64(threadID, instr.a);
-							ir::PTXU16 d = a;
+							ir::PTXU16 d = cvtInteger<ir::PTXU16>(
+								operandAsU64(threadID, instr.a), instr.modifier);
 							setRegAsU64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::b32: // fall through
 					case ir::PTXOperand::u32:
 						{
-							ir::PTXU64 a = operandAsU64(threadID, instr.a);
-							ir::PTXU32 d = a;
+							ir::PTXU32 d = cvtInteger<ir::PTXU32>(
+								operandAsU64(threadID, instr.a), instr.modifier);
 							setRegAsU64(threadID, instr.d.reg, d);
 						}
 						break;
@@ -3508,47 +4251,35 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 						break;
 					case ir::PTXOperand::s8:
 						{
-							ir::PTXU64 a = operandAsU64(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = min(a, CHAR_MAX);
-							}
-							ir::PTXS8 d = a;
+							ir::PTXS8 d = cvtInteger<ir::PTXS8>(
+								operandAsU64(threadID, instr.a), instr.modifier);
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::s16:
 						{
-							ir::PTXU64 a = operandAsU64(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = min(a, SHRT_MAX);
-							}
-							ir::PTXS16 d = a;
+							ir::PTXS16 d = cvtInteger<ir::PTXS16>(
+								operandAsU64(threadID, instr.a), instr.modifier);
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::s32:
 						{
-							ir::PTXU64 a = operandAsU64(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = min(a, INT_MAX);
-							}
-							ir::PTXS32 d = a;
+							ir::PTXS32 d = cvtInteger<ir::PTXS32>(
+								operandAsU64(threadID, instr.a), instr.modifier);
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::s64:
 						{
-							ir::PTXU64 a = operandAsU64(threadID, instr.a);
-							if(instr.modifier & ir::PTXInstruction::sat) {
-								a = min(a, LLONG_MAX);
-							}
-							ir::PTXS64 d = a;
+							ir::PTXS64 d = cvtInteger<ir::PTXS64>(
+								operandAsU64(threadID, instr.a), instr.modifier);
 							setRegAsS64(threadID, instr.d.reg, d);
 						}
 						break;
 					case ir::PTXOperand::f32:
 						{
-							setRegAsF32(threadID, instr.d.reg,
+							setCvtF32(threadID, instr.d.reg,
 								toF32(operandAsU64(threadID, instr.a),
 								instr.modifier));
 						}
@@ -3567,182 +4298,116 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 				}
 			}
 			break;
+			case ir::PTXOperand::f16: // fall through
 			case ir::PTXOperand::f32:
 			{
+				ir::PTXF32 a = sourceType == ir::PTXOperand::f16
+					? f16ToF32(operandAsU16(threadID, instr.a))
+					: ftz(instr.modifier, operandAsF32(threadID, instr.a));
 				switch (instr.type) {
+					case ir::PTXOperand::f16:
+						{
+							a = roundToInt(a, instr.modifier);
+							setCvtB16(threadID, instr.d.reg,
+								toF16(a, instr.modifier));
+						}
+						break;
 					case ir::PTXOperand::pred: // fall through
 					case ir::PTXOperand::b8: // fall through
 					case ir::PTXOperand::u8:
 						{
-							ir::PTXF32 a = operandAsF32(threadID, instr.a);
-							if (a != a) a = 0.0f;
-							ir::PTXF32 fd = roundToInt(a, instr.modifier,
-								context, instr);
-							ir::PTXU8 d = 0;
-							if(fd > UCHAR_MAX) {
-								d = UCHAR_MAX;
-							}
-							else if(fd < 0) {
-								d = 0;
-							}
-							else {
-								d = fd;
-							}
-							setRegAsU64(threadID, instr.d.reg, d);
+							setRegAsU64(threadID, instr.d.reg,
+								cvtFloatToInteger<ir::PTXU8>(a, instr.modifier));
 						}
 						break;
 					case ir::PTXOperand::b16: // fall through
 					case ir::PTXOperand::u16:
 						{
-							ir::PTXF32 a = operandAsF32(threadID, instr.a);
-							if (a != a) a = 0.0f;
-							ir::PTXF32 fd = roundToInt(a, instr.modifier,
-								context, instr);
-							ir::PTXU16 d = 0;
-							if(fd > USHRT_MAX) {
-								d = USHRT_MAX;
-							}
-							else if(fd < 0) {
-								d = 0;
-							}
-							else {
-								d = fd;
-							}
-							setRegAsU64(threadID, instr.d.reg, d);
+							setRegAsU64(threadID, instr.d.reg,
+								cvtFloatToInteger<ir::PTXU16>(a, instr.modifier));
 						}
 						break;
 					case ir::PTXOperand::b32: // fall through
 					case ir::PTXOperand::u32:
 						{
-							ir::PTXF32 a = operandAsF32(threadID, instr.a);
-							if (a != a) a = 0.0f;
-							ir::PTXF32 fd = roundToInt(a, instr.modifier,
-								context, instr);
-							ir::PTXU32 d = 0;
-							if(fd > static_cast<float>(UINT_MAX)) {
-								d = UINT_MAX;
-							}
-							else if(fd < 0) {
-								d = 0;
-							}
-							else {
-								d = fd;
-							}
-							setRegAsU64(threadID, instr.d.reg, d);
+							setRegAsU64(threadID, instr.d.reg,
+								cvtFloatToInteger<ir::PTXU32>(a, instr.modifier));
 						}
 						break;
 					case ir::PTXOperand::b64: // fall through
 					case ir::PTXOperand::u64:
 						{
-							ir::PTXF32 a = operandAsF32(threadID, instr.a);
-							if (a != a) a = 0.0f;
-							ir::PTXF32 fd = roundToInt(a, instr.modifier,
-								context, instr);
-							ir::PTXU64 d = 0;
-							if(fd > static_cast<float>(ULLONG_MAX)) {
-								d = ULLONG_MAX;
-							}
-							else if(fd < 0) {
-								d = 0;
-							}
-							else {
-								d = fd;
-							}
-							setRegAsU64(threadID, instr.d.reg, d);
+							setRegAsU64(threadID, instr.d.reg,
+								cvtFloatToInteger<ir::PTXU64>(a, instr.modifier));
 						}
 						break;
 					case ir::PTXOperand::s8:
 						{
-							ir::PTXF32 a = operandAsF32(threadID, instr.a);
-							if (a != a) a = 0.0f;
-							ir::PTXF32 fd = roundToInt(a, instr.modifier,
-								context, instr);
-							ir::PTXS8 d = 0;
-							if(fd > CHAR_MAX) {
-								d = CHAR_MAX;
-							}
-							else if(fd < CHAR_MIN) {
-								d = CHAR_MIN;
-							}
-							else {
-								d = fd;
-							}
-							setRegAsS64(threadID, instr.d.reg, d);
+							setRegAsS64(threadID, instr.d.reg,
+								cvtFloatToInteger<ir::PTXS8>(a, instr.modifier));
 						}
 						break;
 					case ir::PTXOperand::s16:
 						{
-							ir::PTXF32 a = operandAsF32(threadID, instr.a);
-							if (a != a) a = 0.0f;
-							ir::PTXF32 fd = roundToInt(a, instr.modifier,
-								context, instr);
-							ir::PTXS16 d = 0;
-							if(fd > SHRT_MAX) {
-								d = SHRT_MAX;
-							}
-							else if(fd < SHRT_MIN) {
-								d = SHRT_MIN;
-							}
-							else {
-								d = fd;
-							}
-							setRegAsS64(threadID, instr.d.reg, d);
+							setRegAsS64(threadID, instr.d.reg,
+								cvtFloatToInteger<ir::PTXS16>(a, instr.modifier));
 						}
 						break;
 					case ir::PTXOperand::s32:
 						{
-							ir::PTXF32 a = operandAsF32(threadID, instr.a);
-							if (a != a) a = 0.0f;
-							ir::PTXF32 fd = roundToInt(a, instr.modifier,
-								context, instr);
-							ir::PTXS32 d = 0;
-							if(fd > static_cast<float>(INT_MAX)) {
-								d = INT_MAX;
-							}
-							else if(fd < INT_MIN) {
-								d = INT_MIN;
-							}
-							else {
-								d = fd;
-							}
-							setRegAsS64(threadID, instr.d.reg, d);
+							setRegAsS64(threadID, instr.d.reg,
+								cvtFloatToInteger<ir::PTXS32>(a, instr.modifier));
 						}
 						break;
 					case ir::PTXOperand::s64:
 						{
-							ir::PTXF32 a = operandAsF32(threadID, instr.a);
-							if (a != a) a = 0.0f;
-							ir::PTXF32 fd = roundToInt(a, instr.modifier,
-								context, instr);
-							ir::PTXS64 d = 0;
-							if(fd > static_cast<float>(LLONG_MAX)) {
-								d = LLONG_MAX;
-							}
-							else if(fd < LLONG_MIN) {
-								d = LLONG_MIN;
-							}
-							else {
-								d = fd;
-							}
-							setRegAsS64(threadID, instr.d.reg, d);
+							setRegAsS64(threadID, instr.d.reg,
+								cvtFloatToInteger<ir::PTXS64>(a, instr.modifier));
 						}
 						break;
 					case ir::PTXOperand::f32:
 						{
-							ir::PTXF32 a = operandAsF32(threadID, instr.a);
-
 							a = roundToInt(a, instr.modifier, context,
 								instr);
 
-							setRegAsF32(threadID, instr.d.reg,
+							setCvtF32(threadID, instr.d.reg,
 								sat(instr.modifier, a));
 						}
 						break;
 					case ir::PTXOperand::f64:
 						{
-							ir::PTXF32 a = operandAsF32(threadID, instr.a);
-							ir::PTXF64 d = toF64(a, instr.modifier);
+							ir::PTXF64 d = roundToInt(a, instr.modifier);
+							d = toF64(d, instr.modifier);
 							setRegAsF64(threadID, instr.d.reg, d);
+						}
+						break;
+					case ir::PTXOperand::bf16:
+						{
+							ir::PTXU16 d = f32ToBF16(a, instr.modifier);
+							setCvtB16(threadID, instr.d.reg, d);
+						}
+						break;
+					default:
+						throw RuntimeException("conversion not implemented",
+							context.PC, instr);
+						break;
+				}
+			}
+			break;
+			case ir::PTXOperand::bf16:
+			{
+				switch (instr.type) {
+					case ir::PTXOperand::f16:
+						{
+							setCvtB16(threadID, instr.d.reg,
+								toF16(bf16ToF32(operandAsU16(threadID,
+								instr.a)), instr.modifier));
+						}
+						break;
+					case ir::PTXOperand::f32:
+						{
+							setCvtF32(threadID, instr.d.reg,
+								bf16ToF32(operandAsU16(threadID, instr.a)));
 						}
 						break;
 					default:
@@ -3755,183 +4420,93 @@ void executive::CooperativeThreadArray::eval_Cvt(CTAContext &context,
 			case ir::PTXOperand::f64:
 			{
 				switch (instr.type) {
+					case ir::PTXOperand::f16:
+						{
+							setCvtB16(threadID, instr.d.reg,
+								toF16(operandAsF64(threadID, instr.a),
+								instr.modifier));
+						}
+						break;
 					case ir::PTXOperand::pred: // fall through
 					case ir::PTXOperand::b8: // fall through
 					case ir::PTXOperand::u8:
 						{
 							ir::PTXF64 a = operandAsF64(threadID, instr.a);
-							if (a != a) a = 0.0f;
-							ir::PTXF64 fd = roundToInt(a, instr.modifier,
-								context, instr);
-							ir::PTXU8 d = 0;
-							if(fd > UCHAR_MAX) {
-								d = UCHAR_MAX;
-							}
-							else if(fd < 0) {
-								d = 0;
-							}
-							else {
-								d = fd;
-							}
-							setRegAsU64(threadID, instr.d.reg, d);
+							setRegAsU64(threadID, instr.d.reg,
+								cvtFloatToInteger<ir::PTXU8>(a, instr.modifier));
 						}
 						break;
 					case ir::PTXOperand::b16: // fall through
 					case ir::PTXOperand::u16:
 						{
 							ir::PTXF64 a = operandAsF64(threadID, instr.a);
-							if (a != a) a = 0.0f;
-							ir::PTXF64 fd = roundToInt(a, instr.modifier,
-								context, instr);
-							ir::PTXU16 d = 0;
-							if(fd > USHRT_MAX) {
-								d = USHRT_MAX;
-							}
-							else if(fd < 0) {
-								d = 0;
-							}
-							else {
-								d = fd;
-							}
-							setRegAsU64(threadID, instr.d.reg, d);
+							setRegAsU64(threadID, instr.d.reg,
+								cvtFloatToInteger<ir::PTXU16>(a, instr.modifier));
 						}
 						break;
 					case ir::PTXOperand::b32: // fall through
 					case ir::PTXOperand::u32:
 						{
 							ir::PTXF64 a = operandAsF64(threadID, instr.a);
-							if (a != a) a = 0.0f;
-							ir::PTXF64 fd = roundToInt(a, instr.modifier,
-								context, instr);
-							ir::PTXU32 d = 0;
-							if(fd > UINT_MAX) {
-								d = UINT_MAX;
-							}
-							else if(fd < 0) {
-								d = 0;
-							}
-							else
-							{
-								d = fd;
-							}
-							setRegAsU64(threadID, instr.d.reg, d);
+							setRegAsU64(threadID, instr.d.reg,
+								cvtFloatToInteger<ir::PTXU32>(a, instr.modifier));
 						}
 						break;
 					case ir::PTXOperand::b64: // fall through
 					case ir::PTXOperand::u64:
 						{
 							ir::PTXF64 a = operandAsF64(threadID, instr.a);
-							if (a != a) a = 0.0f;
-							ir::PTXF64 fd = roundToInt(a, instr.modifier,
-								context, instr);
-							ir::PTXU64 d = 0;
-							if(fd > static_cast<double>(ULLONG_MAX)) {
-								d = ULLONG_MAX;
-							}
-							else if(fd < 0) {
-								d = 0;
-							}
-							else
-							{
-								d = fd;
-							}
-							setRegAsU64(threadID, instr.d.reg, d);
+							setRegAsU64(threadID, instr.d.reg,
+								cvtFloatToInteger<ir::PTXU64>(a, instr.modifier));
 						}
 						break;
 					case ir::PTXOperand::s8:
 						{
 							ir::PTXF64 a = operandAsF64(threadID, instr.a);
-							if (a != a) a = 0.0;
-							a = roundToInt(a, instr.modifier,
-								context, instr);
-							ir::PTXS8 d = 0;
-							if(a > CHAR_MAX) {
-								d = CHAR_MAX;
-							}
-							else if(a < CHAR_MIN) {
-								d = CHAR_MIN;
-							}
-							else {
-								d = a;
-							}
-							setRegAsS64(threadID, instr.d.reg, d);
+							setRegAsS64(threadID, instr.d.reg,
+								cvtFloatToInteger<ir::PTXS8>(a, instr.modifier));
 						}
 						break;
 					case ir::PTXOperand::s16:
 						{
 							ir::PTXF64 a = operandAsF64(threadID, instr.a);
-							if (a != a) a = 0.0;
-							a = roundToInt(a, instr.modifier,
-								context, instr);
-							ir::PTXS16 d = 0;
-							if(a > SHRT_MAX) {
-								d = SHRT_MAX;
-							}
-							else if(a < SHRT_MIN) {
-								d = SHRT_MIN;
-							}
-							else {
-								d = a;
-							}
-							setRegAsS64(threadID, instr.d.reg, d);
+							setRegAsS64(threadID, instr.d.reg,
+								cvtFloatToInteger<ir::PTXS16>(a, instr.modifier));
 						}
 						break;
 					case ir::PTXOperand::s32:
 						{
 							ir::PTXF64 a = operandAsF64(threadID, instr.a);
-							if (a != a) a = 0.0;
-							a = roundToInt(a, instr.modifier,
-								context, instr);
-							ir::PTXS32 d = 0;
-							if(a > INT_MAX) {
-								d = INT_MAX;
-							}
-							else if(a < INT_MIN) {
-								d = INT_MIN;
-							}
-							else {
-								d = a;
-							}
-							setRegAsS64(threadID, instr.d.reg, d);
+							setRegAsS64(threadID, instr.d.reg,
+								cvtFloatToInteger<ir::PTXS32>(a, instr.modifier));
 						}
 						break;
 					case ir::PTXOperand::s64:
 						{
 							ir::PTXF64 a = operandAsF64(threadID, instr.a);
-							if (a != a) a = 0.0;
-							a = roundToInt(a, instr.modifier,
-								context, instr);
-							ir::PTXS64 d = 0;
-							if(a > static_cast<double>(LLONG_MAX)) {
-								d = LLONG_MAX;
-							}
-							else if(a < LLONG_MIN) {
-								d = LLONG_MIN;
-							}
-							else {
-								d = a;
-							}
-							setRegAsS64(threadID, instr.d.reg, d);
+							setRegAsS64(threadID, instr.d.reg,
+								cvtFloatToInteger<ir::PTXS64>(a, instr.modifier));
 						}
 						break;
 					case ir::PTXOperand::f32:
 						{
 							ir::PTXF64 a = operandAsF64(threadID, instr.a);
-							a = toF32(a, instr.modifier);
+							a = ftz(instr.modifier, toF32(a, instr.modifier));
 							if(instr.modifier & ir::PTXInstruction::sat) {
 								if (a != a) a = 0.0;
 								a = min(1.0, a);
 								a = max(a, 0.0);
 							}
-							setRegAsF32(threadID, instr.d.reg,
+							setCvtF32(threadID, instr.d.reg,
 								sat(instr.modifier, a));
 						}
 						break;
 					case ir::PTXOperand::f64:
 						{
 							ir::PTXF64 a = operandAsF64(threadID, instr.a);
+							a = roundToInt(a, instr.modifier);
 							setRegAsF64(threadID, instr.d.reg,
-							sat(instr.modifier, a));
+								sat(instr.modifier, a));
 						}
 						break;
 					default:
@@ -3976,6 +4551,11 @@ void executive::CooperativeThreadArray::eval_Cvta(CTAContext &context,
 				case ir::PTXInstruction::Global: // DO NOTHING
 				case ir::PTXInstruction::Local:  // DO NOTHING
 					break;
+				case ir::PTXInstruction::Param:
+					addrSpaceBase = (ir::PTXU32)(kernel->scheduler
+						? kernel->scheduler->argumentMemory()
+						: (ir::PTXU64)kernel->ArgumentMemory);
+					break;
 				case ir::PTXInstruction::Shared:
 				{
 					hydrazine::bit_cast(addrSpaceBase,
@@ -3999,7 +4579,8 @@ void executive::CooperativeThreadArray::eval_Cvta(CTAContext &context,
 
 				if (instr.addressSpace == ir::PTXInstruction::Local) {
 					ir::PTXU32 localMemPtr;
-					if (!instr.a.isGlobalLocal) {
+					if (instr.a.addressMode != ir::PTXOperand::Address
+						|| !instr.a.isGlobalLocal) {
 						hydrazine::bit_cast(localMemPtr,
 							functionCallStack.localMemoryPointer(tid));
 					}
@@ -4028,6 +4609,11 @@ void executive::CooperativeThreadArray::eval_Cvta(CTAContext &context,
 				case ir::PTXInstruction::Global: // DO NOTHING
 				case ir::PTXInstruction::Local:  // DO NOTHING
 					break;
+				case ir::PTXInstruction::Param:
+					addrSpaceBase = kernel->scheduler
+						? kernel->scheduler->argumentMemory()
+						: (ir::PTXU64)kernel->ArgumentMemory;
+					break;
 				case ir::PTXInstruction::Shared:
 				{
 					hydrazine::bit_cast(addrSpaceBase,
@@ -4051,7 +4637,8 @@ void executive::CooperativeThreadArray::eval_Cvta(CTAContext &context,
 
 				if (instr.addressSpace == ir::PTXInstruction::Local) {
 					ir::PTXU64 localMemPtr;
-					if (!instr.a.isGlobalLocal) {
+					if (instr.a.addressMode != ir::PTXOperand::Address
+						|| !instr.a.isGlobalLocal) {
 						hydrazine::bit_cast(localMemPtr,
 							functionCallStack.localMemoryPointer(tid));
 					}
@@ -4102,6 +4689,12 @@ void executive::CooperativeThreadArray::eval_Cvta(CTAContext &context,
 
 				}
 					break;
+				case ir::PTXInstruction::Param:
+					addrSpaceBase = (ir::PTXU32)(kernel->scheduler
+						? kernel->scheduler->argumentMemory()
+						: (ir::PTXU64)kernel->ArgumentMemory);
+					addrSpaceSize = kernel->argumentMemorySize();
+					break;
 				case ir::PTXInstruction::Const:
 				{
 					hydrazine::bit_cast(addrSpaceBase, kernel->ConstMemory);
@@ -4142,13 +4735,8 @@ void executive::CooperativeThreadArray::eval_Cvta(CTAContext &context,
 					}
 				}
 
-				if (srcAddr >= addrSpaceSize + addrSpaceBase
-					|| srcAddr < addrSpaceBase) {
-					throw RuntimeException("cvta instruction - source "
-						"address is not part of addressed region",
-						context.PC, instr);
-				}
-
+				// PTX leaves the result undefined for an address outside this space's
+				// window and hardware does not trap, so convert it like any other.
 				srcAddr -= addrSpaceBase;
 
 				setRegAsU32(tid, instr.d.reg, srcAddr);
@@ -4178,6 +4766,12 @@ void executive::CooperativeThreadArray::eval_Cvta(CTAContext &context,
 				{
 
 				}
+					break;
+				case ir::PTXInstruction::Param:
+					addrSpaceBase = kernel->scheduler
+						? kernel->scheduler->argumentMemory()
+						: (ir::PTXU64)kernel->ArgumentMemory;
+					addrSpaceSize = kernel->argumentMemorySize();
 					break;
 				case ir::PTXInstruction::Const:
 				{
@@ -4218,13 +4812,8 @@ void executive::CooperativeThreadArray::eval_Cvta(CTAContext &context,
 					}
 				}
 
-				if (srcAddr >= addrSpaceSize + addrSpaceBase
-					|| srcAddr < addrSpaceBase) {
-					throw RuntimeException("cvta instruction - source "
-						"address is not part of addressed region",
-						context.PC, instr);
-				}
-
+				// PTX leaves the result undefined for an address outside this space's
+				// window and hardware does not trap, so convert it like any other.
 				srcAddr -= addrSpaceBase;
 
 				setRegAsU64(tid, instr.d.reg, srcAddr);
@@ -4253,18 +4842,21 @@ void executive::CooperativeThreadArray::eval_Div(CTAContext &context,
 			ir::PTXF32 d, a = ftz(instr.modifier, operandAsF32(threadID, instr.a)),
 				b = ftz(instr.modifier, operandAsF32(threadID, instr.b));
 			if(ir::PTXInstruction::approx & instr.modifier) {
-				if(issubnormal_(a) || issubnormal_(b))
-				{
-					d = a / b;
+				if(std::fabs(b) > std::ldexp(1.0f, 126) && !hydrazine::isinf(b)) {
+					if(hydrazine::isinf(a)) {
+						d = std::numeric_limits<ir::PTXF32>::quiet_NaN();
+					} else {
+						const bool negative = std::signbit(a) != std::signbit(b);
+						d = hydrazine::copysign(0.0f, negative ? -1.0f : 1.0f);
+					}
+				} else {
+					d = roundedMul(a, roundedDiv(1.0f, b,
+						ir::PTXInstruction::rn), ir::PTXInstruction::rn);
 				}
-				else
-				{
-					d = a * ( 1.0f / b );
-				}
+			} else {
+				d = roundedDiv(a, b, instr.modifier);
 			}
-			else {
-				d = ftz(instr.modifier, a / b);
-			}
+			d = ftz(instr.modifier, d);
 			setRegAsF32(threadID, instr.d.reg, d);
 		}
 	}
@@ -4274,7 +4866,7 @@ void executive::CooperativeThreadArray::eval_Div(CTAContext &context,
 
 			ir::PTXF64 d, a = operandAsF64(threadID, instr.a),
 				b = operandAsF64(threadID, instr.b);
-			d = a / b;
+			d = roundedDiv(a, b, instr.modifier);
 			setRegAsF64(threadID, instr.d.reg, d);
 		}
 	}
@@ -4367,6 +4959,36 @@ void executive::CooperativeThreadArray::eval_Div(CTAContext &context,
 	}
 }
 
+void executive::CooperativeThreadArray::eval_Dp(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	trace();
+	const bool fourWay = instr.opcode == ir::PTXInstruction::Dp4a;
+	const unsigned int lanes = fourWay ? 4 : 2;
+	const unsigned int aWidth = fourWay ? 8 : 16;
+	const unsigned int bStart = !fourWay
+		&& instr.modifier == ir::PTXInstruction::hi ? 2 : 0;
+	auto extract = [](ir::PTXU32 value, unsigned int bit,
+		unsigned int width, ir::PTXOperand::DataType type) {
+		const ir::PTXU32 field = (value >> bit) & ((1u << width) - 1);
+		if( type == ir::PTXOperand::s32 && (field & (1u << (width - 1))) ) {
+			return static_cast<ir::PTXS32>(field) - (1 << width);
+		}
+		return static_cast<ir::PTXS32>(field);
+	};
+	for (int threadID = 0; threadID < threadCount; ++threadID) {
+		if (!context.predicated(threadID, instr)) continue;
+		const ir::PTXU32 a = operandAsU32(threadID, instr.a);
+		const ir::PTXU32 b = operandAsU32(threadID, instr.b);
+		ir::PTXU32 d = operandAsU32(threadID, instr.c);
+		for (unsigned int i = 0; i < lanes; ++i) {
+			const ir::PTXS32 va = extract(a, i * aWidth, aWidth, instr.type);
+			const ir::PTXS32 vb = extract(b, (bStart + i) * 8, 8, instr.bType);
+			d += static_cast<ir::PTXU32>(va * vb);
+		}
+		setRegAsU32(threadID, instr.d.reg, d);
+	}
+}
+
 /*!
 
 */
@@ -4377,9 +4999,30 @@ void executive::CooperativeThreadArray::eval_Ex2(CTAContext &context,
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
 
-			ir::PTXF32 d, a = operandAsF32(threadID, instr.a);
+			ir::PTXF32 d,
+				a = ftz(instr.modifier, operandAsF32(threadID, instr.a));
 			d = ftz(instr.modifier, hydrazine::exp2f(a));
 			setRegAsF32(threadID, instr.d.reg, d);
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f16) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+
+			ir::PTXF32 a = f16ToF32(ftzF16(instr.modifier,
+				operandAsU16(threadID, instr.a)));
+			setRegAsB16(threadID, instr.d.reg,
+				toF16(hydrazine::exp2f(a), instr.modifier));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f16x2) {
+		// Each half is computed independently, like ex2.approx.f16.
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			const ir::PTXU32 a = operandAsU32(threadID, instr.a);
+			const ir::PTXU16 low = toF16(hydrazine::exp2f(f16ToF32(a & 0xffff)), instr.modifier);
+			const ir::PTXU16 high = toF16(hydrazine::exp2f(f16ToF32(a >> 16)), instr.modifier);
+			setRegAsU32(threadID, instr.d.reg, low | (static_cast<ir::PTXU32>(high) << 16));
 		}
 	}
 	else {
@@ -4403,7 +5046,26 @@ void executive::CooperativeThreadArray::eval_Exit(CTAContext &context,
 void executive::CooperativeThreadArray::eval_Fma(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
-	if (instr.type == ir::PTXOperand::f32) {
+	if (instr.type == ir::PTXOperand::f16x2) {
+		for (int tid = 0; tid < threadCount; tid++) {
+			if (!context.predicated(tid, instr)) continue;
+			ir::PTXU32 a = operandAsU32(tid, instr.a), b = operandAsU32(tid, instr.b);
+			ir::PTXU32 c = operandAsU32(tid, instr.c);
+			ir::PTXU16 al = static_cast<ir::PTXU16>(a), ah = a >> 16;
+			ir::PTXU16 bl = static_cast<ir::PTXU16>(b), bh = b >> 16;
+			ir::PTXU16 cl = static_cast<ir::PTXU16>(c), ch = c >> 16;
+			auto fma = [&](ir::PTXU16 x, ir::PTXU16 y, ir::PTXU16 z) {
+				return ftzF16(instr.modifier, toF16(roundedFma<double>(
+					f16ToF32(ftzF16(instr.modifier, x)),
+					f16ToF32(ftzF16(instr.modifier, y)),
+					f16ToF32(ftzF16(instr.modifier, z)), instr.modifier), instr.modifier));
+			};
+			ir::PTXU16 dl = fma(al, bl, cl), dh = fma(ah, bh, ch);
+			setRegAsU32(tid, instr.d.reg, static_cast<ir::PTXU32>(dl) |
+				(static_cast<ir::PTXU32>(dh) << 16));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f32) {
 		for (int tid = 0; tid < threadCount; tid++) {
 			if (!context.predicated(tid, instr)) continue;
 			ir::PTXF32 d = 0,
@@ -4411,7 +5073,8 @@ void executive::CooperativeThreadArray::eval_Fma(CTAContext &context,
 				b = ftz(instr.modifier, operandAsF32(tid, instr.b)),
 				c = ftz(instr.modifier, operandAsF32(tid, instr.c));
 
-			d = ftz(instr.modifier, sat(instr.modifier, a * b + c));
+			d = ftz(instr.modifier, sat(instr.modifier,
+				roundedFma(a, b, c, instr.modifier)));
 
 			setRegAsF32(tid, instr.d.reg, d);
 		}
@@ -4422,12 +5085,597 @@ void executive::CooperativeThreadArray::eval_Fma(CTAContext &context,
 
 			ir::PTXF64 d, a = operandAsF64(tid, instr.a),
 				b = operandAsF64(tid, instr.b), c = operandAsF64(tid, instr.c);
-			d = a * b + c;
+			d = roundedFma(a, b, c, instr.modifier);
 			setRegAsF64(tid, instr.d.reg, d);
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f16) {
+		for (int tid = 0; tid < threadCount; tid++) {
+			if (!context.predicated(tid, instr)) continue;
+
+			ir::PTXF32 a = f16ToF32(ftzF16(instr.modifier,
+				operandAsU16(tid, instr.a)));
+			ir::PTXF32 b = f16ToF32(ftzF16(instr.modifier,
+				operandAsU16(tid, instr.b)));
+			ir::PTXF32 c = f16ToF32(ftzF16(instr.modifier,
+				operandAsU16(tid, instr.c)));
+			setRegAsB16(tid, instr.d.reg,
+				ftzF16(instr.modifier, toF16(roundedFma<double>(
+					a, b, c, instr.modifier), instr.modifier)));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::bf16) {
+		for (int tid = 0; tid < threadCount; tid++) {
+			if (!context.predicated(tid, instr)) continue;
+
+			ir::PTXF32 a = bf16ToF32(operandAsU16(tid, instr.a));
+			ir::PTXF32 b = bf16ToF32(operandAsU16(tid, instr.b));
+			ir::PTXF32 c = bf16ToF32(operandAsU16(tid, instr.c));
+			ir::PTXU16 d = f32ToBF16(fmaF32OneRound(a, b, c), instr.modifier);
+			setRegAsB16(tid, instr.d.reg, d);
+		}
+	}
+	else if (instr.type == ir::PTXOperand::bf16x2) {
+		for (int tid = 0; tid < threadCount; tid++) {
+			if (!context.predicated(tid, instr)) continue;
+			ir::PTXU32 a = operandAsU32(tid, instr.a), b = operandAsU32(tid, instr.b),
+				c = operandAsU32(tid, instr.c);
+			ir::PTXU16 al = static_cast<ir::PTXU16>(a), ah = a >> 16,
+				bl = static_cast<ir::PTXU16>(b), bh = b >> 16;
+			ir::PTXU16 cl = static_cast<ir::PTXU16>(c), ch = c >> 16;
+			auto fma = [&](ir::PTXU16 x, ir::PTXU16 y, ir::PTXU16 z) {
+				return f32ToBF16(fmaF32OneRound(bf16ToF32(x), bf16ToF32(y),
+					bf16ToF32(z)), instr.modifier);
+			};
+			ir::PTXU16 dl = fma(al, bl, cl), dh = fma(ah, bh, ch);
+			setRegAsU32(tid, instr.d.reg, static_cast<ir::PTXU32>(dl) |
+				(static_cast<ir::PTXU32>(dh) << 16));
 		}
 	}
 	else {
 		throw RuntimeException("unsupported data type", context.PC, instr);
+	}
+}
+
+void executive::CooperativeThreadArray::eval_Mma(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	trace();
+
+	const std::string error = instr.valid();
+	if (!error.empty()) {
+		throw RuntimeException(error, context.PC, instr);
+	}
+
+	const int completeThreads = (threadCount / WARP_SZ) * WARP_SZ;
+	for (int threadID = completeThreads; threadID < threadCount; ++threadID) {
+		if (context.predicated(threadID, instr)) {
+			throw RuntimeException("mma requires all warp lanes to participate",
+				context.PC, instr);
+		}
+	}
+
+	const ir::PTXOperand::DataType inputType = instr.a.type;
+	if (inputType == ir::PTXOperand::b1) {
+		const int rows = instr.mmaShape == ir::PTXInstruction::MmaM8N8K128 ? 8 : 16;
+		const int kWords = instr.mmaShape == ir::PTXInstruction::MmaM16N8K256 ? 8 : 4;
+		for (int warpStart = 0; warpStart < completeThreads; warpStart += WARP_SZ) {
+			int participants = 0;
+			for (int lane = 0; lane < WARP_SZ; ++lane) participants += context.predicated(warpStart + lane, instr);
+			if (!participants) continue;
+			if (participants != WARP_SZ) {
+				throw RuntimeException("mma requires all warp lanes to participate", context.PC, instr);
+			}
+			// Each word holds 32 consecutive K bits; A register pairs select rows and K halves.
+			ir::PTXU32 A[16][8], B[8][8], D[16][8];
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
+				const int threadID = warpStart + lane;
+				const int groupID = lane >> 2;
+				const int threadInGroup = lane & 3;
+				for (unsigned i = 0; i < instr.a.array.size(); ++i) {
+					const int row = groupID + (i & 1) * 8, word = threadInGroup + (i / 2) * 4;
+					A[row][word] = getRegAsB32(threadID, instr.a.array[i].reg);
+				}
+				for (unsigned i = 0; i < instr.b.array.size(); ++i) {
+					const int word = threadInGroup + i * 4;
+					B[word][groupID] = getRegAsB32(threadID, instr.b.array[i].reg);
+				}
+				for (unsigned i = 0; i < instr.c.array.size(); ++i) {
+					const int row = groupID + (i / 2) * 8, col = threadInGroup * 2 + (i & 1);
+					D[row][col] = getRegAsB32(threadID, instr.c.array[i].reg);
+				}
+			}
+			for (int row = 0; row < rows; ++row) {
+				for (int col = 0; col < 8; ++col) {
+					for (int word = 0; word < kWords; ++word) {
+						const ir::PTXU32 bits = instr.booleanOperator == ir::PTXInstruction::BoolXor
+							? A[row][word] ^ B[word][col] : A[row][word] & B[word][col];
+						D[row][col] += hydrazine::popc(bits);
+					}
+				}
+			}
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
+				for (unsigned i = 0; i < instr.d.array.size(); ++i) {
+					const int row = (lane >> 2) + (i / 2) * 8, col = (lane & 3) * 2 + (i & 1);
+					setRegAsB32(warpStart + lane, instr.d.array[i].reg, D[row][col]);
+				}
+			}
+		}
+		return;
+	}
+	const bool subByteInput = inputType == ir::PTXOperand::s4 ||
+		inputType == ir::PTXOperand::u4;
+	const bool intInput = subByteInput || inputType == ir::PTXOperand::s8 ||
+		inputType == ir::PTXOperand::u8;
+
+	if (instr.mmaShape == ir::PTXInstruction::MmaM8N8K4 &&
+		inputType == ir::PTXOperand::f64) {
+		for (int warpStart = 0; warpStart < completeThreads; warpStart += WARP_SZ) {
+			int participants = 0;
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
+				if (context.predicated(warpStart + lane, instr)) ++participants;
+			}
+			if (participants == 0) continue;
+			if (participants != WARP_SZ) {
+				throw RuntimeException("mma requires all warp lanes to participate",
+					context.PC, instr);
+			}
+
+			ir::PTXF64 A[8][4], B[4][8], D[8][8];
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
+				const int threadID = warpStart + lane;
+				const int groupID = lane >> 2;
+				const int threadInGroup = lane & 3;
+				A[groupID][threadInGroup] = getRegAsF64(threadID, instr.a.array[0].reg);
+				B[threadInGroup][groupID] = getRegAsF64(threadID, instr.b.array[0].reg);
+				for (int i = 0; i < 2; ++i) {
+					const int col = 2 * threadInGroup + i;
+					D[groupID][col] = getRegAsF64(threadID, instr.c.array[i].reg);
+				}
+			}
+
+			for (int row = 0; row < 8; ++row) {
+				for (int col = 0; col < 8; ++col) {
+					for (int k = 0; k < 4; ++k) {
+						D[row][col] = roundedFma(A[row][k], B[k][col],
+							D[row][col], instr.modifier);
+					}
+				}
+			}
+
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
+				const int threadID = warpStart + lane;
+				const int groupID = lane >> 2;
+				const int threadInGroup = lane & 3;
+				for (int i = 0; i < 2; ++i) {
+					const int col = 2 * threadInGroup + i;
+					setRegAsF64(threadID, instr.d.array[i].reg, D[groupID][col]);
+				}
+			}
+		}
+		return;
+	}
+	if (inputType == ir::PTXOperand::f64) {
+		throw RuntimeException("unsupported f64 mma shape", context.PC, instr);
+	}
+	if (intInput) {
+		// Packed 8-bit and 4-bit integer inputs accumulate into s32.
+		auto signExtend = [](ir::PTXU32 reg, unsigned int elementIndex,
+			ir::PTXOperand::DataType type) -> ir::PTXS32 {
+			const unsigned bits = (type == ir::PTXOperand::s4 ||
+				type == ir::PTXOperand::u4) ? 4 : 8;
+			const ir::PTXU32 field = (reg >> (elementIndex * bits)) & ((1u << bits) - 1);
+			if ((type == ir::PTXOperand::s4 || type == ir::PTXOperand::s8) &&
+				(field & (1u << (bits - 1)))) {
+				return static_cast<ir::PTXS32>(field) - (1 << bits);
+			}
+			return static_cast<ir::PTXS32>(field);
+		};
+
+		auto satfiniteClamp = [&instr](int64_t acc) -> ir::PTXS32 {
+			if (instr.modifier & ir::PTXInstruction::satfinite) {
+				const int64_t upper = (std::numeric_limits<ir::PTXS32>::max)();
+				const int64_t lower = (std::numeric_limits<ir::PTXS32>::min)();
+				if (acc > upper) acc = upper;
+				else if (acc < lower) acc = lower;
+			}
+			return static_cast<ir::PTXS32>(acc);
+		};
+
+		for (int warpStart = 0; warpStart < completeThreads; warpStart += WARP_SZ) {
+			int participants = 0;
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
+				if (context.predicated(warpStart + lane, instr)) {
+					++participants;
+				}
+			}
+			if (participants == 0) continue;
+			if (participants != WARP_SZ) {
+				throw RuntimeException("mma requires all warp lanes to participate",
+					context.PC, instr);
+			}
+
+			if (instr.mmaShape == ir::PTXInstruction::MmaM8N8K16 ||
+				instr.mmaShape == ir::PTXInstruction::MmaM8N8K32) {
+				const int elementsPerRegister = subByteInput ? 8 : 4;
+				const int kCount = subByteInput ? 32 : 16;
+				ir::PTXS32 A[8][32] = {};
+				ir::PTXS32 B[32][8] = {};
+				ir::PTXS32 C[8][8] = {};
+
+				for (int lane = 0; lane < WARP_SZ; ++lane) {
+					int threadID = warpStart + lane;
+					int groupID = lane >> 2;
+					int threadInGroup = lane & 3;
+
+					ir::PTXU32 aReg = operandAsU32(threadID, instr.a.array[0]);
+					for (int i = 0; i < elementsPerRegister; ++i) {
+						A[groupID][threadInGroup * elementsPerRegister + i] =
+							signExtend(aReg, i, instr.a.type);
+					}
+
+					ir::PTXU32 bReg = operandAsU32(threadID, instr.b.array[0]);
+					for (int i = 0; i < elementsPerRegister; ++i) {
+						B[threadInGroup * elementsPerRegister + i][groupID] =
+							signExtend(bReg, i, instr.b.type);
+					}
+
+					for (int i = 0; i < 2; ++i) {
+						C[groupID][threadInGroup * 2 + i] =
+							operandAsS32(threadID, instr.c.array[i]);
+					}
+				}
+
+				ir::PTXS32 D[8][8];
+				for (int row = 0; row < 8; ++row) {
+					for (int col = 0; col < 8; ++col) {
+						int64_t acc = C[row][col];
+						for (int k = 0; k < kCount; ++k) {
+							acc += static_cast<int64_t>(A[row][k]) *
+								static_cast<int64_t>(B[k][col]);
+						}
+						D[row][col] = satfiniteClamp(acc);
+					}
+				}
+
+				for (int lane = 0; lane < WARP_SZ; ++lane) {
+					int threadID = warpStart + lane;
+					int groupID = lane >> 2;
+					int threadInGroup = lane & 3;
+					for (int i = 0; i < 2; ++i) {
+						setRegAsS32(threadID, instr.d.array[i].reg,
+							D[groupID][threadInGroup * 2 + i]);
+					}
+				}
+			}
+			else if ((instr.mmaShape == ir::PTXInstruction::MmaM16N8K32 && !subByteInput) ||
+				instr.mmaShape == ir::PTXInstruction::MmaM16N8K64 ||
+				(instr.mmaSparse && instr.mmaShape == ir::PTXInstruction::MmaM16N8K128)) {
+				const int elementsPerRegister = subByteInput ? 8 : 4;
+				const int kCount = instr.mmaSparse ? (instr.mmaShape == ir::PTXInstruction::MmaM16N8K128 ? 128 :
+					instr.mmaShape == ir::PTXInstruction::MmaM16N8K64 ? 64 : 32) : elementsPerRegister * 8;
+				ir::PTXS32 A[16][128] = {};
+				ir::PTXS32 B[128][8] = {};
+				ir::PTXS32 C[16][8] = {};
+
+				for (int lane = 0; lane < WARP_SZ; ++lane) {
+					int threadID = warpStart + lane;
+					int groupID = lane >> 2;
+					int threadInGroup = lane & 3;
+
+					for (int i = 0; i < instr.a.array.size() * elementsPerRegister; ++i) {
+						int row = ((i / elementsPerRegister) & 1) ? groupID + 8 : groupID;
+						int col = threadInGroup * elementsPerRegister + i % elementsPerRegister +
+							(i >= 2 * elementsPerRegister ? kCount / 2 : 0);
+						if (instr.mmaSparse) {
+							const int rowHalf = (i / elementsPerRegister) & 1, kHalf = i / (2 * elementsPerRegister);
+							const int metadataLane = kCount == (subByteInput ? 128 : 64) ?
+								rowHalf + 2 * kHalf : 2 * instr.mmaSelector.imm_uint + rowHalf;
+							const ir::PTXU32 metadata = operandAsB32(warpStart + groupID * 4 + metadataLane, instr.q);
+							// A 4-bit input index selects two consecutive values.
+							const int valuesPerIndex = subByteInput ? 2 : 1;
+							const int bit = threadInGroup * 8 + ((i % elementsPerRegister) / valuesPerIndex) * 2;
+							const int chunk = (i % elementsPerRegister) / (2 * valuesPerIndex);
+							col = threadInGroup * elementsPerRegister * 2 + chunk * 4 * valuesPerIndex +
+								kHalf * (kCount / 2) + ((metadata >> bit) & 3) * valuesPerIndex + i % valuesPerIndex;
+						}
+						ir::PTXU32 reg = operandAsU32(threadID, instr.a.array[i / elementsPerRegister]);
+						A[row][col] = signExtend(reg, i % elementsPerRegister, instr.a.type);
+					}
+
+					for (int i = 0; i < instr.b.array.size() * elementsPerRegister; ++i) {
+						int row = threadInGroup * elementsPerRegister + i % elementsPerRegister +
+							(i / elementsPerRegister) * (instr.mmaSparse ? elementsPerRegister * 4 : kCount / 2);
+						int col = groupID;
+						ir::PTXU32 reg = operandAsU32(threadID, instr.b.array[i / elementsPerRegister]);
+						B[row][col] = signExtend(reg, i % elementsPerRegister, instr.b.type);
+					}
+
+					for (int i = 0; i < 4; ++i) {
+						int row = groupID + (i >= 2 ? 8 : 0);
+						int col = threadInGroup * 2 + (i & 1);
+						C[row][col] = operandAsS32(threadID, instr.c.array[i]);
+					}
+				}
+
+				ir::PTXS32 D[16][8];
+				for (int row = 0; row < 16; ++row) {
+					for (int col = 0; col < 8; ++col) {
+						int64_t acc = C[row][col];
+						for (int k = 0; k < kCount; ++k) {
+							acc += static_cast<int64_t>(A[row][k]) *
+								static_cast<int64_t>(B[k][col]);
+						}
+						D[row][col] = satfiniteClamp(acc);
+					}
+				}
+
+				for (int lane = 0; lane < WARP_SZ; ++lane) {
+					int threadID = warpStart + lane;
+					int groupID = lane >> 2;
+					int threadInGroup = lane & 3;
+					for (int i = 0; i < 4; ++i) {
+						int row = groupID + (i >= 2 ? 8 : 0);
+						int col = threadInGroup * 2 + (i & 1);
+						setRegAsS32(threadID, instr.d.array[i].reg, D[row][col]);
+					}
+				}
+			}
+			else if (instr.mmaShape == ir::PTXInstruction::MmaM16N8K16 ||
+				(instr.mmaShape == ir::PTXInstruction::MmaM16N8K32 && subByteInput)) {
+				const int elementsPerRegister = subByteInput ? 8 : 4;
+				const int kCount = elementsPerRegister * 4;
+				ir::PTXS32 A[16][32] = {};
+				ir::PTXS32 B[32][8] = {};
+				ir::PTXS32 C[16][8] = {};
+
+				for (int lane = 0; lane < WARP_SZ; ++lane) {
+					int threadID = warpStart + lane;
+					int groupID = lane >> 2;
+					int threadInGroup = lane & 3;
+
+					for (int i = 0; i < 2 * elementsPerRegister; ++i) {
+						int row = (i < elementsPerRegister) ? groupID : groupID + 8;
+						int col = threadInGroup * elementsPerRegister + i % elementsPerRegister;
+						ir::PTXU32 reg = operandAsU32(threadID, instr.a.array[i / elementsPerRegister]);
+						A[row][col] = signExtend(reg, i % elementsPerRegister, instr.a.type);
+					}
+
+					for (int i = 0; i < elementsPerRegister; ++i) {
+						int row = threadInGroup * elementsPerRegister + i;
+						int col = groupID;
+						ir::PTXU32 reg = operandAsU32(threadID, instr.b.array[0]);
+						B[row][col] = signExtend(reg, i, instr.b.type);
+					}
+
+					for (int i = 0; i < 4; ++i) {
+						int row = groupID + (i >= 2 ? 8 : 0);
+						int col = threadInGroup * 2 + (i & 1);
+						C[row][col] = operandAsS32(threadID, instr.c.array[i]);
+					}
+				}
+
+				ir::PTXS32 D[16][8];
+				for (int row = 0; row < 16; ++row) {
+					for (int col = 0; col < 8; ++col) {
+						int64_t acc = C[row][col];
+						for (int k = 0; k < kCount; ++k) {
+							acc += static_cast<int64_t>(A[row][k]) *
+								static_cast<int64_t>(B[k][col]);
+						}
+						D[row][col] = satfiniteClamp(acc);
+					}
+				}
+
+				for (int lane = 0; lane < WARP_SZ; ++lane) {
+					int threadID = warpStart + lane;
+					int groupID = lane >> 2;
+					int threadInGroup = lane & 3;
+					for (int i = 0; i < 4; ++i) {
+						int row = groupID + (i >= 2 ? 8 : 0);
+						int col = threadInGroup * 2 + (i & 1);
+						setRegAsS32(threadID, instr.d.array[i].reg, D[row][col]);
+					}
+				}
+			}
+			else {
+				throw RuntimeException("unsupported integer mma shape",
+					context.PC, instr);
+			}
+		}
+		return;
+	}
+
+	if (instr.mmaShape == ir::PTXInstruction::MmaM8N8K4 &&
+		inputType == ir::PTXOperand::f16) {
+		for (int warp = 0; warp < completeThreads; warp += WARP_SZ) {
+			int participants = 0;
+			for (int lane = 0; lane < WARP_SZ; ++lane) participants += context.predicated(warp + lane, instr);
+			if (!participants) continue;
+			if (participants != WARP_SZ) throw RuntimeException("mma requires all warp lanes to participate", context.PC, instr);
+			// Four independent products: lanes 4*g..4*g+3 and 16+4*g..19+4*g.
+			ir::PTXF32 A[4][8][4], B[4][4][8], D[4][8][8];
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
+				const int group = (lane >> 2) & 3, row = (lane & 3) + (lane >= 16 ? 4 : 0);
+				for (int i = 0; i < 4; ++i) {
+					const int aRow = instr.mmaAColumnMajor ? i + (lane >= 16 ? 4 : 0) : row;
+					const int aCol = instr.mmaAColumnMajor ? lane & 3 : i;
+					const int bRow = instr.mmaBColumnMajor ? i : lane & 3;
+					const int bCol = instr.mmaBColumnMajor ? row : i + (lane >= 16 ? 4 : 0);
+					A[group][aRow][aCol] = mmaHalf(*this, warp + lane, instr.a.array[i / 2], i & 1, inputType);
+					B[group][bRow][bCol] = mmaHalf(*this, warp + lane, instr.b.array[i / 2], i & 1, inputType);
+				}
+				for (int i = 0; i < 8; ++i) {
+					if (instr.c.type == ir::PTXOperand::f32) {
+						const int cRow = (lane & 1) + (i & 2) + (lane >= 16 ? 4 : 0);
+						const int cCol = (i & 4) + (lane & 2) + (i & 1);
+						D[group][cRow][cCol] = operandAsF32(warp + lane, instr.c.array[i]);
+					} else D[group][row][i] = mmaHalf(*this, warp + lane, instr.c.array[i / 2], i & 1, inputType);
+				}
+			}
+			for (int group = 0; group < 4; ++group)
+				for (int row = 0; row < 8; ++row)
+					for (int col = 0; col < 8; ++col)
+						for (int k = 0; k < 4; ++k) {
+							D[group][row][col] = std::fma(A[group][row][k], B[group][k][col], D[group][row][col]);
+							if (instr.type == ir::PTXOperand::f16) D[group][row][col] = f16ToF32(toF16(D[group][row][col], 0));
+						}
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
+				const int group = (lane >> 2) & 3, row = (lane & 3) + (lane >= 16 ? 4 : 0);
+				if (instr.type == ir::PTXOperand::f32) {
+					for (int i = 0; i < 8; ++i) {
+						const int dRow = (lane & 1) + (i & 2) + (lane >= 16 ? 4 : 0);
+						const int dCol = (i & 4) + (lane & 2) + (i & 1);
+						setRegAsF32(warp + lane, instr.d.array[i].reg, D[group][dRow][dCol]);
+					}
+				} else for (int i = 0; i < 4; ++i) setRegAsB32(warp + lane, instr.d.array[i].reg,
+					toF16(D[group][row][2 * i], 0) | (static_cast<ir::PTXU32>(toF16(D[group][row][2 * i + 1], 0)) << 16));
+			}
+		}
+		return;
+	}
+
+	if (instr.mmaShape == ir::PTXInstruction::MmaM8N8K4) {
+		throw RuntimeException("unsupported m8n8k4 input type", context.PC, instr);
+	}
+
+	const bool halfAccumulator = instr.type == ir::PTXOperand::f16;
+	const bool tf32Input = inputType == ir::PTXOperand::tf32;
+	const bool sparseTf32K16 = instr.mmaSparse && tf32Input && instr.mmaShape == ir::PTXInstruction::MmaM16N8K16;
+	const bool m16n8k8 = instr.mmaShape == ir::PTXInstruction::MmaM16N8K8;
+	const bool m16n8k4 = instr.mmaShape == ir::PTXInstruction::MmaM16N8K4;
+	const bool sparseK32 = instr.mmaSparse && instr.mmaShape == ir::PTXInstruction::MmaM16N8K32;
+	for (int warpStart = 0; warpStart < completeThreads; warpStart += WARP_SZ) {
+		int participants = 0;
+		for (int lane = 0; lane < WARP_SZ; ++lane) {
+			if (context.predicated(warpStart + lane, instr)) {
+				++participants;
+			}
+		}
+		if (participants == 0) continue;
+		if (participants != WARP_SZ) {
+			throw RuntimeException("mma requires all warp lanes to participate",
+				context.PC, instr);
+		}
+
+		ir::PTXF32 A[16][32] = {};
+		ir::PTXF32 B[32][8] = {};
+		ir::PTXF32 C[16][8] = {};
+
+		for (int lane = 0; lane < WARP_SZ; ++lane) {
+			int threadID = warpStart + lane;
+			int groupID = lane >> 2;
+			int threadInGroup = lane & 3;
+
+			if (tf32Input) {
+				for (int i = 0; i < (m16n8k4 || (instr.mmaSparse && !sparseTf32K16) ? 2 : 4); ++i) {
+					int row = (i & 1) ? groupID + 8 : groupID;
+					int col = threadInGroup + (i >= 2 ? 4 : 0);
+					if (instr.mmaSparse) {
+						const int metadataLane = sparseTf32K16 ? 2 * instr.mmaSelector.imm_uint + i / 2 : instr.mmaSelector.imm_uint;
+						const int metadataThread = warpStart + groupID * 4 + metadataLane;
+						const ir::PTXU32 metadata = operandAsB32(metadataThread, instr.q);
+						const int bit = (i & 1) * 16 + threadInGroup * 4;
+						// Legal indices 0x4 and 0xe select the first or second TF32 element.
+						col = threadInGroup * 2 + (i / 2) * 8 + ((metadata >> (bit + 3)) & 1);
+					}
+					A[row][col] = tf32FromF32(operandAsF32(threadID,
+						instr.a.array[i]));
+				}
+
+				for (int i = 0; i < (sparseTf32K16 ? 4 : m16n8k4 ? 1 : 2); ++i) {
+					int row = threadInGroup + i * 4;
+					int col = groupID;
+					B[row][col] = tf32FromF32(operandAsF32(threadID,
+						instr.b.array[i]));
+				}
+			}
+			else if (m16n8k8) {
+				for (int i = 0; i < 4; ++i) {
+					int row = i < 2 ? groupID : groupID + 8;
+					int col = threadInGroup * 2 + (i & 1);
+					A[row][col] = mmaHalf(*this, threadID,
+						instr.a.array[i / 2], i & 1, inputType);
+				}
+
+				for (int i = 0; i < 2; ++i) {
+					int row = threadInGroup * 2 + (i & 1);
+					B[row][groupID] = mmaHalf(*this, threadID,
+						instr.b.array[0], i, inputType);
+				}
+			}
+			else if (instr.mmaShape == ir::PTXInstruction::MmaM16N8K16 || sparseK32) {
+				if (instr.mmaSparse) {
+					for (int i = 0; i < (sparseK32 ? 8 : 4); ++i) {
+						const int row = groupID + ((i / 2) & 1) * 8;
+						// The selected pair splits K into two 16-column halves.
+						const int metadataLane = sparseK32 ? 2 * instr.mmaSelector.imm_uint + i / 4 : instr.mmaSelector.imm_uint;
+						const int metadataThread = warpStart + groupID * 4 + metadataLane;
+						const ir::PTXU32 metadata = operandAsB32(metadataThread, instr.q);
+						const int bit = ((i / 2) & 1) * 16 + threadInGroup * 4 + (i & 1) * 2;
+						const int col = threadInGroup * 4 + (i / 4) * 16 + ((metadata >> bit) & 3);
+						A[row][col] = mmaHalf(*this, threadID, instr.a.array[i / 2], i & 1, inputType);
+					}
+				}
+				else for (int i = 0; i < 8; ++i) {
+					int row = (i < 2 || (i >= 4 && i < 6)) ? groupID : groupID + 8;
+					int col = threadInGroup * 2 + (i & 1) + (i >= 4 ? 8 : 0);
+					A[row][col] = mmaHalf(*this, threadID,
+						instr.a.array[i / 2], i & 1, inputType);
+				}
+
+				for (int i = 0; i < (sparseK32 ? 8 : 4); ++i) {
+					int row = threadInGroup * 2 + (i & 1) + (i / 2) * 8;
+					int col = groupID;
+					B[row][col] = mmaHalf(*this, threadID,
+						instr.b.array[i / 2], i & 1, inputType);
+				}
+			}
+
+			for (int i = 0; i < 4; ++i) {
+				int row = groupID + (i >= 2 ? 8 : 0);
+				int col = threadInGroup * 2 + (i & 1);
+				C[row][col] = halfAccumulator
+					? mmaHalf(*this, threadID, instr.c.array[i / 2], i & 1,
+						ir::PTXOperand::f16)
+					: operandAsF32(threadID, instr.c.array[i]);
+			}
+		}
+
+		ir::PTXF32 D[16][8];
+		for (int row = 0; row < 16; ++row) {
+			for (int col = 0; col < 8; ++col) {
+				D[row][col] = C[row][col];
+				for (int k = 0; k < (sparseK32 ? 32 : m16n8k4 ? 4 : m16n8k8 ? 8 : 16); ++k) {
+					D[row][col] = std::fma(A[row][k], B[k][col], D[row][col]);
+					if (halfAccumulator) {
+						D[row][col] = f16ToF32(toF16(D[row][col], instr.modifier));
+					}
+				}
+			}
+		}
+
+		for (int lane = 0; lane < WARP_SZ; ++lane) {
+			int threadID = warpStart + lane;
+			int groupID = lane >> 2;
+			int threadInGroup = lane & 3;
+			if (halfAccumulator) {
+				ir::PTXU32 packed[2] = {0, 0};
+				for (int i = 0; i < 4; ++i) {
+					int row = groupID + (i >= 2 ? 8 : 0);
+					int col = threadInGroup * 2 + (i & 1);
+					packed[i / 2] |= static_cast<ir::PTXU32>(
+						toF16(D[row][col], instr.modifier)) << (16 * (i & 1));
+				}
+				setRegAsB32(threadID, instr.d.array[0].reg, packed[0]);
+				setRegAsB32(threadID, instr.d.array[1].reg, packed[1]);
+			}
+			else for (int i = 0; i < 4; ++i) {
+				int row = groupID + (i >= 2 ? 8 : 0);
+				int col = threadInGroup * 2 + (i & 1);
+				setRegAsF32(threadID, instr.d.array[i].reg,
+					D[row][col]);
+			}
+		}
 	}
 }
 
@@ -4440,19 +5688,101 @@ void executive::CooperativeThreadArray::eval_Isspacep(CTAContext &context,
 
 	trace();
 	switch (instr.addressSpace) {
+	case ir::PTXInstruction::Const:
+	{
+		if (instr.a.type == ir::PTXOperand::u32) {
+			for (int tid = 0; tid < threadCount; tid++) {
+				if (!context.predicated(tid, instr)) continue;
+				ir::PTXU32 ptr = operandAsU32(tid, instr.a);
+				ir::PTXU32 base;
+				hydrazine::bit_cast(base, kernel->ConstMemory);
+				const ir::PTXU32 size = kernel->constMemorySize();
+				setRegAsPredicate(tid, instr.d.reg,
+					addressInRange(ptr, base, size));
+			}
+		}
+		else {
+			for (int tid = 0; tid < threadCount; tid++) {
+				if (!context.predicated(tid, instr)) continue;
+				ir::PTXU64 ptr = operandAsU64(tid, instr.a);
+				ir::PTXU64 base;
+				hydrazine::bit_cast(base, kernel->ConstMemory);
+				const ir::PTXU64 size = kernel->constMemorySize();
+				setRegAsPredicate(tid, instr.d.reg,
+					addressInRange(ptr, base, size));
+			}
+		}
+	}
+		break;
+	case ir::PTXInstruction::Param:
+	{
+		if (instr.a.type == ir::PTXOperand::u32) {
+			const ir::PTXU32 base = static_cast<ir::PTXU32>(kernel->scheduler
+				? kernel->scheduler->argumentMemory()
+				: reinterpret_cast<ir::PTXU64>(kernel->ArgumentMemory));
+			const ir::PTXU32 size = static_cast<ir::PTXU32>(kernel->scheduler
+				? kernel->scheduler->argumentMemorySize()
+				: kernel->argumentMemorySize());
+			for (int tid = 0; tid < threadCount; ++tid) {
+				if (!context.predicated(tid, instr)) continue;
+				const ir::PTXU32 ptr = operandAsU32(tid, instr.a);
+				setRegAsPredicate(tid, instr.d.reg,
+					addressInRange(ptr, base, size));
+			}
+		}
+		else {
+			const ir::PTXU64 base = kernel->scheduler
+				? kernel->scheduler->argumentMemory()
+				: reinterpret_cast<ir::PTXU64>(kernel->ArgumentMemory);
+			const ir::PTXU64 size = kernel->scheduler
+				? kernel->scheduler->argumentMemorySize()
+				: kernel->argumentMemorySize();
+			for (int tid = 0; tid < threadCount; ++tid) {
+				if (!context.predicated(tid, instr)) continue;
+				const ir::PTXU64 ptr = operandAsU64(tid, instr.a);
+				setRegAsPredicate(tid, instr.d.reg,
+					addressInRange(ptr, base, size));
+			}
+		}
+	}
+		break;
 	case ir::PTXInstruction::Local:
 	{
-		if (sizeof(void *) == 4) {
+		if (instr.a.type == ir::PTXOperand::u32) {
+			for (int tid = 0; tid < threadCount; tid++) {
+				if (!context.predicated(tid, instr)) {
+					continue;
+				}
+				const ir::PTXU32 ptr = operandAsU32(tid, instr.a);
+				setRegAsPredicate(tid, instr.d.reg,
+					functionCallStack.isLocalMemoryAddress(ptr, tid, 32));
+			}
+		}
+		else {
+			for (int tid = 0; tid < threadCount; tid++) {
+				if (!context.predicated(tid, instr)) {
+					continue;
+				}
+				const ir::PTXU64 ptr = operandAsU64(tid, instr.a);
+				setRegAsPredicate(tid, instr.d.reg,
+					functionCallStack.isLocalMemoryAddress(ptr, tid, 64));
+			}
+		}
+	}
+		break;
+	case ir::PTXInstruction::Shared:
+	{
+		if (instr.a.type == ir::PTXOperand::u32) {
 			for (int tid = 0; tid < threadCount; tid++) {
 				if (!context.predicated(tid, instr)) {
 					continue;
 				}
 				ir::PTXU32 ptr = operandAsU32(tid, instr.a);
-				ir::PTXU32 localMemPtr;
-				ir::PTXU32 localMemSize = functionCallStack.localMemorySize();
-				hydrazine::bit_cast(localMemPtr,
-					functionCallStack.localMemoryPointer(tid));
-				if (ptr >= localMemPtr && localMemPtr + localMemSize > ptr) {
+				ir::PTXU32 sharedMemPtr;
+				ir::PTXU32 sharedMemSize = functionCallStack.sharedMemorySize();
+				hydrazine::bit_cast(sharedMemPtr,
+					functionCallStack.sharedMemoryPointer());
+				if (addressInRange(ptr, sharedMemPtr, sharedMemSize)) {
 					setRegAsPredicate(tid, instr.d.reg, 1);
 				}
 				else {
@@ -4466,51 +5796,11 @@ void executive::CooperativeThreadArray::eval_Isspacep(CTAContext &context,
 					continue;
 				}
 				ir::PTXU64 ptr = operandAsU64(tid, instr.a);
-				ir::PTXU64 localMemPtr;
-				ir::PTXU64 localMemSize = functionCallStack.localMemorySize();
-				hydrazine::bit_cast(localMemPtr,
-					functionCallStack.localMemoryPointer(tid));
-				if (ptr >= localMemPtr && localMemPtr + localMemSize > ptr) {
-					setRegAsPredicate(tid, instr.d.reg, 1);
-				}
-				else {
-					setRegAsPredicate(tid, instr.d.reg, 0);
-				}
-			}
-		}
-	}
-		break;
-	case ir::PTXInstruction::Shared:
-	{
-		if (sizeof(void *) == 4) {
-			for (int tid = 0; tid < threadCount; tid++) {
-				if (!context.predicated(tid, instr)) {
-					continue;
-				}
-				ir::PTXU32 ptr = operandAsU32(tid, instr.a);
-				ir::PTXU32 sharedMemPtr;
-				ir::PTXU32 sharedMemSize = functionCallStack.sharedMemorySize();
-				hydrazine::bit_cast(sharedMemPtr,
-					functionCallStack.sharedMemoryPointer());
-				if (ptr >= sharedMemPtr && sharedMemPtr + sharedMemSize > ptr) {
-					setRegAsPredicate(tid, instr.d.reg, 1);
-				}
-				else {
-					setRegAsPredicate(tid, instr.d.reg, 0);
-				}
-			}
-		}
-		else {
-			for (int tid = 0; tid < threadCount; tid++) {
-				if (!context.predicated(tid, instr)) {
-					continue;
-				}
-				ir::PTXU64 ptr = operandAsU32(tid, instr.a);
 				ir::PTXU64 sharedMemPtr;
 				ir::PTXU64 sharedMemSize = functionCallStack.sharedMemorySize();
 				hydrazine::bit_cast(sharedMemPtr,
 					functionCallStack.sharedMemoryPointer());
-				if (ptr >= sharedMemPtr && sharedMemPtr + sharedMemSize > ptr) {
+				if (addressInRange(ptr, sharedMemPtr, sharedMemSize)) {
 					setRegAsPredicate(tid, instr.d.reg, 1);
 				}
 				else {
@@ -4522,28 +5812,24 @@ void executive::CooperativeThreadArray::eval_Isspacep(CTAContext &context,
 		break;
 	case ir::PTXInstruction::Global:
 	{
-		if (sizeof(void *) == 4) {
+		if (instr.a.type == ir::PTXOperand::u32) {
 			for (int tid = 0; tid < threadCount; tid++) {
 				if (!context.predicated(tid, instr)) {
 					continue;
 				}
 				ir::PTXU32 ptr = operandAsU32(tid, instr.a);
-				ir::PTXU32 localMemPtr;
-				ir::PTXU32 localMemSize = functionCallStack.localMemorySize();
 				ir::PTXU32 sharedMemPtr;
 				ir::PTXU32 sharedMemSize = functionCallStack.sharedMemorySize();
-				hydrazine::bit_cast(localMemPtr,
-					functionCallStack.localMemoryPointer(tid));
+				ir::PTXU32 constMemPtr;
+				const ir::PTXU32 constMemSize = kernel->constMemorySize();
 				hydrazine::bit_cast(sharedMemPtr,
 					functionCallStack.sharedMemoryPointer());
-				if ((ptr >= sharedMemPtr && sharedMemPtr + sharedMemSize > ptr)
-					|| (ptr >= localMemPtr
-					&& localMemPtr + localMemSize > ptr)) {
-					setRegAsPredicate(tid, instr.d.reg, 0);
-				}
-				else {
-					setRegAsPredicate(tid, instr.d.reg, 1);
-				}
+				hydrazine::bit_cast(constMemPtr, kernel->ConstMemory);
+				const bool inShared = addressInRange(ptr, sharedMemPtr, sharedMemSize);
+				const bool inLocal =
+					functionCallStack.isLocalMemoryAddress(ptr, tid, 32);
+				const bool inConst = addressInRange(ptr, constMemPtr, constMemSize);
+				setRegAsPredicate(tid, instr.d.reg, !(inShared || inLocal || inConst));
 			}
 		}
 		else {
@@ -4552,22 +5838,18 @@ void executive::CooperativeThreadArray::eval_Isspacep(CTAContext &context,
 					continue;
 				}
 				ir::PTXU64 ptr = operandAsU64(tid, instr.a);
-				ir::PTXU64 localMemPtr;
-				ir::PTXU64 localMemSize = functionCallStack.localMemorySize();
 				ir::PTXU64 sharedMemPtr;
 				ir::PTXU64 sharedMemSize = functionCallStack.sharedMemorySize();
-				hydrazine::bit_cast(localMemPtr,
-					functionCallStack.localMemoryPointer(tid));
+				ir::PTXU64 constMemPtr;
+				const ir::PTXU64 constMemSize = kernel->constMemorySize();
 				hydrazine::bit_cast(sharedMemPtr,
 					functionCallStack.sharedMemoryPointer());
-				if ((ptr >= sharedMemPtr && sharedMemPtr + sharedMemSize > ptr)
-					|| (ptr >= localMemPtr
-						&& localMemPtr + localMemSize > ptr)) {
-					setRegAsPredicate(tid, instr.d.reg, 0);
-				}
-				else {
-					setRegAsPredicate(tid, instr.d.reg, 1);
-				}
+				hydrazine::bit_cast(constMemPtr, kernel->ConstMemory);
+				const bool inShared = addressInRange(ptr, sharedMemPtr, sharedMemSize);
+				const bool inLocal =
+					functionCallStack.isLocalMemoryAddress(ptr, tid, 64);
+				const bool inConst = addressInRange(ptr, constMemPtr, constMemSize);
+				setRegAsPredicate(tid, instr.d.reg, !(inShared || inLocal || inConst));
 			}
 		}
 	}
@@ -4952,6 +6234,56 @@ void executive::CooperativeThreadArray::eval_Ld(CTAContext &context,
 /*!
 
 */
+void executive::CooperativeThreadArray::eval_Ldmatrix(CTAContext& context,
+	const ir::PTXInstruction& instr) {
+	trace();
+	const std::string error = instr.valid();
+	if (!error.empty()) throw RuntimeException(error, context.PC, instr);
+	const auto* shared = static_cast<const unsigned char*>(functionCallStack.sharedMemoryPointer());
+	const ir::PTXU64 size = functionCallStack.sharedMemorySize();
+	const int completeThreads = (threadCount / WARP_SZ) * WARP_SZ;
+	for (int threadID = completeThreads; threadID < threadCount; ++threadID) {
+		if (context.predicated(threadID, instr)) {
+			throw RuntimeException("ldmatrix requires all warp lanes to participate",
+				context.PC, instr);
+		}
+	}
+	for (int warpStart = 0; warpStart < completeThreads; warpStart += WARP_SZ) {
+		int participants = 0;
+		for (int lane = 0; lane < WARP_SZ; ++lane) participants += context.predicated(warpStart + lane, instr);
+		if (!participants) continue;
+		if (participants != WARP_SZ)
+			throw RuntimeException("ldmatrix requires all warp lanes to participate", context.PC, instr);
+		ir::PTXU16 matrices[4][8][8];
+		// Build the matrix
+		for (int matrix = 0; matrix < int(instr.vec); ++matrix) {
+			for (int row = 0; row < 8; ++row) {
+				const int supplier = warpStart + matrix * 8 + row;
+				const bool address32 = instr.a.bytes() == 4;
+				ir::PTXU64 offset = address32 ? operandAsU32(supplier, instr.a) : operandAsU64(supplier, instr.a);
+				if (instr.addressSpace == ir::PTXInstruction::Generic) {
+					const auto base = (ir::PTXU64)shared;
+					offset = address32 ? ir::PTXU32(offset - ir::PTXU32(base)) : offset - base;
+				}
+				if ((offset & 15) || offset > size || size - offset < 16)
+					throw RuntimeException("ldmatrix row must be aligned and inside shared memory", context.PC, instr);
+				std::memcpy(matrices[matrix][row], shared + offset, 16);
+			}
+		}
+		for (int lane = 0; lane < WARP_SZ; ++lane) {
+			for (int matrix = 0; matrix < int(instr.vec); ++matrix) {
+				ir::PTXU32 packed = 0;
+				for (int half = 0; half < 2; ++half) {
+					int row = lane / 4, col = lane % 4 * 2 + half;
+					if (instr.matrixTranspose) std::swap(row, col);
+					packed |= ir::PTXU32(matrices[matrix][row][col]) << (16 * half);
+				}
+				setRegAsB32(warpStart + lane, instr.d.array[matrix].reg, packed);
+			}
+		}
+	}
+}
+
 void executive::CooperativeThreadArray::eval_Ldu(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 
@@ -5085,13 +6417,84 @@ void executive::CooperativeThreadArray::eval_Lg2(CTAContext &context,
 	}
 }
 
+void executive::CooperativeThreadArray::eval_Lop3(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	trace();
+	for (int threadID = 0; threadID < threadCount; ++threadID) {
+		if (!context.predicated(threadID, instr)) continue;
+
+		const ir::PTXU32 a = operandAsU32(threadID, instr.a);
+		const ir::PTXU32 b = operandAsU32(threadID, instr.b);
+		const ir::PTXU32 c = operandAsU32(threadID, instr.c);
+		const ir::PTXU32 immLut = operandAsU32(threadID, instr.immLut);
+		ir::PTXU32 d = 0;
+		for (unsigned int bit = 0; bit < 32; ++bit) {
+			const unsigned int aBit = (a >> bit) & 1u;
+			const unsigned int bBit = (b >> bit) & 1u;
+			const unsigned int cBit = (c >> bit) & 1u;
+			const unsigned int index = (aBit << 2) | (bBit << 1) | cBit;
+			const unsigned int resultBit = (immLut >> index) & 1u;
+
+			d |= resultBit << bit;
+		}
+		if( instr.d.addressMode != ir::PTXOperand::BitBucket ) {
+			setRegAsU32(threadID, instr.d.reg, d);
+		}
+		if( instr.pq.addressMode != ir::PTXOperand::Invalid ) {
+			const bool q = operandAsPredicate(threadID, instr.q);
+			const bool p = instr.booleanOperator == ir::PTXInstruction::BoolAnd
+				? d != 0 && q : d != 0 || q;
+			setRegAsPredicate(threadID, instr.pq.reg, p);
+		}
+	}
+}
+
 /*!
 
 */
 void executive::CooperativeThreadArray::eval_Mad24(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
-	throw RuntimeException("instruction not implemented", context.PC, instr);
+	const bool high = instr.modifier & ir::PTXInstruction::hi;
+	if (instr.type == ir::PTXOperand::u32) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			// Operands are the low 24 bits, zero-extended; product is 48 bits.
+			ir::PTXU64 a = operandAsU32(threadID, instr.a) & 0x00ffffff;
+			ir::PTXU64 b = operandAsU32(threadID, instr.b) & 0x00ffffff;
+			ir::PTXU64 t = a * b;
+			ir::PTXU32 c = operandAsU32(threadID, instr.c);
+			ir::PTXU32 d = static_cast<ir::PTXU32>(high ? (t >> 16) : t) + c;
+			setRegAsU32(threadID, instr.d.reg, d);
+		}
+	}
+	else if (instr.type == ir::PTXOperand::s32) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			// Operands are the low 24 bits, sign-extended from bit 23.
+			ir::PTXS64 a = static_cast<ir::PTXS32>(
+				operandAsU32(threadID, instr.a) << 8) >> 8;
+			ir::PTXS64 b = static_cast<ir::PTXS32>(
+				operandAsU32(threadID, instr.b) << 8) >> 8;
+			ir::PTXS64 t = a * b;
+			ir::PTXS64 c = operandAsS32(threadID, instr.c);
+			if (high) {
+				ir::PTXS64 sum = (t >> 16) + c;
+				if (instr.modifier & ir::PTXInstruction::sat) {
+					sum = std::min<ir::PTXS64>(sum, INT_MAX);
+					sum = std::max<ir::PTXS64>(sum, INT_MIN);
+				}
+				setRegAsS32(threadID, instr.d.reg, static_cast<ir::PTXS32>(sum));
+			}
+			else {
+				setRegAsU32(threadID, instr.d.reg,
+					static_cast<ir::PTXU32>(t) + static_cast<ir::PTXU32>(c));
+			}
+		}
+	}
+	else {
+		throw RuntimeException("unsupported data type", context.PC, instr);
+	}
 }
 
 /*!
@@ -5107,10 +6510,83 @@ void executive::CooperativeThreadArray::eval_Mad24(CTAContext &context,
 		d = t<n-1..0> + c;    // for .lo variant
 
 */
+void executive::CooperativeThreadArray::eval_MadC(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	trace();
+	madWithCarry(context, instr, true);
+}
+
+/*!
+	mad.cc / madc: d = t<hi or lo> + c (+ CC.CF); carry-out optionally to CC.CF.
+*/
+void executive::CooperativeThreadArray::madWithCarry(CTAContext &context,
+	const ir::PTXInstruction &instr, bool carryIn) {
+	const bool high = instr.modifier & ir::PTXInstruction::hi;
+	for (int threadID = 0; threadID < threadCount; threadID++) {
+		if (!context.predicated(threadID, instr)) continue;
+		const ir::PTXU32 flag = carryIn ? getRegAsU32(threadID, instr.q.reg) : 0;
+		ir::PTXU32 carry32 = 0;
+		ir::PTXU64 carry64 = 0;
+		switch (instr.type) {
+		case ir::PTXOperand::u32: {
+			ir::PTXU64 product = (ir::PTXU64)operandAsU32(threadID, instr.a)
+				* (ir::PTXU64)operandAsU32(threadID, instr.b);
+			ir::PTXU32 d;
+			addWithCarry<ir::PTXU32>(high ? (ir::PTXU32)(product >> 32) : (ir::PTXU32)product,
+				operandAsU32(threadID, instr.c), flag, d, carry32);
+			setRegAsU32(threadID, instr.d.reg, d);
+			break;
+		}
+		case ir::PTXOperand::s32: {
+			ir::PTXS64 product = (ir::PTXS64)operandAsS32(threadID, instr.a)
+				* (ir::PTXS64)operandAsS32(threadID, instr.b);
+			ir::PTXU32 d;
+			addWithCarry<ir::PTXU32>(high ? (ir::PTXU32)(product >> 32) : (ir::PTXU32)product,
+				(ir::PTXU32)operandAsS32(threadID, instr.c), flag, d, carry32);
+			setRegAsU32(threadID, instr.d.reg, d);
+			break;
+		}
+		case ir::PTXOperand::u64: {
+			ir::PTXU64 a = operandAsU64(threadID, instr.a), b = operandAsU64(threadID, instr.b);
+			ir::PTXU64 hi = 0, lo = 0, d;
+			hydrazine::multiplyHiLo(hi, lo, a, b);
+			addWithCarry<ir::PTXU64>(high ? hi : a * b, operandAsU64(threadID, instr.c),
+				flag, d, carry64);
+			setRegAsU64(threadID, instr.d.reg, d);
+			carry32 = (ir::PTXU32)carry64;
+			break;
+		}
+		case ir::PTXOperand::s64: {
+			ir::PTXS64 a = operandAsS64(threadID, instr.a), b = operandAsS64(threadID, instr.b);
+			ir::PTXS64 hi = 0, lo = 0;
+			ir::PTXU64 d;
+			hydrazine::multiplyHiLo(hi, lo, a, b);
+			addWithCarry<ir::PTXU64>(high ? (ir::PTXU64)hi : (ir::PTXU64)a * (ir::PTXU64)b,
+				(ir::PTXU64)operandAsS64(threadID, instr.c), flag, d, carry64);
+			setRegAsU64(threadID, instr.d.reg, d);
+			carry32 = (ir::PTXU32)carry64;
+			break;
+		}
+		default:
+			throw RuntimeException("invalid datatype", context.PC, instr);
+		}
+		if (instr.carry & ir::PTXInstruction::CC) {
+			setRegAsU32(threadID, instr.pq.reg, carry32);
+		}
+	}
+}
+
 void executive::CooperativeThreadArray::eval_Mad(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
 	ir::PTXOperand::DataType type = instr.type;
+
+	if ((instr.carry & ir::PTXInstruction::CC) && (type == ir::PTXOperand::u32 ||
+		type == ir::PTXOperand::s32 || type == ir::PTXOperand::u64 ||
+		type == ir::PTXOperand::s64)) {
+		madWithCarry(context, instr, false);
+		return;
+	}
 
 	switch (type) {
 	case ir::PTXOperand::u16:
@@ -5283,7 +6759,8 @@ void executive::CooperativeThreadArray::eval_Mad(CTAContext &context,
 				b = ftz(instr.modifier, operandAsF32(threadID, instr.b)),
 				c = ftz(instr.modifier, operandAsF32(threadID, instr.c));
 
-			d = ftz(instr.modifier, sat(instr.modifier, a * b + c));
+			d = ftz(instr.modifier,
+				sat(instr.modifier, roundedFma(a, b, c, instr.modifier)));
 
 			setRegAsF32(threadID, instr.d.reg, d);
 		}
@@ -5297,10 +6774,7 @@ void executive::CooperativeThreadArray::eval_Mad(CTAContext &context,
 				b = operandAsF64(threadID, instr.b),
 				c = operandAsF64(threadID, instr.c);
 
-			d = a * b + c;
-			if (instr.modifier & ir::PTXInstruction::sat) {
-				if (d < 0) d = 0; else if (d > 1) d = 1;
-			}
+			d = roundedFma(a, b, c, instr.modifier);
 			setRegAsF64(threadID, instr.d.reg, d);
 		}
 	} break;
@@ -5319,24 +6793,10 @@ void executive::CooperativeThreadArray::eval_Max(CTAContext &context,
 	if (instr.type == ir::PTXOperand::f32) {
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
-
-			ir::PTXF32 d, a = operandAsF32(threadID, instr.a),
+			ir::PTXF32 a = operandAsF32(threadID, instr.a),
 				b = operandAsF32(threadID, instr.b);
-
-			if(hydrazine::isnan(a))
-			{
-				d = ftz(instr.modifier, b);
-			}
-			else if(hydrazine::isnan(b))
-			{
-				d = ftz(instr.modifier, a);
-			}
-			else
-			{
-				d = ftz(instr.modifier, a > b ? a : b);
-			}
-
-			setRegAsF32(threadID, instr.d.reg, d);
+			setRegAsF32(threadID, instr.d.reg,
+				minMaxF32(instr.modifier, a, b, true));
 		}
 	}
 	else if (instr.type == ir::PTXOperand::f64) {
@@ -5354,12 +6814,42 @@ void executive::CooperativeThreadArray::eval_Max(CTAContext &context,
 			{
 				d = a;
 			}
+			else if (a == 0 && b == 0)
+			{
+				d = std::signbit(a) ? b : a;
+			}
 			else
 			{
 				d = (a > b ? a : b);
 			}
 
 			setRegAsF64(threadID, instr.d.reg, d);
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f16 || instr.type == ir::PTXOperand::bf16) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+
+			ir::PTXU16 d = minMaxHalf(instr.type, instr.modifier,
+				operandAsU16(threadID, instr.a), operandAsU16(threadID, instr.b), true);
+
+			setRegAsB16(threadID, instr.d.reg, d);
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f16x2 || instr.type == ir::PTXOperand::bf16x2) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			const ir::PTXU32 a = operandAsU32(threadID, instr.a);
+			const ir::PTXU32 b = operandAsU32(threadID, instr.b);
+			const ir::PTXU16 aLow = static_cast<ir::PTXU16>(a);
+			const ir::PTXU16 aHigh = static_cast<ir::PTXU16>(a >> 16);
+			const ir::PTXU16 bLow = static_cast<ir::PTXU16>(b);
+			const ir::PTXU16 bHigh = static_cast<ir::PTXU16>(b >> 16);
+			const ir::PTXU32 low = static_cast<ir::PTXU32>(
+				minMaxHalf(instr.type, instr.modifier, aLow, bLow, true));
+			const ir::PTXU32 high = static_cast<ir::PTXU32>(
+				minMaxHalf(instr.type, instr.modifier, aHigh, bHigh, true));
+			setRegAsU32(threadID, instr.d.reg, low | (high << 16));
 		}
 	}
 	else if (instr.type == ir::PTXOperand::s16) {
@@ -5433,27 +6923,36 @@ void executive::CooperativeThreadArray::eval_Max(CTAContext &context,
 void executive::CooperativeThreadArray::eval_Min(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
-	if (instr.type == ir::PTXOperand::f32) {
+	if (instr.type == ir::PTXOperand::f16 || instr.type == ir::PTXOperand::bf16) {
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
-
-			ir::PTXF32 d, a = operandAsF32(threadID, instr.a),
+			setRegAsB16(threadID, instr.d.reg, minMaxHalf(instr.type, instr.modifier,
+				operandAsU16(threadID, instr.a), operandAsU16(threadID, instr.b), false));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f16x2 || instr.type == ir::PTXOperand::bf16x2) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			const ir::PTXU32 a = operandAsU32(threadID, instr.a);
+			const ir::PTXU32 b = operandAsU32(threadID, instr.b);
+			const ir::PTXU16 aLow = static_cast<ir::PTXU16>(a);
+			const ir::PTXU16 aHigh = static_cast<ir::PTXU16>(a >> 16);
+			const ir::PTXU16 bLow = static_cast<ir::PTXU16>(b);
+			const ir::PTXU16 bHigh = static_cast<ir::PTXU16>(b >> 16);
+			const ir::PTXU32 low = static_cast<ir::PTXU32>(
+				minMaxHalf(instr.type, instr.modifier, aLow, bLow, false));
+			const ir::PTXU32 high = static_cast<ir::PTXU32>(
+				minMaxHalf(instr.type, instr.modifier, aHigh, bHigh, false));
+			setRegAsU32(threadID, instr.d.reg, low | (high << 16));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f32) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			ir::PTXF32 a = operandAsF32(threadID, instr.a),
 				b = operandAsF32(threadID, instr.b);
-
-			if(hydrazine::isnan(a))
-			{
-				d = ftz(instr.modifier, b);
-			}
-			else if(hydrazine::isnan(b))
-			{
-				d = ftz(instr.modifier, a);
-			}
-			else
-			{
-				d = ftz(instr.modifier, (a < b ? a : b));
-			}
-
-			setRegAsF32(threadID, instr.d.reg, d);
+			setRegAsF32(threadID, instr.d.reg,
+				minMaxF32(instr.modifier, a, b, false));
 		}
 	}
 	else if (instr.type == ir::PTXOperand::f64) {
@@ -5470,6 +6969,10 @@ void executive::CooperativeThreadArray::eval_Min(CTAContext &context,
 			else if(hydrazine::isnan(b))
 			{
 				d = a;
+			}
+			else if (a == 0 && b == 0)
+			{
+				d = std::signbit(a) ? a : b;
 			}
 			else
 			{
@@ -5552,11 +7055,75 @@ void executive::CooperativeThreadArray::eval_Membar(CTAContext &context, const i
 	/*! No need to do anything here. */
 }
 
+/*!
+
+*/
+void executive::CooperativeThreadArray::eval_Fence(CTAContext &context, const ir::PTXInstruction &instr) {
+	trace();
+	/*! No need to do anything here -- see eval_Membar; this simulator executes
+		every instruction to completion for every thread before the next one
+		starts, so there is no reordering for fence to guard against. */
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 /*!
 
 */
+void executive::CooperativeThreadArray::eval_Activemask(CTAContext& context,
+	const ir::PTXInstruction& instr) {
+	trace();
+	const std::string error = instr.valid();
+	if (!error.empty()) throw RuntimeException(error, context.PC, instr);
+	for (int warpStart = 0; warpStart < threadCount; warpStart += WARP_SZ) {
+		ir::PTXU32 mask = 0;
+		const int lanes = min(WARP_SZ, threadCount - warpStart);
+		for (int lane = 0; lane < lanes; ++lane)
+			if (context.predicated(warpStart + lane, instr)) mask |= ir::PTXU32(1) << lane;
+		for (int lane = 0; lane < lanes; ++lane)
+			if (context.predicated(warpStart + lane, instr)) setRegAsB32(warpStart + lane, instr.d.reg, mask);
+	}
+}
+
+void executive::CooperativeThreadArray::eval_Movmatrix(CTAContext& context,
+	const ir::PTXInstruction& instr) {
+	trace();
+	const std::string error = instr.valid();
+	if (!error.empty()) throw RuntimeException(error, context.PC, instr);
+	const int completeThreads = (threadCount / WARP_SZ) * WARP_SZ;
+	for (int threadID = completeThreads; threadID < threadCount; ++threadID) {
+		if (context.predicated(threadID, instr)) {
+			throw RuntimeException("movmatrix requires all warp lanes to participate",
+				context.PC, instr);
+		}
+	}
+	for (int warpStart = 0; warpStart < completeThreads; warpStart += WARP_SZ) {
+		int participants = 0;
+		for (int lane = 0; lane < WARP_SZ; ++lane) participants += context.predicated(warpStart + lane, instr);
+		if (!participants) continue;
+		if (participants != WARP_SZ)
+			throw RuntimeException("movmatrix requires all warp lanes to participate", context.PC, instr);
+		ir::PTXU16 matrix[8][8];
+		// Gather all source fragments before writing potentially aliased destinations.
+		for (int row = 0; row < 8; ++row) {
+			for (int col = 0; col < 8; col += 2) {
+				const int lane = row * 4 + col / 2;
+				const ir::PTXU32 packed = operandAsB32(warpStart + lane, instr.a);
+				matrix[row][col] = ir::PTXU16(packed);
+				matrix[row][col + 1] = ir::PTXU16(packed >> 16);
+			}
+		}
+		for (int lane = 0; lane < WARP_SZ; ++lane) {
+			ir::PTXU32 packed = 0;
+			for (int half = 0; half < 2; ++half) {
+				const int row = lane / 4, col = (lane % 4) * 2 + half;
+				packed |= ir::PTXU32(matrix[col][row]) << (16 * half);
+			}
+			setRegAsB32(warpStart + lane, instr.d.reg, packed);
+		}
+	}
+}
+
 void executive::CooperativeThreadArray::eval_Mov(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
@@ -5794,6 +7361,23 @@ void executive::CooperativeThreadArray::eval_Mov_sreg(CTAContext &context,
 			setRegAsS32(threadID, instr.d.reg, d);
 		}
 	}
+	else if (instr.type == ir::PTXOperand::u64 || instr.type == ir::PTXOperand::b64) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			ir::PTXU64 d;
+			if (instr.a.special == ir::PTXOperand::globalTimer) {
+				d = std::chrono::duration_cast<std::chrono::nanoseconds>(
+					std::chrono::steady_clock::now().time_since_epoch()).count();
+			}
+			else if (instr.a.special == ir::PTXOperand::clock64) {
+				d = clock;
+			}
+			else {
+				d = getSpecialValue(threadID, instr.a.special, instr.a.vIndex);
+			}
+			setRegAsU64(threadID, instr.d.reg, d);
+		}
+	}
 	else {
 		throw RuntimeException("unsupported data type", context.PC, instr);
 	}
@@ -5811,6 +7395,12 @@ void executive::CooperativeThreadArray::eval_Mov_imm(CTAContext &context,
 			{
 				ir::PTXU16 a = operandAsU16(threadID, instr.a);
 				setRegAsU16(threadID, instr.d.reg, a);
+			}
+			break;
+		case ir::PTXOperand::f16:
+			{
+				ir::PTXU16 a = operandAsU16(threadID, instr.a);
+				setRegAsB16(threadID, instr.d.reg, a);
 			}
 			break;
 		case ir::PTXOperand::u32:
@@ -5887,57 +7477,29 @@ void executive::CooperativeThreadArray::eval_Mov_func(CTAContext &context,
 */
 void executive::CooperativeThreadArray::eval_Mul24(CTAContext &context, const ir::PTXInstruction &instr) {
 	trace();
-
+	const bool high = instr.modifier & ir::PTXInstruction::hi;
 	if (instr.type == ir::PTXOperand::u32) {
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
-
-			ir::PTXU64 a = operandAsU32(threadID, instr.a), b = operandAsU32(threadID, instr.b);
-			ir::PTXU64 dw = ( a & 0x00ffffff ) * ( b & 0x00ffffff );
-			ir::PTXU32 d;
-			if (instr.modifier & ir::PTXInstruction::hi) {
-				d = ((dw >> 12) & 0xffffffff);
-			}
-			else {
-				d = (dw & 0xffffffff);
-			}
-			setRegAsU32(threadID, instr.d.reg, d);
-
+			// Operands are the low 24 bits, zero-extended; product is 48 bits.
+			ir::PTXU64 a = operandAsU32(threadID, instr.a) & 0x00ffffff;
+			ir::PTXU64 b = operandAsU32(threadID, instr.b) & 0x00ffffff;
+			ir::PTXU64 t = a * b;
+			setRegAsU32(threadID, instr.d.reg,
+				static_cast<ir::PTXU32>(high ? (t >> 16) : t));
 		}
 	}
 	else if (instr.type == ir::PTXOperand::s32) {
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
-
-			ir::PTXS64 a = operandAsS32(threadID, instr.a), b = operandAsS32(threadID, instr.b);
-
-			if( a < 0 )
-			{
-				a |= 0xffffffffff000000ULL;
-			}
-			else
-			{
-				a &= 0x00ffffff;
-			}
-			if( b < 0 )
-			{
-				b |= 0xffffffffff000000ULL;
-			}
-			else
-			{
-				b &= 0x00ffffff;
-			}
-
-			ir::PTXS64 dw = a * b;
-			ir::PTXS32 d;
-			if (instr.modifier & ir::PTXInstruction::hi) {
-				d = ((dw >> 12) & 0xffffffff);
-			}
-			else {
-				d = dw;
-			}
-			setRegAsS32(threadID, instr.d.reg, d);
-
+			// Operands are the low 24 bits, sign-extended from bit 23.
+			ir::PTXS64 a = static_cast<ir::PTXS32>(
+				operandAsU32(threadID, instr.a) << 8) >> 8;
+			ir::PTXS64 b = static_cast<ir::PTXS32>(
+				operandAsU32(threadID, instr.b) << 8) >> 8;
+			ir::PTXS64 t = a * b;
+			setRegAsU32(threadID, instr.d.reg,
+				static_cast<ir::PTXU32>(high ? (t >> 16) : t));
 		}
 	}
 	else {
@@ -5950,13 +7512,47 @@ void executive::CooperativeThreadArray::eval_Mul24(CTAContext &context, const ir
 */
 void executive::CooperativeThreadArray::eval_Mul(CTAContext &context, const ir::PTXInstruction &instr) {
 	trace();
-	if (instr.type == ir::PTXOperand::f32) {
+	if (instr.type == ir::PTXOperand::f16x2) {
+		const int effectiveModifier = instr.modifier | ir::PTXInstruction::rn;
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			ir::PTXU32 a = operandAsU32(threadID, instr.a);
+			ir::PTXU32 b = operandAsU32(threadID, instr.b);
+			ir::PTXU16 al = static_cast<ir::PTXU16>(a), ah = a >> 16;
+			ir::PTXU16 bl = static_cast<ir::PTXU16>(b), bh = b >> 16;
+			ir::PTXU16 dl = ftzF16(effectiveModifier, toF16(
+				roundedMul(f16ToF32(ftzF16(effectiveModifier, al)),
+					f16ToF32(ftzF16(effectiveModifier, bl)), effectiveModifier),
+				effectiveModifier));
+			ir::PTXU16 dh = ftzF16(effectiveModifier, toF16(
+				roundedMul(f16ToF32(ftzF16(effectiveModifier, ah)),
+					f16ToF32(ftzF16(effectiveModifier, bh)), effectiveModifier),
+				effectiveModifier));
+			setRegAsU32(threadID, instr.d.reg, static_cast<ir::PTXU32>(dl) |
+				(static_cast<ir::PTXU32>(dh) << 16));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f16) {
+		const int effectiveModifier = instr.modifier | ir::PTXInstruction::rn;
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+
+			ir::PTXF32 a = f16ToF32(ftzF16(effectiveModifier,
+				operandAsU16(threadID, instr.a)));
+			ir::PTXF32 b = f16ToF32(ftzF16(effectiveModifier,
+				operandAsU16(threadID, instr.b)));
+			ir::PTXU16 d = toF16(roundedMul(a, b, effectiveModifier), effectiveModifier);
+			setRegAsB16(threadID, instr.d.reg, ftzF16(effectiveModifier, d));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f32) {
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
 
 			ir::PTXF32 d, a = ftz(instr.modifier, operandAsF32(threadID, instr.a)),
 				b = ftz(instr.modifier, operandAsF32(threadID, instr.b));
-			d = ftz(instr.modifier, sat(instr.modifier, a * b));
+			d = ftz(instr.modifier, sat(instr.modifier,
+				roundedMul(a, b, instr.modifier)));
 			setRegAsF32(threadID, instr.d.reg, d);
 		}
 	}
@@ -5965,7 +7561,7 @@ void executive::CooperativeThreadArray::eval_Mul(CTAContext &context, const ir::
 			if (!context.predicated(threadID, instr)) continue;
 
 			ir::PTXF64 d, a = operandAsF64(threadID, instr.a), b = operandAsF64(threadID, instr.b);
-			d = a * b;
+			d = roundedMul(a, b, instr.modifier);
 			setRegAsF64(threadID, instr.d.reg, d);
 		}
 	}
@@ -6113,7 +7709,37 @@ void executive::CooperativeThreadArray::eval_Mul(CTAContext &context, const ir::
 */
 void executive::CooperativeThreadArray::eval_Neg(CTAContext &context, const ir::PTXInstruction &instr) {
 	trace();
-	if (instr.type == ir::PTXOperand::f32) {
+	if (instr.type == ir::PTXOperand::f16x2 || instr.type == ir::PTXOperand::bf16x2) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			ir::PTXU32 a = operandAsU32(threadID, instr.a);
+			a = static_cast<ir::PTXU32>(ftzF16(instr.modifier,
+				static_cast<ir::PTXU16>(a))) |
+				(static_cast<ir::PTXU32>(ftzF16(instr.modifier, a >> 16)) << 16);
+			setRegAsU32(threadID, instr.d.reg, a ^ 0x80008000u);
+		}
+	}
+	else if (instr.type == ir::PTXOperand::bf16) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+
+			ir::PTXF32 a = ftz(instr.modifier,
+				bf16ToF32(operandAsU16(threadID, instr.a)));
+			ir::PTXU16 d = f32ToBF16Rn(-a);
+			setRegAsB16(threadID, instr.d.reg, d);
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f16) {
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+
+			ir::PTXF32 a = f16ToF32(ftzF16(instr.modifier,
+				operandAsU16(threadID, instr.a)));
+			ir::PTXU16 d = toF16(-a, instr.modifier);
+			setRegAsB16(threadID, instr.d.reg, ftzF16(instr.modifier, d));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f32) {
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
 
@@ -6136,7 +7762,7 @@ void executive::CooperativeThreadArray::eval_Neg(CTAContext &context, const ir::
 			if (!context.predicated(threadID, instr)) continue;
 
 			ir::PTXS16 d, a = operandAsS16(threadID, instr.a);
-			d = -a;
+			d = a == (std::numeric_limits<ir::PTXS16>::min)() ? a : -a;
 			setRegAsS16(threadID, instr.d.reg, d);
 		}
 	}
@@ -6145,7 +7771,7 @@ void executive::CooperativeThreadArray::eval_Neg(CTAContext &context, const ir::
 			if (!context.predicated(threadID, instr)) continue;
 
 			ir::PTXS32 d, a = operandAsS32(threadID, instr.a);
-			d = -a;
+			d = a == (std::numeric_limits<ir::PTXS32>::min)() ? a : -a;
 			setRegAsS32(threadID, instr.d.reg, d);
 		}
 	}
@@ -6154,7 +7780,7 @@ void executive::CooperativeThreadArray::eval_Neg(CTAContext &context, const ir::
 			if (!context.predicated(threadID, instr)) continue;
 
 			ir::PTXS64 d, a = operandAsS64(threadID, instr.a);
-			d = -a;
+			d = a == (std::numeric_limits<ir::PTXS64>::min)() ? a : -a;
 			setRegAsS64(threadID, instr.d.reg, d);
 		}
 	}
@@ -6293,6 +7919,405 @@ void executive::CooperativeThreadArray::eval_Popc(CTAContext &context,
 	}
 	else {
 		throw RuntimeException("unsupported data type", context.PC, instr);
+	}
+}
+
+static double wmmaElement(executive::CooperativeThreadArray& cta, int warpStart,
+	const ir::PTXOperand& fragment, unsigned int element) {
+	const auto type = fragment.type;
+	unsigned int elementBits = ir::PTXOperand::bytes(type) * 8;
+	if (type == ir::PTXOperand::b1) elementBits = 1;
+	else if (type == ir::PTXOperand::s4 || type == ir::PTXOperand::u4) elementBits = 4;
+
+	// FP64 uses one element per 64-bit register; all other containers are 32-bit.
+	unsigned int elementsPerRegister = 1;
+	if (elementBits != 64) elementsPerRegister = 32 / elementBits;
+	const unsigned int registerIndex = element / elementsPerRegister;
+	const unsigned int registersPerThread = fragment.array.size();
+	const int thread = warpStart + registerIndex / registersPerThread;
+	const auto& reg = fragment.array[registerIndex % registersPerThread];
+	if (type == ir::PTXOperand::f64) {
+		const ir::PTXU64 raw = cta.operandAsU64(thread, reg);
+		return hydrazine::bit_cast<double>(raw);
+	}
+
+	const unsigned int elementInRegister = element % elementsPerRegister;
+	const unsigned int shift = elementInRegister * elementBits;
+	const ir::PTXU64 mask = (ir::PTXU64(1) << elementBits) - 1;
+	const ir::PTXU64 raw = (cta.operandAsB32(thread, reg) >> shift) & mask;
+	switch (type) {
+	case ir::PTXOperand::f16:
+		return f16ToF32(raw);
+	case ir::PTXOperand::bf16:
+		return hydrazine::bit_cast<float>(ir::PTXU32(raw << 16));
+	case ir::PTXOperand::f32:
+		return hydrazine::bit_cast<float>(ir::PTXU32(raw));
+	case ir::PTXOperand::tf32:
+		return tf32FromF32(hydrazine::bit_cast<float>(ir::PTXU32(raw)));
+	case ir::PTXOperand::s4:
+	case ir::PTXOperand::s8:
+	case ir::PTXOperand::s32: {
+		const ir::PTXU64 signBit = ir::PTXU64(1) << (elementBits - 1);
+		ir::PTXS64 value = raw;
+		if (raw & signBit) value -= ir::PTXS64(1) << elementBits;
+		return value;
+	}
+	default:
+		return raw; // Unsigned integer or single-bit element.
+	}
+}
+
+void executive::CooperativeThreadArray::eval_WmmaMma(CTAContext &context, const ir::PTXInstruction &instr) {
+	trace();
+	constexpr unsigned int bitsPerByte = 8;
+	unsigned int m, n, k;
+	instr.wmmaDimensions(m, n, k);
+	const unsigned int elementBits = ir::PTXOperand::bytes(instr.type) * bitsPerByte;
+	unsigned int elementsPerRegister = 1;
+	if (instr.type != ir::PTXOperand::f64) {
+		elementsPerRegister = sizeof(ir::PTXU32) * bitsPerByte / elementBits;
+	}
+	const bool bitOperation = instr.a.type == ir::PTXOperand::b1;
+	auto rounding = instr.modifier;
+	if (!rounding) rounding = ir::PTXInstruction::rn;
+	for (int warp = 0; warp < threadCount; warp += WARP_SZ) {
+		int participants = 0;
+		for (int lane = 0; lane < min(WARP_SZ, threadCount - warp); ++lane) {
+			participants += context.predicated(warp+lane,instr);
+		}
+		if (!participants) continue;
+		if (participants != WARP_SZ) { report("warning: wmma.mma requires a complete participating warp; undefined behavior"); continue; }
+		std::vector<double> A(m*k), B(k*n), C(m*n);
+		for (unsigned int i = 0; i < A.size(); ++i) {
+			A[i] = wmmaElement(*this,warp,instr.a,i);
+		}
+		for (unsigned int i = 0; i < B.size(); ++i) {
+			B[i] = wmmaElement(*this,warp,instr.b,i);
+		}
+		for (unsigned int i = 0; i < C.size(); ++i) {
+			C[i] = wmmaElement(*this,warp,instr.c,i);
+		}
+		std::vector<ir::PTXU64> results(WARP_SZ * instr.d.array.size(), 0);
+		for (unsigned int row = 0; row < m; ++row) {
+			for (unsigned int col = 0; col < n; ++col) {
+				const unsigned int element = row * n + col;
+				ir::PTXU64 raw;
+				if (instr.type == ir::PTXOperand::s32) {
+					ir::PTXS64 sum = C[element];
+					for (unsigned int inner = 0; inner < k; ++inner) {
+						const ir::PTXS64 a = A[row * k + inner];
+						const ir::PTXS64 b = B[inner * n + col];
+						if (!bitOperation) {
+							sum += a * b;
+						} else if (instr.booleanOperator == ir::PTXInstruction::BoolXor) {
+							sum += a ^ b;
+						} else {
+							sum += a & b;
+						}
+					}
+					if (instr.modifier & ir::PTXInstruction::satfinite) {
+						if (sum > INT32_MAX) sum = INT32_MAX;
+						else if (sum < INT32_MIN) sum = INT32_MIN;
+					}
+					raw = ir::PTXU32(sum);
+				} else if (instr.type == ir::PTXOperand::f64) {
+					double sum = C[element];
+					for (unsigned int inner = 0; inner < k; ++inner) {
+						sum = roundedFma(A[row * k + inner], B[inner * n + col], sum, rounding);
+					}
+					raw = hydrazine::bit_cast<ir::PTXU64>(sum);
+				} else {
+					float sum = C[element];
+					for (unsigned int inner = 0; inner < k; ++inner) {
+						sum = roundedFma(float(A[row * k + inner]), float(B[inner * n + col]),
+							sum, ir::PTXInstruction::rn);
+					}
+					if (instr.type == ir::PTXOperand::f16) {
+						raw = toF16(sum, ir::PTXInstruction::rn);
+					} else {
+						raw = hydrazine::bit_cast<ir::PTXU32>(sum);
+					}
+				}
+				const unsigned int registerIndex = element / elementsPerRegister;
+				const unsigned int elementInRegister = element % elementsPerRegister;
+				const unsigned int shift = elementInRegister * elementBits;
+				results[registerIndex] |= raw << shift;
+			}
+		}
+		for (int lane = 0; lane < WARP_SZ; ++lane) {
+			for (unsigned int reg = 0; reg < instr.d.array.size(); ++reg) {
+				const auto value = results[lane*instr.d.array.size()+reg];
+				if (elementBits == 64) setRegAsB64(warp+lane,instr.d.array[reg].reg,value); else setRegAsB32(warp+lane,instr.d.array[reg].reg,value);
+			}
+		}
+	}
+}
+
+void executive::CooperativeThreadArray::eval_WmmaMemory(CTAContext &context, const ir::PTXInstruction &instr) {
+	trace();
+	constexpr unsigned int bitsPerByte = 8; // PTX bytes are 8 bits.
+	constexpr unsigned int registerBits = sizeof(ir::PTXU32) * bitsPerByte;
+	const bool wideRegisters = instr.type == ir::PTXOperand::f64;
+	const bool store = instr.opcode == ir::PTXInstruction::WmmaStoreD;
+	const auto& fragment = store ? instr.a : instr.d;
+	const auto& address = store ? instr.d : instr.a;
+	unsigned int m, n, k;
+	instr.wmmaDimensions(m, n, k);
+	unsigned int rows = m, cols = n; // C and D are M x N.
+	if (instr.opcode == ir::PTXInstruction::WmmaLoadA) cols = k;
+	else if (instr.opcode == ir::PTXInstruction::WmmaLoadB) rows = k;
+
+	unsigned int elementBits;
+	if (instr.type == ir::PTXOperand::b1) elementBits = 1;
+	else if (instr.type == ir::PTXOperand::s4 || instr.type == ir::PTXOperand::u4) elementBits = 4;
+	else elementBits = ir::PTXOperand::bytes(instr.type) * bitsPerByte;
+	unsigned int elementsPerRegister = 1;
+	if (!wideRegisters) elementsPerRegister = registerBits / elementBits;
+	const unsigned int registersPerThread = fragment.array.size();
+	const unsigned int leadingElements = instr.mmaAColumnMajor ? rows : cols;
+	const unsigned int leadingCount = instr.mmaAColumnMajor ? cols : rows;
+
+	auto* shared = (unsigned char*)functionCallStack.sharedMemoryPointer();
+	const ir::PTXU64 sharedSize = functionCallStack.sharedMemorySize();
+	const bool address32 = address.bytes() == sizeof(ir::PTXU32);
+	const auto pointer = [&](int thread) -> ir::PTXU64 {
+		if (address32) return operandAsU32(thread, address);
+		return operandAsU64(thread, address);
+	};
+	const auto readStride = [&](int thread) -> ir::PTXU32 {
+		if (instr.b.addressMode == ir::PTXOperand::Invalid) return leadingElements;
+		return operandAsU32(thread, instr.b);
+	};
+	for (int warp = 0; warp < threadCount; warp += WARP_SZ) {
+		const int lanes = min(WARP_SZ, threadCount - warp);
+		int participants = 0;
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (context.predicated(warp + lane, instr)) ++participants;
+		}
+		if (!participants) continue;
+		if (participants != WARP_SZ) {
+			report("warning: WMMA memory operation requires a complete participating warp; undefined behavior");
+			continue;
+		}
+		ir::PTXU64 base = pointer(warp);
+		const ir::PTXU64 stride = readStride(warp);
+		bool uniform = true;
+		for (int lane = 1; lane < WARP_SZ; ++lane) {
+			const int thread = warp + lane;
+			if (pointer(thread) != base || readStride(thread) != stride) {
+				uniform = false;
+				break;
+			}
+		}
+		if (!uniform || stride < leadingElements) {
+			report("warning: WMMA addresses/strides disagree or stride is too small; undefined behavior");
+			continue;
+		}
+		bool sharedAccess = instr.addressSpace == ir::PTXInstruction::Shared;
+		if (instr.addressSpace == ir::PTXInstruction::Generic) {
+			ir::PTXU64 offset = base - (ir::PTXU64)shared;
+			if (address32) offset = ir::PTXU32(offset);
+			if (address.addressMode == ir::PTXOperand::Address && base < sharedSize) {
+				sharedAccess = true; // Named shared symbols are already offsets.
+			} else if (offset < sharedSize) {
+				sharedAccess = true;
+				base = offset;
+			}
+		}
+		// The last row/column may be separated from its predecessor by padding.
+		const ir::PTXU64 extentElements = (leadingCount - 1) * stride + leadingElements;
+		const ir::PTXU64 extentBytes = (extentElements * elementBits + bitsPerByte - 1) / bitsPerByte;
+		if (sharedAccess && (base > sharedSize || extentBytes > sharedSize - base)) {
+			report("warning: WMMA matrix exceeds shared memory; undefined behavior");
+			continue;
+		}
+		unsigned char* memory;
+		if (sharedAccess) memory = shared + base;
+		else memory = (unsigned char*)base;
+		std::vector<ir::PTXU64> values(WARP_SZ * registersPerThread, 0);
+		if (store) { // Gather source registers before changing memory.
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
+				for (unsigned int reg = 0; reg < registersPerThread; ++reg) {
+					const int thread = warp + lane;
+					const auto& operand = fragment.array[reg];
+					if (wideRegisters) values[lane * registersPerThread + reg] = operandAsU64(thread, operand);
+					else values[lane * registersPerThread + reg] = operandAsB32(thread, operand);
+				}
+			}
+		}
+		// Emulator-owned row-major fragments; redundant FP16 slots repeat matrix elements.
+		for (int lane = 0; lane < WARP_SZ; ++lane) {
+			for (unsigned int reg = 0; reg < registersPerThread; ++reg) {
+				for (unsigned int part = 0; part < elementsPerRegister; ++part) {
+					const unsigned int registerIndex = lane * registersPerThread + reg;
+					const unsigned int index = (registerIndex * elementsPerRegister + part) % (rows * cols);
+					const unsigned int row = index / cols;
+					const unsigned int col = index % cols;
+					ir::PTXU64 position;
+					if (instr.mmaAColumnMajor) position = col * stride + row;
+					else position = row * stride + col;
+					position *= elementBits;
+					const ir::PTXU64 byteOffset = position / bitsPerByte;
+					const unsigned int elementBytes = elementBits / bitsPerByte;
+					const unsigned int registerShift = part * elementBits;
+					ir::PTXU64 value = 0;
+					if (store) {
+						value = values[registerIndex] >> registerShift;
+						std::memcpy(memory + byteOffset, &value, elementBytes);
+					} else {
+						if (elementBits < bitsPerByte) {
+							const unsigned int bitOffset = position % bitsPerByte;
+							const unsigned int elementMask = (1U << elementBits) - 1;
+							value = (memory[byteOffset] >> bitOffset) & elementMask;
+						} else std::memcpy(&value, memory + byteOffset, elementBytes);
+						values[registerIndex] |= value << registerShift;
+					}
+				}
+			}
+		}
+		if (!store) { // Write load results only after all memory reads finish.
+			for (int lane = 0; lane < WARP_SZ; ++lane) {
+				for (unsigned int reg = 0; reg < registersPerThread; ++reg) {
+					const int thread = warp + lane;
+					const auto destination = fragment.array[reg].reg;
+					const auto value = values[lane * registersPerThread + reg];
+					if (wideRegisters) setRegAsB64(thread, destination, value);
+					else setRegAsB32(thread, destination, value);
+				}
+			}
+		}
+	}
+}
+
+// Emulator-owned encoding of the opaque 64-bit mbarrier object and arrival token.
+static constexpr ir::PTXU32 mbarrierCountMask = 0xfffff, mbarrierPhaseMask = 0x7fffff;
+static constexpr unsigned mbarrierExpectedShift = 20, mbarrierPhaseShift = 40, mbarrierInitializedShift = 63;
+
+void executive::CooperativeThreadArray::eval_MbarrierPendingCount(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	trace();
+	for (int thread = 0; thread < threadCount; ++thread)
+		if (context.predicated(thread, instr))
+			setRegAsU32(thread, instr.d.reg, operandAsU64(thread, instr.a) & mbarrierCountMask);
+}
+
+void executive::CooperativeThreadArray::eval_Mbarrier(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	trace();
+	auto* shared = (unsigned char*)functionCallStack.sharedMemoryPointer();
+	const ir::PTXU64 sharedSize = functionCallStack.sharedMemorySize();
+	for (int thread = 0; thread < threadCount; ++thread) {
+		if (!context.predicated(thread, instr)) continue;
+		const bool address32 = instr.a.bytes() == 4;
+		ir::PTXU64 offset;
+		if (address32) offset = operandAsU32(thread, instr.a);
+		else offset = operandAsU64(thread, instr.a);
+		if (instr.addressSpace == ir::PTXInstruction::Generic && instr.a.addressMode != ir::PTXOperand::Address) {
+			const ir::PTXU64 sharedAddress = (ir::PTXU64)shared;
+			offset -= sharedAddress;
+			// A 32-bit generic pointer uses the low 32 bits of the host address.
+			if (address32) offset = ir::PTXU32(offset);
+		}
+		if (offset % 8 || offset > sharedSize || sharedSize - offset < 8) {
+			report("warning: mbarrier address is misaligned or outside shared memory; undefined behavior");
+			continue;
+		}
+		ir::PTXU64 state = 0;
+		switch (instr.opcode) {
+		case ir::PTXInstruction::MbarrierInit: {
+			const ir::PTXU32 count = operandAsU32(thread, instr.b);
+			if (count == 0 || count > mbarrierCountMask) { report("warning: mbarrier.init count is outside 1..1048575; undefined behavior"); continue; }
+			// Opaque encoding: pending[19:0], expected[39:20], phase[62:40], initialized[63].
+			state = (ir::PTXU64(1) << mbarrierInitializedShift) | count | (ir::PTXU64(count) << mbarrierExpectedShift);
+			break;
+		}
+		case ir::PTXInstruction::MbarrierInval:
+			break; // Store zero to invalidate the object.
+		case ir::PTXInstruction::MbarrierTestWait:
+		case ir::PTXInstruction::MbarrierTestWaitParity: {
+			std::memcpy(&state, shared + offset, sizeof(state));
+			const bool parity = instr.opcode == ir::PTXInstruction::MbarrierTestWaitParity;
+			const ir::PTXU64 phase = (state >> mbarrierPhaseShift) & mbarrierPhaseMask;
+			const ir::PTXU64 requested = parity ? operandAsU32(thread,instr.b) : (operandAsU64(thread,instr.b) >> mbarrierPhaseShift) & mbarrierPhaseMask;
+			if (!(state >> mbarrierInitializedShift) || (parity ? requested > 1 : ((phase - requested) & mbarrierPhaseMask) > 1)) {
+				report("warning: mbarrier.test_wait has an invalid phase, parity or uninitialized object; undefined behavior");
+				continue;
+			}
+			bool complete;
+			if (parity) {
+				const ir::PTXU32 currentParity = phase & 1;
+				complete = currentParity != requested;
+			} else {
+				complete = phase != requested;
+			}
+			setRegAsPredicate(thread, instr.d.reg, complete);
+			continue; // test_wait never changes the barrier or blocks the executing thread.
+		}
+		case ir::PTXInstruction::CpAsyncMbarrierArrive:
+			std::memcpy(&state, shared + offset, sizeof(state));
+			// Copies complete immediately: increment plus completion has zero net effect.
+			if (!(state >> mbarrierInitializedShift) || (state & mbarrierCountMask) == mbarrierCountMask)
+				report("warning: cp.async.mbarrier.arrive on invalid object or overflowing count; undefined behavior");
+			continue;
+		case ir::PTXInstruction::MbarrierArrive:
+		case ir::PTXInstruction::MbarrierArriveDrop:
+		case ir::PTXInstruction::CpAsyncMbarrierArriveNoInc: {
+			std::memcpy(&state, shared + offset, sizeof(state));
+			const ir::PTXU64 token = state;
+			ir::PTXU32 pending = state & mbarrierCountMask;
+			ir::PTXU32 expected = (state >> mbarrierExpectedShift) & mbarrierCountMask;
+			const bool copyArrival = instr.opcode == ir::PTXInstruction::CpAsyncMbarrierArriveNoInc;
+			const ir::PTXU32 count = copyArrival ? 1 : operandAsU32(thread, instr.b);
+			const bool drop = instr.opcode == ir::PTXInstruction::MbarrierArriveDrop;
+			if (!(state >> mbarrierInitializedShift) || count == 0 || count > pending || (drop && count > expected) || (instr.mbarrierNoComplete && count == pending)) {
+				report("warning: invalid mbarrier arrival count, phase completion or uninitialized object; undefined behavior");
+				continue;
+			}
+			pending -= count;
+			if (drop) expected -= count;
+			ir::PTXU64 phase = (state >> mbarrierPhaseShift) & mbarrierPhaseMask;
+			if (pending == 0) { phase = (phase + 1) & mbarrierPhaseMask; pending = expected; }
+			state = (ir::PTXU64(1) << mbarrierInitializedShift) | (phase << mbarrierPhaseShift) | (ir::PTXU64(expected) << mbarrierExpectedShift) | pending;
+			if (!copyArrival && instr.d.addressMode != ir::PTXOperand::BitBucket) setRegAsB64(thread, instr.d.reg, token);
+			break;
+		}
+		default: assertM(false, "Invalid mbarrier opcode");
+		}
+		std::memcpy(shared + offset, &state, sizeof(state));
+	}
+}
+
+void executive::CooperativeThreadArray::eval_CpAsync(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	const std::string error = instr.valid();
+	if (!error.empty()) throw RuntimeException(error, context.PC, instr);
+	trace();
+	auto* shared = (unsigned char*)functionCallStack.sharedMemoryPointer();
+	const ir::PTXU64 sharedSize = functionCallStack.sharedMemorySize();
+	const unsigned int size = instr.b.imm_uint;
+	// Complete the copy immediately; commit/wait instructions have no pending work.
+	for (int thread = 0; thread < threadCount; ++thread) {
+		if (!context.predicated(thread, instr)) continue;
+		const ir::PTXU64 dst = instr.d.bytes() == 4 ? operandAsU32(thread, instr.d) : operandAsU64(thread, instr.d);
+		const ir::PTXU64 src = instr.a.bytes() == 4 ? operandAsU32(thread, instr.a) : operandAsU64(thread, instr.a);
+		unsigned int sourceSize = size;
+		if (instr.c.type == ir::PTXOperand::pred) {
+			const bool ignore = instr.c.condition == ir::PTXOperand::PT ||
+				(instr.c.condition != ir::PTXOperand::nPT && operandAsPredicate(thread, instr.c));
+			if (ignore) sourceSize = 0;
+		} else if (instr.c.addressMode != ir::PTXOperand::Invalid) sourceSize = operandAsU32(thread, instr.c);
+		if (sourceSize > size) {
+			report("warning: cp.async src-size " << sourceSize << " exceeds cp-size " << size
+				<< "; undefined behavior at PC " << context.PC << ", thread " << thread);
+			continue; // Leave this destination unchanged instead of making an invalid host copy.
+		}
+		if (dst % size || (sourceSize && src % size) || dst > sharedSize || sharedSize - dst < size) {
+			report("warning: cp.async misaligned address or out-of-bounds shared destination"
+				<< "; undefined behavior at PC " << context.PC << ", thread " << thread);
+			continue;
+		}
+		if (sourceSize) std::memcpy(shared + dst, (const void*)src, sourceSize);
+		std::memset(shared + dst + sourceSize, 0, size - sourceSize);
 	}
 }
 
@@ -6479,8 +8504,14 @@ void executive::CooperativeThreadArray::eval_Rcp(CTAContext &context,
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
 
+			// Without .ftz, .approx must still support subnormal inputs
+			// (e.g. rcp.approx.f32(2^-127) ~= 2^127); only .ftz flushes
+			// the input to signed zero, whose reciprocal is signed
+			// infinity through the division below.
 			ir::PTXF32 d, a = ftz(instr.modifier, operandAsF32(threadID, instr.a));
-			d = ftz(instr.modifier, 1.0f/a);
+			d = ftz(instr.modifier, roundedDiv(1.0f, a,
+				instr.modifier & ir::PTXInstruction::approx
+					? ir::PTXInstruction::rn : instr.modifier));
 			setRegAsF32(threadID, instr.d.reg, d);
 		}
 	}
@@ -6489,7 +8520,22 @@ void executive::CooperativeThreadArray::eval_Rcp(CTAContext &context,
 			if (!context.predicated(threadID, instr)) continue;
 
 			ir::PTXF64 d, a = operandAsF64(threadID, instr.a);
-			d = 1.0/a;
+			if (instr.modifier & ir::PTXInstruction::approx) {
+				const ir::PTXU64 high = 0xffffffff00000000ull;
+				if (hydrazine::isnan(a)) {
+					d = hydrazine::bit_cast<ir::PTXF64>(0x7fffffff00000000ull);
+				} else {
+					a = hydrazine::bit_cast<ir::PTXF64>(
+						hydrazine::bit_cast<ir::PTXU64>(a) & high);
+					if (issubnormal_(a)) a = hydrazine::copysign(0.0, a);
+					d = roundedDiv(1.0, a, ir::PTXInstruction::rn);
+					if (issubnormal_(d)) d = hydrazine::copysign(0.0, d);
+					d = hydrazine::bit_cast<ir::PTXF64>(
+						hydrazine::bit_cast<ir::PTXU64>(d) & high);
+				}
+			} else {
+				d = roundedDiv(1.0, a, instr.modifier);
+			}
 			setRegAsF64(threadID, instr.d.reg, d);
 		}
 	}
@@ -6502,8 +8548,21 @@ void executive::CooperativeThreadArray::eval_Rcp(CTAContext &context,
 
 */
 void executive::CooperativeThreadArray::eval_Red(CTAContext &context, const ir::PTXInstruction &instr) {
-	trace();
-	throw RuntimeException("instruction not implemented", context.PC, instr);
+	ir::PTXInstruction::AtomicOperation operation;
+	switch (instr.reductionOperation) {
+		case ir::PTXInstruction::ReductionAnd: operation = ir::PTXInstruction::AtomicAnd; break;
+		case ir::PTXInstruction::ReductionXor: operation = ir::PTXInstruction::AtomicXor; break;
+		case ir::PTXInstruction::ReductionOr: operation = ir::PTXInstruction::AtomicOr; break;
+		case ir::PTXInstruction::ReductionAdd: operation = ir::PTXInstruction::AtomicAdd; break;
+		case ir::PTXInstruction::ReductionInc: operation = ir::PTXInstruction::AtomicInc; break;
+		case ir::PTXInstruction::ReductionDec: operation = ir::PTXInstruction::AtomicDec; break;
+		case ir::PTXInstruction::ReductionMin: operation = ir::PTXInstruction::AtomicMin; break;
+		case ir::PTXInstruction::ReductionMax: operation = ir::PTXInstruction::AtomicMax; break;
+		default:
+			throw RuntimeException("unsupported reduction operation",
+				context.PC, instr);
+	}
+	evalAtomicRMW(context, instr, operation, false);
 }
 
 /*!
@@ -6518,11 +8577,7 @@ void executive::CooperativeThreadArray::eval_Rem(CTAContext &context,
 
 			ir::PTXS16 d, a = operandAsS16(threadID, instr.a),
 				b = operandAsS16(threadID, instr.b);
-			if(b == 0) {
-				throw RuntimeException("Modulus by zero at: "
-					+ kernel->location(context.PC), context.PC, instr);
-			}
-			d = a % b;
+			d = CTARemainder(a, b);
 			setRegAsS16(threadID, instr.d.reg, d);
 		}
 	}
@@ -6532,11 +8587,7 @@ void executive::CooperativeThreadArray::eval_Rem(CTAContext &context,
 
 			ir::PTXS32 d, a = operandAsS32(threadID, instr.a),
 				b = operandAsS32(threadID, instr.b);
-			if(b == 0) {
-				throw RuntimeException("Modulus by zero at: "
-					+ kernel->location(context.PC), context.PC, instr);
-			}
-			d = a % b;
+			d = CTARemainder(a, b);
 			setRegAsS32(threadID, instr.d.reg, d);
 		}
 	}
@@ -6546,11 +8597,7 @@ void executive::CooperativeThreadArray::eval_Rem(CTAContext &context,
 
 			ir::PTXS64 d, a = operandAsS64(threadID, instr.a),
 				b = operandAsS64(threadID, instr.b);
-			if(b == 0) {
-				throw RuntimeException("Modulus by zero at: "
-					+ kernel->location(context.PC), context.PC, instr);
-			}
-			d = a % b;
+			d = CTARemainder(a, b);
 			setRegAsS64(threadID, instr.d.reg, d);
 		}
 	}
@@ -6560,11 +8607,7 @@ void executive::CooperativeThreadArray::eval_Rem(CTAContext &context,
 
 			ir::PTXU16 d, a = operandAsU16(threadID, instr.a),
 				b = operandAsU16(threadID, instr.b);
-			if(b == 0) {
-				throw RuntimeException("Modulus by zero at: "
-					+ kernel->location(context.PC), context.PC, instr);
-			}
-			d = a % b;
+			d = CTARemainder(a, b);
 			setRegAsU16(threadID, instr.d.reg, d);
 		}
 	}
@@ -6574,11 +8617,7 @@ void executive::CooperativeThreadArray::eval_Rem(CTAContext &context,
 
 			ir::PTXU32 d, a = operandAsU32(threadID, instr.a),
 				b = operandAsU32(threadID, instr.b);
-			if(b == 0) {
-				throw RuntimeException("Modulus by zero at: "
-					+ kernel->location(context.PC), context.PC, instr);
-			}
-			d = a % b;
+			d = CTARemainder(a, b);
 			setRegAsU32(threadID, instr.d.reg, d);
 		}
 	}
@@ -6588,11 +8627,7 @@ void executive::CooperativeThreadArray::eval_Rem(CTAContext &context,
 
 			ir::PTXU64 d, a = operandAsU64(threadID, instr.a),
 				b = operandAsU64(threadID, instr.b);
-			if(b == 0) {
-				throw RuntimeException("Modulus by zero at: "
-					+ kernel->location(context.PC), context.PC, instr);
-			}
-			d = a % b;
+			d = CTARemainder(a, b);
 			setRegAsU64(threadID, instr.d.reg, d);
 		}
 	}
@@ -6689,7 +8724,8 @@ void executive::CooperativeThreadArray::eval_Rsqrt(CTAContext &context,
 			if (!context.predicated(threadID, instr)) continue;
 
 			ir::PTXF32 d, a = ftz(instr.modifier, operandAsF32(threadID, instr.a));
-			d = ftz(instr.modifier, 1.0f/(ir::PTXF32)std::sqrt(a));
+			d = ftz(instr.modifier, roundedDiv(1.0f,
+				roundedSqrt(a, ir::PTXInstruction::rn), ir::PTXInstruction::rn));
 			setRegAsF32(threadID, instr.d.reg, d);
 		}
 	}
@@ -6698,7 +8734,25 @@ void executive::CooperativeThreadArray::eval_Rsqrt(CTAContext &context,
 			if (!context.predicated(threadID, instr)) continue;
 
 			ir::PTXF64 d, a = operandAsF64(threadID, instr.a);
-			d = 1.0/sqrt(a);
+			if (instr.modifier & ir::PTXInstruction::ftz) {
+				const ir::PTXU64 high = 0xffffffff00000000ull;
+				if (hydrazine::isnan(a)) {
+					d = hydrazine::bit_cast<ir::PTXF64>(0x7fffffff00000000ull);
+				} else {
+					a = hydrazine::bit_cast<ir::PTXF64>(
+						hydrazine::bit_cast<ir::PTXU64>(a) & high);
+					if (issubnormal_(a)) a = hydrazine::copysign(0.0, a);
+					d = roundedDiv(1.0,
+						roundedSqrt(a, ir::PTXInstruction::rn),
+						ir::PTXInstruction::rn);
+					if (issubnormal_(d)) d = hydrazine::copysign(0.0, d);
+					d = hydrazine::bit_cast<ir::PTXF64>(
+						hydrazine::bit_cast<ir::PTXU64>(d) & high);
+				}
+			} else {
+				d = roundedDiv(1.0, roundedSqrt(a,
+					ir::PTXInstruction::rn), ir::PTXInstruction::rn);
+			}
 			setRegAsF64(threadID, instr.d.reg, d);
 		}
 	}
@@ -6776,26 +8830,30 @@ void executive::CooperativeThreadArray::eval_Sad(CTAContext &context,
 	{
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
-			ir::PTXS32 d, a = operandAsS32(threadID, instr.a),
+			ir::PTXS32 a = operandAsS32(threadID, instr.a),
 				b = operandAsS32(threadID, instr.b),
 				c = operandAsS32(threadID, instr.c);
 
-			d = c + ((a < b) ? b-a : a-b);
+			// Compare signed values; subtract and accumulate with unsigned wraparound.
+			const ir::PTXU32 ua = a, ub = b;
+			const ir::PTXU32 d = static_cast<ir::PTXU32>(c) + ((a < b) ? ub-ua : ua-ub);
 
-			setRegAsS32(threadID, instr.d.reg, d);
+			setRegAsU32(threadID, instr.d.reg, d);
 		}
 	} break;
 	case ir::PTXOperand::s64:
 	{
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
-			ir::PTXS64 d, a = operandAsS64(threadID, instr.a),
+			ir::PTXS64 a = operandAsS64(threadID, instr.a),
 				b = operandAsS64(threadID, instr.b),
 				c = operandAsS64(threadID, instr.c);
 
-			d = c + ((a < b) ? b-a : a-b);
+			// Compare signed values; subtract and accumulate with unsigned wraparound.
+			const ir::PTXU64 ua = a, ub = b;
+			const ir::PTXU64 d = static_cast<ir::PTXU64>(c) + ((a < b) ? ub-ua : ua-ub);
 
-			setRegAsS64(threadID, instr.d.reg, d);
+			setRegAsU64(threadID, instr.d.reg, d);
 		}
 	} break;
 	default:
@@ -6910,9 +8968,64 @@ setp.CmpOp.BoolOp.type p[|q], a, b, [!]c;
 	.f32, .f64 };
 
 */
+// PTX floating-point CmpOp: ordered comparisons are false with a NaN operand,
+// unordered (equ..geu) are true, num/nan test for NaN.
+static bool floatCompare(ir::PTXInstruction::CmpOp op, ir::PTXF32 a, ir::PTXF32 b) {
+	const bool nan = std::isnan(a) || std::isnan(b);
+	switch (op) {
+		case ir::PTXInstruction::Eq:  return !nan && a == b;
+		case ir::PTXInstruction::Ne:  return !nan && a != b;
+		case ir::PTXInstruction::Lt:  return !nan && a < b;
+		case ir::PTXInstruction::Le:  return !nan && a <= b;
+		case ir::PTXInstruction::Gt:  return !nan && a > b;
+		case ir::PTXInstruction::Ge:  return !nan && a >= b;
+		case ir::PTXInstruction::Equ: return nan || a == b;
+		case ir::PTXInstruction::Neu: return nan || a != b;
+		case ir::PTXInstruction::Ltu: return nan || a < b;
+		case ir::PTXInstruction::Leu: return nan || a <= b;
+		case ir::PTXInstruction::Gtu: return nan || a > b;
+		case ir::PTXInstruction::Geu: return nan || a >= b;
+		case ir::PTXInstruction::Num: return !nan;
+		case ir::PTXInstruction::Nan: return nan;
+		default: throw std::runtime_error("invalid floating-point comparison");
+	}
+}
+
+static bool applyBoolOp(ir::PTXInstruction::BoolOp op, bool t, bool c) {
+	switch (op) {
+		case ir::PTXInstruction::BoolAnd: return t && c;
+		case ir::PTXInstruction::BoolOr:  return t || c;
+		case ir::PTXInstruction::BoolXor: return t != c;
+		default: return t;
+	}
+}
+
 void executive::CooperativeThreadArray::eval_SetP(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
+
+	if (instr.type == ir::PTXOperand::f16x2) {
+		// PTX: p = BoolOp(low-half compare, c), q = BoolOp(high-half compare, c).
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			const ir::PTXU32 a = operandAsU32(threadID, instr.a);
+			const ir::PTXU32 b = operandAsU32(threadID, instr.b);
+			const bool c = instr.c.addressMode != ir::PTXOperand::Register
+				|| operandAsPredicate(threadID, instr.c);
+			bool half[2];
+			for (int i = 0; i < 2; ++i) {
+				const ir::PTXU16 ha = ftzF16(instr.modifier, a >> (16 * i));
+				const ir::PTXU16 hb = ftzF16(instr.modifier, b >> (16 * i));
+				half[i] = applyBoolOp(instr.booleanOperator,
+					floatCompare(instr.comparisonOperator, f16ToF32(ha), f16ToF32(hb)), c);
+			}
+			if (instr.d.addressMode != ir::PTXOperand::BitBucket)
+				setRegAsPredicate(threadID, instr.d.reg, half[0]);
+			if (instr.pq.addressMode == ir::PTXOperand::Register)
+				setRegAsPredicate(threadID, instr.pq.reg, half[1]);
+		}
+		return;
+	}
 
 	switch (instr.type) {
 
@@ -7021,8 +9134,10 @@ void executive::CooperativeThreadArray::eval_SetP(CTAContext &context,
 					<< " condition = " << t << ", input = " << c << " "
 					<< instr.d.identifier << " = " << p << ", q = " << q );
 
-				setRegAsPredicate(threadID, instr.d.reg, p);
-				if (instr.pq.addressMode != ir::PTXOperand::Invalid) {
+				if (instr.d.addressMode != ir::PTXOperand::BitBucket)
+					setRegAsPredicate(threadID, instr.d.reg, p);
+				if (instr.pq.addressMode != ir::PTXOperand::Invalid
+					&& instr.pq.addressMode != ir::PTXOperand::BitBucket) {
 					setRegAsPredicate(threadID, instr.pq.reg, q);
 				}
 			}
@@ -7124,120 +9239,54 @@ void executive::CooperativeThreadArray::eval_SetP(CTAContext &context,
 					<< " condition = " << t << ", input = " << c << " "
 					<< instr.d.identifier << " = " << p << ", q = " << q );
 
-				setRegAsPredicate(threadID, instr.d.reg, p);
-				if (instr.pq.addressMode != ir::PTXOperand::Invalid) {
+				if (instr.d.addressMode != ir::PTXOperand::BitBucket)
+					setRegAsPredicate(threadID, instr.d.reg, p);
+				if (instr.pq.addressMode != ir::PTXOperand::Invalid
+					&& instr.pq.addressMode != ir::PTXOperand::BitBucket) {
 					setRegAsPredicate(threadID, instr.pq.reg, q);
 				}
 			}
 		}
 		break;
 
-		// single-precision float
+		// floating-point types [widened to double after type-specific FTZ]
+		case ir::PTXOperand::f16:
 		case ir::PTXOperand::f32:
-		{
-			for (int threadID = 0; threadID < threadCount; threadID++) {
-				if (!context.predicated(threadID, instr)) continue;
-
-				ir::PTXF32 a = ftz(instr.modifier, operandAsF32(threadID, instr.a)),
-					b = ftz(instr.modifier, operandAsF32(threadID, instr.b));
-				bool c = true;	// read operator somehow
-				bool t = false;
-
-				if (instr.c.addressMode == ir::PTXOperand::Register) {
-					c = operandAsPredicate(threadID, instr.c);
-				}
-
-				// any branch predictor worth its salt will get this wrong twice or less
-				switch (instr.comparisonOperator) {
-					case ir::PTXInstruction::Equ:
-					case ir::PTXInstruction::Eq:
-						t = (a == b);
-						break;
-					case ir::PTXInstruction::Neu:
-					case ir::PTXInstruction::Ne:
-						t = (a != b);
-						break;
-
-					case ir::PTXInstruction::Ltu:
-					case ir::PTXInstruction::Lo:	// fall through
-					case ir::PTXInstruction::Lt:
-						t = (a < b);
-						break;
-
-					case ir::PTXInstruction::Leu:
-					case ir::PTXInstruction::Ls:	// fall through
-					case ir::PTXInstruction::Le:
-						t = (a <= b);
-						break;
-
-					case ir::PTXInstruction::Gtu:
-					case ir::PTXInstruction::Hi:	// fall through
-					case ir::PTXInstruction::Gt:
-						t = (a > b);
-						break;
-
-					case ir::PTXInstruction::Geu:
-					case ir::PTXInstruction::Hs:	// fall through
-					case ir::PTXInstruction::Ge:
-						t = (a >= b);
-						break;
-
-					case ir::PTXInstruction::Num:
-						t = !hydrazine::isnan(a) && !hydrazine::isnan(b);
-						break;
-					case ir::PTXInstruction::Nan:
-						t = hydrazine::isnan(a) || hydrazine::isnan(b);
-						break;
-
-					default:
-						throw RuntimeException("invalid comparison operator "
-							"for unsigned int type", context.PC, instr);
-				}
-
-				// now apply the bool op
-				bool p = false, q = false;
-				switch (instr.booleanOperator) {
-					case ir::PTXInstruction::BoolAnd:
-						p = (t && c);
-						q = (!t && c);
-						break;
-					case ir::PTXInstruction::BoolOr:
-						p = (t || c);
-						q = (!t || c);
-						break;
-					case ir::PTXInstruction::BoolXor:
-						p = (t && !c) || (!t && c);
-						q = (!t && !c) || (t && c);
-						break;
-					default:
-						p = t;
-						q = !t;
-						break;
-				}
-
-				reportE(REPORT_SETP, "    " << instr.a.identifier << " = " << a
-					<< ", " << instr.b.identifier << " = " << b
-					<< " condition = " << t << ", input = " << c << " "
-					<< instr.d.identifier << " = " << p << ", q = " << q );
-
-				setRegAsPredicate(threadID, instr.d.reg, p);
-				if (instr.pq.addressMode != ir::PTXOperand::Invalid) {
-					setRegAsPredicate(threadID, instr.pq.reg, q);
-				}
-			}
-		}
-		break;
-
-		// double-precision float
 		case ir::PTXOperand::f64:
 		{
 			for (int threadID = 0; threadID < threadCount; threadID++) {
 				if (!context.predicated(threadID, instr)) continue;
 
-				ir::PTXF64 a = operandAsF64(threadID, instr.a),
-					b = operandAsF64(threadID, instr.b);
-				bool c = true;
+				ir::PTXF64 a;
+				ir::PTXF64 b;
+
+				switch (instr.type) {
+					case ir::PTXOperand::f16:
+						a = f16ToF32(ftzF16(instr.modifier, operandAsU16(threadID, instr.a)));
+						b = f16ToF32(ftzF16(instr.modifier, operandAsU16(threadID, instr.b)));
+						break;
+					case ir::PTXOperand::f32:
+						a = ftz(instr.modifier, operandAsF32(threadID, instr.a));
+						b = ftz(instr.modifier, operandAsF32(threadID, instr.b));
+						break;
+					default:
+						a = operandAsF64(threadID, instr.a);
+						b = operandAsF64(threadID, instr.b);
+						break;
+				}
+
+				bool c = true;	// read operator somehow
 				bool t = false;
+
+				const bool hasNaN = hydrazine::isnan(a) || hydrazine::isnan(b);
+
+				const bool unorderedOp =
+						instr.comparisonOperator == ir::PTXInstruction::Equ ||
+						instr.comparisonOperator == ir::PTXInstruction::Neu ||
+						instr.comparisonOperator == ir::PTXInstruction::Ltu ||
+						instr.comparisonOperator == ir::PTXInstruction::Leu ||
+						instr.comparisonOperator == ir::PTXInstruction::Gtu ||
+						instr.comparisonOperator == ir::PTXInstruction::Geu;
 
 				if (instr.c.addressMode == ir::PTXOperand::Register) {
 					c = operandAsPredicate(threadID, instr.c);
@@ -7245,39 +9294,37 @@ void executive::CooperativeThreadArray::eval_SetP(CTAContext &context,
 
 				// any branch predictor worth its salt will get this wrong twice or less
 				switch (instr.comparisonOperator) {
-
 					case ir::PTXInstruction::Equ:
 					case ir::PTXInstruction::Eq:
-						t = (a == b);
+						t = hasNaN ? unorderedOp :  (a == b);
 						break;
-
 					case ir::PTXInstruction::Neu:
 					case ir::PTXInstruction::Ne:
-						t = (a != b);
+						t = hasNaN ? unorderedOp :  (a != b);
 						break;
 
 					case ir::PTXInstruction::Ltu:
 					case ir::PTXInstruction::Lo:	// fall through
 					case ir::PTXInstruction::Lt:
-						t = (a < b);
+						t = hasNaN ? unorderedOp :  (a < b);
 						break;
 
 					case ir::PTXInstruction::Leu:
 					case ir::PTXInstruction::Ls:	// fall through
 					case ir::PTXInstruction::Le:
-						t = (a <= b);
+						t = hasNaN ? unorderedOp :  (a <= b);
 						break;
 
 					case ir::PTXInstruction::Gtu:
 					case ir::PTXInstruction::Hi:	// fall through
 					case ir::PTXInstruction::Gt:
-						t = (a > b);
+						t = hasNaN ? unorderedOp :  (a > b);
 						break;
 
 					case ir::PTXInstruction::Geu:
 					case ir::PTXInstruction::Hs:	// fall through
 					case ir::PTXInstruction::Ge:
-						t = (a >= b);
+						t = hasNaN ? unorderedOp :  (a >= b);
 						break;
 
 					case ir::PTXInstruction::Num:
@@ -7291,7 +9338,6 @@ void executive::CooperativeThreadArray::eval_SetP(CTAContext &context,
 						throw RuntimeException("invalid comparison operator "
 							"for unsigned int type", context.PC, instr);
 				}
-
 
 				// now apply the bool op
 				bool p = false, q = false;
@@ -7319,8 +9365,10 @@ void executive::CooperativeThreadArray::eval_SetP(CTAContext &context,
 					<< " condition = " << t << ", input = " << c << " "
 					<< instr.d.identifier << " = " << p << ", q = " << q );
 
-				setRegAsPredicate(threadID, instr.d.reg, p);
-				if (instr.pq.addressMode != ir::PTXOperand::Invalid) {
+				if (instr.d.addressMode != ir::PTXOperand::BitBucket)
+					setRegAsPredicate(threadID, instr.d.reg, p);
+				if (instr.pq.addressMode != ir::PTXOperand::Invalid
+					&& instr.pq.addressMode != ir::PTXOperand::BitBucket) {
 					setRegAsPredicate(threadID, instr.pq.reg, q);
 				}
 			}
@@ -7345,6 +9393,28 @@ void executive::CooperativeThreadArray::eval_SetP(CTAContext &context,
 void executive::CooperativeThreadArray::eval_Set(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
+
+	if (instr.a.type == ir::PTXOperand::f16x2) {
+		// Each half: true -> 1.0 (f16x2 dtype) or 0xffff (u32/s32 dtype), false -> 0.
+		const ir::PTXU32 trueHalf = instr.type == ir::PTXOperand::f16x2 ? 0x3c00 : 0xffff;
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			const ir::PTXU32 a = operandAsU32(threadID, instr.a);
+			const ir::PTXU32 b = operandAsU32(threadID, instr.b);
+			const bool c = instr.c.addressMode != ir::PTXOperand::Register
+				|| operandAsPredicate(threadID, instr.c);
+			ir::PTXU32 d = 0;
+			for (int i = 0; i < 2; ++i) {
+				const ir::PTXU16 ha = ftzF16(instr.modifier, a >> (16 * i));
+				const ir::PTXU16 hb = ftzF16(instr.modifier, b >> (16 * i));
+				if (applyBoolOp(instr.booleanOperator,
+					floatCompare(instr.comparisonOperator, f16ToF32(ha), f16ToF32(hb)), c))
+					d |= trueHalf << (16 * i);
+			}
+			setRegAsU32(threadID, instr.d.reg, d);
+		}
+		return;
+	}
 
 	switch (instr.a.type) {
 
@@ -7550,14 +9620,23 @@ void executive::CooperativeThreadArray::eval_Set(CTAContext &context,
 		}
 		break;
 
-		// single-precision float
+		// floating-point types, with f16 widened before comparison
+		case ir::PTXOperand::f16:
 		case ir::PTXOperand::f32:
 		{
 			for (int threadID = 0; threadID < threadCount; threadID++) {
 				if (!context.predicated(threadID, instr)) continue;
 
-				ir::PTXF32 a = ftz(instr.modifier, operandAsF32(threadID, instr.a)),
+				ir::PTXF32 a, b;
+				if (instr.a.type == ir::PTXOperand::f16) {
+					a = f16ToF32(ftzF16(instr.modifier,
+						operandAsU16(threadID, instr.a)));
+					b = f16ToF32(ftzF16(instr.modifier,
+						operandAsU16(threadID, instr.b)));
+				} else {
+					a = ftz(instr.modifier, operandAsF32(threadID, instr.a));
 					b = ftz(instr.modifier, operandAsF32(threadID, instr.b));
+				}
 				bool c = true;	// read operator somehow
 				bool t = false;
 
@@ -7642,12 +9721,15 @@ void executive::CooperativeThreadArray::eval_Set(CTAContext &context,
 						break;
 				}
 
-				switch (instr.type) {
-					case ir::PTXOperand::s32:
-					case ir::PTXOperand::u32:
-						setRegAsU32(threadID, instr.d.reg, (t ? 0xFFFFFFFF : 0x00));
-						break;
-					case ir::PTXOperand::f32:
+					switch (instr.type) {
+						case ir::PTXOperand::s32:
+						case ir::PTXOperand::u32:
+							setRegAsU32(threadID, instr.d.reg, (t ? 0xFFFFFFFF : 0x00));
+							break;
+						case ir::PTXOperand::f16:
+							setRegAsB16(threadID, instr.d.reg, t ? 0x3c00 : 0x0000);
+							break;
+						case ir::PTXOperand::f32:
 						setRegAsF32(threadID, instr.d.reg, (t ? 1.0f : 0.0f));
 						break;
 					default:
@@ -7681,8 +9763,11 @@ void executive::CooperativeThreadArray::eval_Set(CTAContext &context,
 						break;
 
 					case ir::PTXInstruction::Neu:
-					case ir::PTXInstruction::Ne:
 						t = (a != b);
+						break;
+					case ir::PTXInstruction::Ne:
+						t = !hydrazine::isnan(a) && !hydrazine::isnan(b)
+							&& (a != b);
 						break;
 
 					case ir::PTXInstruction::Ltu:
@@ -7728,7 +9813,6 @@ void executive::CooperativeThreadArray::eval_Set(CTAContext &context,
 					case ir::PTXInstruction::Leu:
 					case ir::PTXInstruction::Gtu:
 					case ir::PTXInstruction::Geu:
-					case ir::PTXInstruction::Num:
 					case ir::PTXInstruction::Nan:
 						// if either is NaN, set t to true
 						t = (hydrazine::isnan(a) || hydrazine::isnan(b) || t);
@@ -7817,10 +9901,11 @@ void executive::CooperativeThreadArray::eval_Shf(CTAContext &context, const ir::
             throw RuntimeException("unsupported shift mode", context.PC, instr);
         }
 
+        const ir::PTXB64 pair = (static_cast<ir::PTXB64>(b) << 32) | a;
         if (instr.shiftDirection == ir::PTXInstruction::ShiftLeft) {
-            d = (b << n) | (a >> (32 - n));
+            d = (pair << n) >> 32;
         } else if (instr.shiftDirection == ir::PTXInstruction::ShiftRight) {
-            d = (b << (32 - n)) | (a >> n);
+            d = pair >> n;
         } else {
             throw RuntimeException("unsupported shift direction", context.PC, instr);
         }
@@ -7861,11 +9946,7 @@ void executive::CooperativeThreadArray::eval_Shl(CTAContext &context, const ir::
 				throw RuntimeException("unsupported data type",
 					context.PC, instr);
 			}
-			if( b > 16 )
-			{
-				b = 16;
-			}
-			d = a << b;
+			d = b >= 16 ? 0 : a << b;
 			setRegAsB16(threadID, instr.d.reg, d);
 		}
 	}
@@ -7894,11 +9975,7 @@ void executive::CooperativeThreadArray::eval_Shl(CTAContext &context, const ir::
 				throw RuntimeException("unsupported data type",
 					context.PC, instr);
 			}
-			if( b > 32 )
-			{
-				b = 32;
-			}
-			d = a << b;
+			d = b >= 32 ? 0 : a << b;
 			setRegAsB32(threadID, instr.d.reg, d);
 		}
 	}
@@ -7927,11 +10004,7 @@ void executive::CooperativeThreadArray::eval_Shl(CTAContext &context, const ir::
 				throw RuntimeException("unsupported data type",
 					context.PC, instr);
 			}
-			if( b > 64 )
-			{
-				b = 64;
-			}
-			d = a << b;
+			d = b >= 64 ? 0 : a << b;
 			setRegAsB64(threadID, instr.d.reg, d);
 		}
 	}
@@ -7972,11 +10045,7 @@ void executive::CooperativeThreadArray::eval_Shr(CTAContext &context, const ir::
 				throw RuntimeException("unsupported data type",
 					context.PC, instr);
 			}
-			if( b > 16 )
-			{
-				b = 16;
-			}
-			d = a >> b;
+			d = b >= 16 ? 0 : a >> b;
 			setRegAsB16(threadID, instr.d.reg, d);
 		}
 	}
@@ -8005,11 +10074,7 @@ void executive::CooperativeThreadArray::eval_Shr(CTAContext &context, const ir::
 				throw RuntimeException("unsupported data type",
 					context.PC, instr);
 			}
-			if( b > 32 )
-			{
-				b = 32;
-			}
-			d = a >> b;
+			d = b >= 32 ? 0 : a >> b;
 			setRegAsB32(threadID, instr.d.reg, d);
 		}
 	}
@@ -8038,11 +10103,7 @@ void executive::CooperativeThreadArray::eval_Shr(CTAContext &context, const ir::
 				throw RuntimeException("unsupported data type",
 					context.PC, instr);
 			}
-			if( b > 64 )
-			{
-				b = 64;
-			}
-			d = a >> b;
+			d = b >= 64 ? 0 : a >> b;
 			setRegAsB64(threadID, instr.d.reg, d);
 		}
 	}
@@ -8071,11 +10132,7 @@ void executive::CooperativeThreadArray::eval_Shr(CTAContext &context, const ir::
 				throw RuntimeException("unsupported data type",
 					context.PC, instr);
 			}
-			if( b > 16 )
-			{
-				b = 16;
-			}
-			d = a >> b;
+			d = b >= 16 ? (a < 0 ? -1 : 0) : a >> b;
 			setRegAsS16(threadID, instr.d.reg, d);
 		}
 	}
@@ -8104,11 +10161,7 @@ void executive::CooperativeThreadArray::eval_Shr(CTAContext &context, const ir::
 				throw RuntimeException("unsupported data type",
 					context.PC, instr);
 			}
-			if( b > 32 )
-			{
-				b = 32;
-			}
-			d = a >> b;
+			d = b >= 32 ? (a < 0 ? -1 : 0) : a >> b;
 			setRegAsS32(threadID, instr.d.reg, d);
 		}
 	}
@@ -8137,11 +10190,7 @@ void executive::CooperativeThreadArray::eval_Shr(CTAContext &context, const ir::
 				throw RuntimeException("unsupported data type",
 					context.PC, instr);
 			}
-			if( b > 64 )
-			{
-				b = 64;
-			}
-			d = a >> b;
+			d = b >= 64 ? (a < 0 ? -1 : 0) : a >> b;
 			setRegAsS64(threadID, instr.d.reg, d);
 		}
 	}
@@ -8170,11 +10219,7 @@ void executive::CooperativeThreadArray::eval_Shr(CTAContext &context, const ir::
 				throw RuntimeException("unsupported data type",
 					context.PC, instr);
 			}
-			if( b > 16 )
-			{
-				b = 16;
-			}
-			d = a >> b;
+			d = b >= 16 ? 0 : a >> b;
 			setRegAsU16(threadID, instr.d.reg, d);
 		}
 	}
@@ -8203,11 +10248,7 @@ void executive::CooperativeThreadArray::eval_Shr(CTAContext &context, const ir::
 				throw RuntimeException("unsupported data type",
 					context.PC, instr);
 			}
-			if( b > 32 )
-			{
-				b = 32;
-			}
-			d = a >> b;
+			d = b >= 32 ? 0 : a >> b;
 			setRegAsU32(threadID, instr.d.reg, d);
 		}
 	}
@@ -8236,11 +10277,7 @@ void executive::CooperativeThreadArray::eval_Shr(CTAContext &context, const ir::
 				throw RuntimeException("unsupported data type",
 					context.PC, instr);
 			}
-			if( b > 64 )
-			{
-				b = 64;
-			}
-			d = a >> b;
+			d = b >= 64 ? 0 : a >> b;
 			setRegAsU64(threadID, instr.d.reg, d);
 		}
 	}
@@ -8259,7 +10296,8 @@ void executive::CooperativeThreadArray::eval_Sin(CTAContext &context,
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
 
-			ir::PTXF32 d, a = operandAsF32(threadID, instr.a);
+			ir::PTXF32 d,
+				a = ftz(instr.modifier, operandAsF32(threadID, instr.a));
 			d = ftz(instr.modifier, (ir::PTXF32)sin(a));
 			setRegAsF32(threadID, instr.d.reg, d);
 		}
@@ -8361,14 +10399,8 @@ void executive::CooperativeThreadArray::eval_Sqrt(CTAContext &context,
 
 			ir::PTXF32 d, a = ftz(instr.modifier, operandAsF32(threadID, instr.a));
 
-			if(a < 0.0f || hydrazine::isnan(a))
-			{
-				d = std::numeric_limits<float>::signaling_NaN();
-			}
-			else
-			{
-				d = std::sqrt(a);
-			}
+			d = roundedSqrt(a, instr.modifier & ir::PTXInstruction::approx
+				? ir::PTXInstruction::rn : instr.modifier);
 
 			setRegAsF32(threadID, instr.d.reg, ftz(instr.modifier, d));
 		}
@@ -8378,7 +10410,7 @@ void executive::CooperativeThreadArray::eval_Sqrt(CTAContext &context,
 			if (!context.predicated(threadID, instr)) continue;
 
 			ir::PTXF64 d, a = operandAsF64(threadID, instr.a);
-			d = sqrt(a);
+			d = roundedSqrt(a, instr.modifier);
 			setRegAsF64(threadID, instr.d.reg, d);
 		}
 	}
@@ -8750,13 +10782,47 @@ void executive::CooperativeThreadArray::eval_St(CTAContext &context,
 void executive::CooperativeThreadArray::eval_Sub(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
-	if (instr.type == ir::PTXOperand::f32) {
+	if (instr.type == ir::PTXOperand::f16x2) {
+		const int effectiveModifier = instr.modifier | ir::PTXInstruction::rn;
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			ir::PTXU32 a = operandAsU32(threadID, instr.a);
+			ir::PTXU32 b = operandAsU32(threadID, instr.b);
+			ir::PTXU16 al = static_cast<ir::PTXU16>(a), ah = a >> 16;
+			ir::PTXU16 bl = static_cast<ir::PTXU16>(b), bh = b >> 16;
+			ir::PTXU16 dl = ftzF16(effectiveModifier, toF16(
+				roundedSub(f16ToF32(ftzF16(effectiveModifier, al)),
+					f16ToF32(ftzF16(effectiveModifier, bl)), effectiveModifier),
+				effectiveModifier));
+			ir::PTXU16 dh = ftzF16(effectiveModifier, toF16(
+				roundedSub(f16ToF32(ftzF16(effectiveModifier, ah)),
+					f16ToF32(ftzF16(effectiveModifier, bh)), effectiveModifier),
+					effectiveModifier));
+			setRegAsU32(threadID, instr.d.reg, static_cast<ir::PTXU32>(dl) |
+				(static_cast<ir::PTXU32>(dh) << 16));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f16) {
+		const int effectiveModifier = instr.modifier | ir::PTXInstruction::rn;
+		for (int threadID = 0; threadID < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+
+			ir::PTXF32 a = f16ToF32(ftzF16(effectiveModifier,
+				operandAsU16(threadID, instr.a)));
+			ir::PTXF32 b = f16ToF32(ftzF16(effectiveModifier,
+				operandAsU16(threadID, instr.b)));
+			ir::PTXU16 d = toF16(roundedSub(a, b, effectiveModifier), effectiveModifier);
+			setRegAsB16(threadID, instr.d.reg, ftzF16(effectiveModifier, d));
+		}
+	}
+	else if (instr.type == ir::PTXOperand::f32) {
 		for (int threadID = 0; threadID < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
 
 			ir::PTXF32 d, a = ftz(instr.modifier, operandAsF32(threadID, instr.a)),
 				b = ftz(instr.modifier, operandAsF32(threadID, instr.b));
-			d = ftz(instr.modifier, sat(instr.modifier, a - b));
+			d = ftz(instr.modifier, sat(instr.modifier,
+				roundedSub(a, b, instr.modifier)));
 			setRegAsF32(threadID, instr.d.reg, d);
 		}
 	}
@@ -8766,7 +10832,7 @@ void executive::CooperativeThreadArray::eval_Sub(CTAContext &context,
 
 			ir::PTXF64 d, a = operandAsF64(threadID, instr.a),
 				b = operandAsF64(threadID, instr.b);
-			d = a - b;
+			d = roundedSub(a, b, instr.modifier);
 			setRegAsF64(threadID, instr.d.reg, d);
 		}
 	}
@@ -8799,10 +10865,10 @@ void executive::CooperativeThreadArray::eval_Sub(CTAContext &context,
 				d = ld;
 			}
 			else if (instr.carry & ir::PTXInstruction::CC) {
-				ir::PTXS32 carry = 0;
-
-				hydrazine::add(d, carry, a, -b, carry);
-				setRegAsS32(threadID, instr.pq.reg, carry);
+				ir::PTXU32 diff, borrow;
+				subWithBorrow<ir::PTXU32>(a, b, 0, diff, borrow);
+				d = diff;
+				setRegAsU32(threadID, instr.pq.reg, borrow);
 			}
 			else {
 				d = a - b;
@@ -8817,7 +10883,15 @@ void executive::CooperativeThreadArray::eval_Sub(CTAContext &context,
 
 			ir::PTXS64 d, a = operandAsS64(threadID, instr.a),
 				b = operandAsS64(threadID, instr.b);
-			d = a - b;
+			if (instr.carry & ir::PTXInstruction::CC) {
+				ir::PTXU64 diff, borrow;
+				subWithBorrow<ir::PTXU64>(a, b, 0, diff, borrow);
+				d = diff;
+				setRegAsU32(threadID, instr.pq.reg, borrow);
+			}
+			else {
+				d = a - b;
+			}
 			setRegAsS64(threadID, instr.d.reg, d);
 		}
 	}
@@ -8839,10 +10913,9 @@ void executive::CooperativeThreadArray::eval_Sub(CTAContext &context,
 				b = operandAsU32(threadID, instr.b);
 
 			if (instr.carry & ir::PTXInstruction::CC) {
-				ir::PTXU32 carry = 0;
-
-				hydrazine::add(d, carry, a, -b, carry);
-				setRegAsU32(threadID, instr.pq.reg, carry);
+				ir::PTXU32 borrow;
+				subWithBorrow<ir::PTXU32>(a, b, 0, d, borrow);
+				setRegAsU32(threadID, instr.pq.reg, borrow);
 			}
 			else {
 				d = a - b;
@@ -8857,7 +10930,14 @@ void executive::CooperativeThreadArray::eval_Sub(CTAContext &context,
 
 			ir::PTXU64 d, a = operandAsU64(threadID, instr.a),
 				b = operandAsU64(threadID, instr.b);
-			d = a - b;
+			if (instr.carry & ir::PTXInstruction::CC) {
+				ir::PTXU64 borrow;
+				subWithBorrow<ir::PTXU64>(a, b, 0, d, borrow);
+				setRegAsU32(threadID, instr.pq.reg, borrow);
+			}
+			else {
+				d = a - b;
+			}
 			setRegAsU64(threadID, instr.d.reg, d);
 		}
 	}
@@ -8875,41 +10955,33 @@ void executive::CooperativeThreadArray::eval_SubC(CTAContext &context,
 	switch (instr.type) {
 
 	case ir::PTXOperand::u32:
-	{
-		for (int threadID = 0; threadID  < threadCount; threadID++) {
-			if (!context.predicated(threadID, instr)) continue;
-			ir::PTXU32 d = 0,
-				a = operandAsU32(threadID, instr.a),
-				b = operandAsU32(threadID, instr.b);
-
-			ir::PTXU32 carry = getRegAsU32(threadID, instr.c.reg) - 1;
-
-			hydrazine::add(d, carry, a, -b, carry);
-
-			setRegAsU32(threadID, instr.d.reg, d);
-
-			if (instr.carry & ir::PTXInstruction::CC) {
-				setRegAsU32(threadID, instr.pq.reg, carry);
-			}
-		}
-	} break;
-
 	case ir::PTXOperand::s32:
 	{
 		for (int threadID = 0; threadID  < threadCount; threadID++) {
 			if (!context.predicated(threadID, instr)) continue;
-			ir::PTXS32 d = 0,
-				a = operandAsS32(threadID, instr.a),
-				b = operandAsS32(threadID, instr.b);
-
-			ir::PTXS32 carry = getRegAsS32(threadID, instr.c.reg) - 1;
-
-			hydrazine::add(d, carry, a, -b, carry);
-
-			setRegAsS32(threadID, instr.d.reg, d);
-
+			ir::PTXU32 d, borrow,
+				a = operandAsU32(threadID, instr.a),
+				b = operandAsU32(threadID, instr.b);
+			subWithBorrow<ir::PTXU32>(a, b, getRegAsU32(threadID, instr.c.reg), d, borrow);
+			setRegAsU32(threadID, instr.d.reg, d);
 			if (instr.carry & ir::PTXInstruction::CC) {
-				setRegAsS32(threadID, instr.pq.reg, carry);
+				setRegAsU32(threadID, instr.pq.reg, borrow);
+			}
+		}
+	} break;
+
+	case ir::PTXOperand::u64:
+	case ir::PTXOperand::s64:
+	{
+		for (int threadID = 0; threadID  < threadCount; threadID++) {
+			if (!context.predicated(threadID, instr)) continue;
+			ir::PTXU64 d, borrow,
+				a = operandAsU64(threadID, instr.a),
+				b = operandAsU64(threadID, instr.b);
+			subWithBorrow<ir::PTXU64>(a, b, getRegAsU32(threadID, instr.c.reg), d, borrow);
+			setRegAsU64(threadID, instr.d.reg, d);
+			if (instr.carry & ir::PTXInstruction::CC) {
+				setRegAsU32(threadID, instr.pq.reg, borrow);
 			}
 		}
 	} break;
@@ -8963,6 +11035,32 @@ void executive::CooperativeThreadArray::eval_Sust(CTAContext &context,
 /*!
 
 */
+void executive::CooperativeThreadArray::eval_Tanh(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	trace();
+	auto tanhF16 = [](ir::PTXU16 a) {
+		return toF16(std::tanh(f16ToF32(a)), ir::PTXInstruction::rn);
+	};
+	for (int threadID = 0; threadID < threadCount; ++threadID) {
+		if (!context.predicated(threadID, instr)) continue;
+		if (instr.type == ir::PTXOperand::f16) {
+			setRegAsB16(threadID, instr.d.reg,
+				tanhF16(operandAsU16(threadID, instr.a)));
+		}
+		else if (instr.type == ir::PTXOperand::f16x2) {
+			const ir::PTXU32 a = operandAsU32(threadID, instr.a);
+			setRegAsU32(threadID, instr.d.reg, tanhF16(a)
+				| (static_cast<ir::PTXU32>(tanhF16(a >> 16)) << 16));
+		}
+		else {
+			const ir::PTXF32 a = operandAsF32(threadID, instr.a);
+			const ir::PTXF32 d = std::fpclassify(a) == FP_SUBNORMAL
+				? a : std::tanh(a);
+			setRegAsF32(threadID, instr.d.reg, d);
+		}
+	}
+}
+
 void executive::CooperativeThreadArray::eval_TestP(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
@@ -9000,7 +11098,7 @@ void executive::CooperativeThreadArray::eval_TestP(CTAContext &context,
 			break;
 			case ir::PTXInstruction::Normal:
 			{
-				d = hydrazine::isnormal(a);
+				d = a == 0 || hydrazine::isnormal(a);
 			}
 			break;
 			case ir::PTXInstruction::SubNormal:
@@ -9026,32 +11124,32 @@ void executive::CooperativeThreadArray::eval_TestP(CTAContext &context,
 			{
 			case ir::PTXInstruction::Finite:
 			{
-				d = !hydrazine::isinf(a) && !hydrazine::isnan(a);
+				d = std::isfinite(a);
 			}
 			break;
 			case ir::PTXInstruction::Infinite:
 			{
-				d = hydrazine::isinf(a);
+				d = std::isinf(a);
 			}
 			break;
 			case ir::PTXInstruction::Number:
 			{
-				d = !hydrazine::isnan(a);
+				d = !std::isnan(a);
 			}
 			break;
 			case ir::PTXInstruction::NotANumber:
 			{
-				d = hydrazine::isnan(a);
+				d = std::isnan(a);
 			}
 			break;
 			case ir::PTXInstruction::Normal:
 			{
-				d = hydrazine::isnormal(a);
+				d = a == 0 || std::isnormal(a);
 			}
 			break;
 			case ir::PTXInstruction::SubNormal:
 			{
-				d = !hydrazine::isnormal(a) && !hydrazine::isnan(a) && !hydrazine::isinf(a);
+				d = issubnormal_(a);
 			}
 			break;
 			default: assertM(false, "Invalid floating point mode.");
@@ -9626,12 +11724,36 @@ void executive::CooperativeThreadArray::eval_Tex(CTAContext &context,
 */
 void executive::CooperativeThreadArray::eval_Trap(CTAContext &context, const ir::PTXInstruction &instr) {
 	trace();
-	context.executionState = CTAContext::Trap;
+	if (context.predicateMask(instr).any()) {
+		context.executionState = CTAContext::Trap;
+	}
 }
 
 void executive::CooperativeThreadArray::eval_Suq(CTAContext &context, const ir::PTXInstruction &instr) {
 	// this instruction is identical to txq except for surfaces which we don't distinguish from textures
 	eval_Txq(context, instr);
+}
+
+void executive::CooperativeThreadArray::eval_Szext(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	trace();
+	for (int threadID = 0; threadID < threadCount; ++threadID) {
+		if (!context.predicated(threadID, instr)) continue;
+
+		const ir::PTXU32 a = operandAsU32(threadID, instr.a);
+		const ir::PTXU32 b = operandAsU32(threadID, instr.b);
+		const ir::PTXU32 b1 = b & 0x1f;
+		const bool tooLarge = b >= 32
+			&& instr.shiftMode == ir::PTXInstruction::ShiftMode::Clamp;
+		const ir::PTXU32 mask = tooLarge ? 0 : (~0u << b1);
+		const ir::PTXU32 signPos = (b1 - 1) & 0x1f;
+		const bool signBit = b1 != 0 && !tooLarge
+			&& instr.type == ir::PTXOperand::s32
+			&& ((a >> signPos) & 1u);
+		const ir::PTXU32 d = (a & ~mask) | (signBit ? mask : 0);
+
+		setRegAsU32(threadID, instr.d.reg, d);
+	}
 }
 
 void executive::CooperativeThreadArray::eval_Txq(CTAContext &context, const ir::PTXInstruction &instr) {
@@ -9711,11 +11833,161 @@ void executive::CooperativeThreadArray::eval_Txq(CTAContext &context, const ir::
 /*!
 
 */
-void executive::CooperativeThreadArray::eval_Vote(CTAContext &context,
+void executive::CooperativeThreadArray::eval_WarpSync(CTAContext &context,
 	const ir::PTXInstruction &instr) {
 	trace();
 
-	reconvergenceMechanism->eval_Vote(context, instr);
+	const std::string error = instr.valid();
+	if (!error.empty()) throw RuntimeException(error, context.PC, instr);
+	reconvergenceMechanism->eval_WarpSync(context, instr);
+}
+
+void executive::CooperativeThreadArray::eval_Vote(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	std::vector<ir::PTXU32> results(threadCount);
+	for (int warpStart = 0; warpStart < threadCount; warpStart += WARP_SZ) {
+		const int lanes = min(WARP_SZ, threadCount - warpStart);
+		ir::PTXU32 masks[WARP_SZ] = {}, ballot = 0, participants = 0;
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (!context.predicated(warpStart + lane, instr)) continue;
+			const ir::PTXU32 bit = ir::PTXU32(1) << lane;
+			participants |= bit;
+			masks[lane] = operandAsU32(warpStart + lane, instr.b);
+			const bool value = instr.a.condition == ir::PTXOperand::PT ||
+				(instr.a.condition != ir::PTXOperand::nPT && operandAsPredicate(warpStart + lane, instr.a));
+			if (value) ballot |= bit;
+		}
+		// All predicates and member masks are gathered before aliased destinations are written.
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (!context.predicated(warpStart + lane, instr)) continue;
+			const ir::PTXU32 members = masks[lane] & participants;
+			const ir::PTXU32 selected = ballot & members;
+			results[warpStart + lane] = instr.vote == ir::PTXInstruction::Ballot ? selected :
+				instr.vote == ir::PTXInstruction::All ? selected == members :
+				instr.vote == ir::PTXInstruction::Any ? selected != 0 : 
+				selected == 0 || selected == members; // uni
+		}
+	}
+	for (int thread = 0; thread < threadCount; ++thread) {
+		if (!context.predicated(thread, instr)) continue;
+		if (instr.vote == ir::PTXInstruction::Ballot) setRegAsB32(thread, instr.d.reg, results[thread]);
+		else setRegAsPredicate(thread, instr.d.reg, results[thread]);
+	}
+}
+
+void executive::CooperativeThreadArray::eval_Shfl(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	std::vector<ir::PTXU32> results(threadCount);
+	std::vector<bool> predicates(threadCount);
+	for (int warpStart = 0; warpStart < threadCount; warpStart += WARP_SZ) {
+		const int lanes = min(WARP_SZ, threadCount - warpStart);
+		ir::PTXU32 values[WARP_SZ] = {};
+		for (int lane = 0; lane < lanes; ++lane)
+			if (context.predicated(warpStart + lane, instr)) values[lane] = operandAsB32(warpStart + lane, instr.a);
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (!context.predicated(warpStart + lane, instr)) continue;
+			const int offset = operandAsU32(warpStart + lane, instr.b) & 31;
+			const ir::PTXU32 control = operandAsU32(warpStart + lane, instr.c);
+			const int segmask = (control >> 8) & 31;
+			const int limit = (lane & segmask) | ((control & 31) & ~segmask);
+			int from = lane;
+			bool inRange = false;
+			switch (instr.shuffleMode) {
+				case ir::PTXInstruction::Up: from = lane - offset; inRange = from >= limit; break;
+				case ir::PTXInstruction::Down: from = lane + offset; inRange = from <= limit; break;
+				case ir::PTXInstruction::Bfly: from = lane ^ offset; inRange = from <= limit; break;
+				case ir::PTXInstruction::Idx: from = (lane & segmask) | (offset & ~segmask); inRange = from <= limit; break;
+				default: throw RuntimeException("invalid shuffle mode", context.PC, instr);
+			}
+			predicates[warpStart + lane] = inRange;
+			results[warpStart + lane] = values[inRange ? from : lane];
+		}
+	}
+	// All data and controls are read before writing aliased data or predicate destinations.
+	for (int thread = 0; thread < threadCount; ++thread) {
+		if (!context.predicated(thread, instr)) continue;
+		setRegAsB32(thread, instr.d.reg, results[thread]);
+		if (instr.pq.addressMode == ir::PTXOperand::Register) setRegAsPredicate(thread, instr.pq.reg, predicates[thread]);
+	}
+}
+
+void executive::CooperativeThreadArray::eval_Match(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	std::vector<ir::PTXU32> results(threadCount);
+	std::vector<bool> unanimous(threadCount);
+	for (int warpStart = 0; warpStart < threadCount; warpStart += WARP_SZ) {
+		const int lanes = min(WARP_SZ, threadCount - warpStart);
+		ir::PTXU64 values[WARP_SZ] = {};
+		ir::PTXU32 masks[WARP_SZ] = {}, participants = 0;
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (!context.predicated(warpStart + lane, instr)) continue;
+			participants |= ir::PTXU32(1) << lane;
+			masks[lane] = operandAsU32(warpStart + lane, instr.b);
+			values[lane] = instr.type == ir::PTXOperand::b64 ?
+				operandAsB64(warpStart + lane, instr.a) : operandAsB32(warpStart + lane, instr.a);
+		}
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (!context.predicated(warpStart + lane, instr)) continue;
+			const ir::PTXU32 members = masks[lane] & participants;
+			ir::PTXU32 matching = 0;
+			for (int member = 0; member < lanes; ++member) {
+				const ir::PTXU32 bit = ir::PTXU32(1) << member;
+				if ((members & bit) && values[member] == values[lane])
+					matching |= bit;
+			}
+			const bool allMatch = matching == members;
+			unanimous[warpStart + lane] = allMatch;
+			results[warpStart + lane] = instr.matchAll ? (allMatch ? members : 0) : matching;
+		}
+	}
+	// Gather every source, mask and result before writing aliased destinations.
+	for (int thread = 0; thread < threadCount; ++thread) {
+		if (!context.predicated(thread, instr)) continue;
+		if (instr.d.addressMode != ir::PTXOperand::BitBucket) setRegAsB32(thread, instr.d.reg, results[thread]);
+		if (instr.pq.addressMode == ir::PTXOperand::Register) setRegAsPredicate(thread, instr.pq.reg, unanimous[thread]);
+	}
+}
+
+void executive::CooperativeThreadArray::eval_Redux(CTAContext &context,
+	const ir::PTXInstruction &instr) {
+	std::vector<ir::PTXU32> results(threadCount);
+	for (int warpStart = 0; warpStart < threadCount; warpStart += WARP_SZ) {
+		const int lanes = min(WARP_SZ, threadCount - warpStart);
+		ir::PTXU32 masks[WARP_SZ] = {}, values[WARP_SZ] = {}, participants = 0;
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (!context.predicated(warpStart + lane, instr)) continue;
+			participants |= ir::PTXU32(1) << lane;
+			masks[lane] = operandAsU32(warpStart + lane, instr.b);
+			values[lane] = operandAsB32(warpStart + lane, instr.a);
+		}
+		for (int lane = 0; lane < lanes; ++lane) {
+			if (!context.predicated(warpStart + lane, instr)) continue;
+			const ir::PTXU32 members = masks[lane] & participants;
+			ir::PTXU32 result = 0;
+			const ir::PTXU32 sign = instr.type == ir::PTXOperand::s32 ? 0x80000000u : 0;
+			bool first = true;
+			for (int member = 0; member < lanes; ++member) {
+				if (!(members & (ir::PTXU32(1) << member))) continue;
+				const ir::PTXU32 value = values[member];
+				if (first) { result = value; first = false; continue; }
+				switch (instr.reductionOperation) {
+					case ir::PTXInstruction::ReductionAdd: result += value; break;
+					case ir::PTXInstruction::ReductionMin: if ((value ^ sign) < (result ^ sign)) result = value; break;
+					case ir::PTXInstruction::ReductionMax: if ((value ^ sign) > (result ^ sign)) result = value; break;
+					case ir::PTXInstruction::ReductionAnd: result &= value; break;
+					case ir::PTXInstruction::ReductionOr: result |= value; break;
+					case ir::PTXInstruction::ReductionXor: result ^= value; break;
+					default: throw RuntimeException("invalid redux operation", context.PC, instr);
+				}
+			}
+			results[warpStart + lane] = result;
+		}
+	}
+	// Gather all sources and masks before writing potentially aliased destinations.
+	for (int thread = 0; thread < threadCount; ++thread) {
+		if (!context.predicated(thread, instr)) continue;
+		setRegAsB32(thread, instr.d.reg, results[thread]);
+	}
 }
 
 /*!
@@ -9762,16 +12034,6 @@ void executive::CooperativeThreadArray::eval_Xor(CTAContext &context,
 				b = operandAsB64(threadID, instr.b);
 			d = a ^ b;
 			setRegAsB64(threadID, instr.d.reg, d);
-		}
-	}
-	else if (instr.type == ir::PTXOperand::pred) {
-		for (int threadID = 0; threadID < threadCount; threadID++) {
-			if (!context.predicated(threadID, instr)) continue;
-
-			bool d, a = operandAsPredicate(threadID, instr.a),
-				b = operandAsPredicate(threadID, instr.b);
-			d = a ^ b;
-			setRegAsPredicate(threadID, instr.d.reg, d);
 		}
 	}
 	else {

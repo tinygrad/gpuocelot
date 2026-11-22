@@ -15,6 +15,9 @@
 
 namespace ir {
 
+	// Physical threads per warp on the supported NVIDIA PTX targets.
+	constexpr int WARP_SZ = 32;
+
 	typedef uint8_t PTXU8;
 	typedef uint16_t PTXU16;
 	typedef uint32_t PTXU32;
@@ -25,6 +28,7 @@ namespace ir {
 	typedef int32_t PTXS32;
 	typedef int64_t PTXS64;
 	
+	typedef _Float16 PTXF16;
 	typedef float PTXF32;
 	typedef double PTXF64;
 	
@@ -62,12 +66,17 @@ namespace ir {
 			u64,
 			f16,
 			f32,
+			bf16,
+			tf32,
 			f64,
 			b8,
 			b16,
 			b32,
 			b64,
-			pred
+			pred,
+			f16x2,
+			bf16x2,
+			s4, u4, b1 // MMA element types; stored in packed b32 registers.
 		};
 
 		/*!	Special register names */
@@ -126,6 +135,9 @@ namespace ir {
 			envreg29,
 			envreg30,
 			envreg31,
+			globalTimer,
+			totalSmemSize,
+			dynamicSmemSize,
 			SpecialRegister_invalid
 		};
 		
@@ -139,7 +151,8 @@ namespace ir {
 		enum Vec {
 			v1 = 1, 			//< scalar
 			v2 = 2,				//< vector2
-			v4 = 4				//< vector4
+			v4 = 4,				//< vector4
+			v8 = 8                  //< eight-register MMA fragment
 		};
 		
 		enum VectorIndex {
@@ -285,4 +298,3 @@ namespace std {
 }
 
 #endif
-

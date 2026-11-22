@@ -420,6 +420,10 @@ endif()
 
 add_library(${PROJECT_NAME}_executive STATIC ${${PROJECT_NAME}_executive_sources})
 
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+set_source_files_properties(src/executive/CooperativeThreadArray.cpp PROPERTIES COMPILE_OPTIONS -frounding-math)
+endif()
+
 set_property(TARGET ${PROJECT_NAME}_executive PROPERTY CXX_STANDARD 14)
 set_property(TARGET ${PROJECT_NAME}_executive PROPERTY POSITION_INDEPENDENT_CODE ON)
 target_compile_definitions(${PROJECT_NAME}_executive PRIVATE ${${PROJECT_NAME}_DEFINITIONS})

@@ -22,17 +22,30 @@ namespace ir {
 			Level_Invalid
 		};
 
+		enum Semantics {
+			Sc,
+			AcqRel,
+			Acquire,
+			Release,
+			Relaxed,
+			Weak,
+			Semantics_Invalid
+		};
+
 		/*!	List of opcodes for PTX instructions */
 		enum Opcode {
 			Abs = 0,
+			Activemask,
 			Add,
 			AddC,
 			And,
 			Atom,
 			Bar,
+			BarWarp,
 			Bfe,
 			Bfi,
 			Bfind,
+			Bmsk,
 			Bra,
 			Brev,
 			Brkpt,
@@ -44,32 +57,64 @@ namespace ir {
 			Cvt,
 			Cvta,
 			Div,
+			Dp2a,
+			Dp4a,
 			Ex2,
 			Exit,
 			Fma,
+			Fns,
 			Isspacep,
 			Ld,
 			Ldu,
+			Ldmatrix,
 			Lg2,
+			Lop3,
 			Mad24,
 			Mad,
 			MadC,
+			Mma,
 			Max,
 			Membar,
+			Fence,
 			Min,
 			Mov,
+			Movmatrix,
 			Mul24,
 			Mul,
 			Neg,
 			Not,
 			Or,
 			Pmevent,
+			Nanosleep,
+			Discard,
+			Applypriority,
 			Popc,
 			Prefetch,
+			Createpolicy,
+			CpAsync,
+			CpAsyncCommitGroup,
+			CpAsyncWaitGroup,
+			CpAsyncWaitAll,
+			WmmaLoadA,
+			WmmaLoadB,
+			WmmaLoadC,
+			WmmaStoreD,
+			WmmaMma,
+			MbarrierInit,
+			MbarrierInval,
+			MbarrierArrive,
+			MbarrierArriveDrop,
+			MbarrierPendingCount,
+			MbarrierTestWait,
+			MbarrierTestWaitParity,
+			CpAsyncMbarrierArrive,
+			CpAsyncMbarrierArriveNoInc,
 			Prefetchu,
 			Prmt,
 			Rcp,
 			Red,
+			Redux,
+			Match,
 			Rem,
 			Ret,
 			Rsqrt,
@@ -79,6 +124,7 @@ namespace ir {
 			SetP,
 			Shf,
 			Shfl,
+			ShflSync,
 			Shl,
 			Shr,
 			Sin,
@@ -91,6 +137,8 @@ namespace ir {
 			Sured,
 			Sust,
 			Suq,
+			Szext,
+			Tanh,
 			TestP,
 			Tex,
 			Tld4,
@@ -136,12 +184,38 @@ namespace ir {
 			approx = 8192,//< identify an approximate instruction
 			ftz = 16384,	//< flush to zero
 			full = 32768,	//< full division
+			nan = 65536,	//< return NaN if either input is NaN
+			xorsign = 131072,	//< XOR input sign bits
+			abs = 262144,	//< compare absolute input values
+			relu = 524288,	//< clamp negative floating-point results to zero
+			rna = 1048576,	//< round to nearest, ties away from zero
+			satfinite = 2097152,	//< clamp integer mma result to representable range
+			noftz = 4194304,	//< preserve subnormal inputs and results
 			Modifier_invalid = 0
 		};
 			
 		enum CarryFlag {
 			None = 0,
 			CC = 1
+		};
+
+		enum MmaShape {
+			MmaM16N8K8,
+			MmaM16N8K16,
+			MmaM8N8K16,
+			MmaM16N8K32,
+			MmaM16N8K4,
+			MmaM8N8K4,
+			MmaM8N8K32,
+			MmaM16N8K64,
+			MmaM8N8K128,
+			MmaM16N8K128,
+			MmaM16N8K256,
+			MmaM16N16K16,
+			MmaM8N32K16,
+			MmaM32N8K16,
+			MmaM16N16K8,
+			MmaShape_Invalid
 		};
 		
 		enum Volatility {
@@ -200,6 +274,7 @@ namespace ir {
 			Cg = 2,
 			Cs = 3,
 			Nc = 4,
+			Lu = 5,
 			Wb = 0,
 			Wt = 1,
 			CacheOperation_Invalid
@@ -344,6 +419,10 @@ namespace ir {
 		
 	public:
 		static std::string toString( Level );
+		enum CachePriority { EvictNormal, EvictLast, EvictFirst, EvictUnchanged };
+		enum PolicyMode { PolicyFractional, PolicyRange, PolicyCvt };
+		static std::string toString(CachePriority);
+		static std::string toString( Semantics );
 		static std::string toString( CacheLevel cache );
 		static std::string toStringLoad( CacheOperation op );
 		static std::string toStringStore( CacheOperation op );
@@ -400,6 +479,8 @@ namespace ir {
 		/*! \brief Is the instruction a branch */
 		bool isBranch() const;
 		/*! \brief Is the instruction a call */
+		void wmmaDimensions(unsigned int& m, unsigned int& n, unsigned int& k) const;
+		unsigned int wmmaFragmentRegisters(char matrix, PTXOperand::DataType element) const;
 		bool isCall() const;
 		/*! \brief Is the instruction a load */
 		bool isLoad() const;
@@ -425,6 +506,19 @@ namespace ir {
 
 		/*! indicates data type of instruction */
 		PTXOperand::DataType type;
+		/*! Second input type for packed dot-product instructions */
+		PTXOperand::DataType bType;
+
+		/*! Shape for MMA instructions */
+		MmaShape mmaShape;
+		bool mmaAColumnMajor;
+		bool mmaBColumnMajor;
+		bool mmaSparse;
+		/*! Matrix transpose; ldmatrix uses vec for its .x1/.x2/.x4 count. */
+		bool matrixTranspose;
+		bool matchAll; // match.all.sync, otherwise match.any.sync.
+		bool voteSync; // Vote uses b as its member mask when synchronized.
+		PTXOperand mmaSelector;
 
 		/*! Flag containing one or more floating-point modifiers */
 		unsigned int modifier;
@@ -441,7 +535,7 @@ namespace ir {
 			
 			/*! For membar, the visibility level in the thread hierarchy */
 			Level level;
-			
+
 			/*! Shift amount flag for bfind instructions */
 			bool shiftAmount;
 			
@@ -468,8 +562,41 @@ namespace ir {
 			
 		};
 		
+		/*! For fence, the memory ordering semantics -- deliberately outside the
+			level/shuffleMode/etc. union above: fence needs both a semantics
+			AND a level (scope) simultaneously, unlike the other union members
+			which are each only ever used by instructions with no need for
+			the others at the same time. */
+		Semantics semantics;
+
+		/*! For atom/red, the optional memory-ordering scope (.cta/.gpu/.sys)
+			-- deliberately its own field rather than reusing the level/
+			addressSpace union member above: atom/red already use addressSpace
+			for their .global/.shared qualifier, so writing scope through the
+			shared level union slot would alias and corrupt it. */
+		Level scope;
+
 		/*! For call instructions, indicates a tail call */
 		bool tailCall;
+
+		/*! For ld/st, indicates the .mmio memory-mapped-I/O form
+			(always .sem.sys{.global}) -- deliberately a standalone flag
+			rather than inferred from semantics/scope alone: a plain
+			ld.acquire.sys and ld.mmio.acquire.sys produce the same
+			semantics/scope pair but are syntactically distinct and must
+			round-trip through the printer differently. */
+		bool mmio;
+		/*! For pmevent, indicates the .mask form (operand is a 16-bit event mask). */
+		bool pmeventMask;
+		bool cacheHint; // .L2::cache_hint; policy operand is q.
+		bool mbarrierNoComplete;
+		unsigned int prefetchSize; // cp.async/ld .L2::{64,128,256}B prefetch hint in bytes; zero means absent.
+		/*! ld/st .L1::eviction_priority (performance hint only): -1 absent, else
+			0 evict_normal, 1 evict_unchanged, 2 evict_first, 3 evict_last, 4 no_allocate.
+			prefetch.global uses l2Evict instead: -1 absent, 0 evict_normal, 1 evict_last. */
+		int l1Evict, l2Evict;
+		PolicyMode policyMode;
+		CachePriority primaryPriority, secondaryPriority;
 	
 		/*! If the instruction is predicated, the guard */
 		PTXOperand pg;
@@ -503,9 +630,6 @@ namespace ir {
 			/*! Indicates whether the target address space is volatile */
 			Volatility volatility;
 						
-			/*! Is this a divide full instruction? */
-			bool divideFull;
-			
 			/*! If cvta instruction, indicates whether destination is 
 				generic address or if source is generic address - true if 
 				segmented address space, false if generic */
@@ -553,6 +677,11 @@ namespace ir {
 
 		/*! Source operand c */
 		PTXOperand c;
+
+		/*! Lookup table and predicate input for lop3 */
+		PTXOperand immLut;
+		/*! Predicate input for lop3; sparse MMA metadata; shfl.sync member mask. */
+		PTXOperand q;
 
 		/*  Runtime annotations 
 			
@@ -602,4 +731,3 @@ namespace ir {
 }
 
 #endif
-

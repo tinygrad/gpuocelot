@@ -49,6 +49,8 @@ public:
 		const ir::Dim3& ctaDim, ir::PTXU32 sharedMemory, ir::PTXU64 stream);
 	/*! \brief Get the argument memory for the current context */
 	ir::PTXU64 argumentMemory() const;
+	/*! \brief Get the argument memory size for the current context */
+	ir::PTXU64 argumentMemorySize() const;
 
 private:
 	class Context
@@ -122,5 +124,4 @@ private:
 };
 
 }
-
 

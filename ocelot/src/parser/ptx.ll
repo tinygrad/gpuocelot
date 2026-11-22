@@ -120,6 +120,8 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return OPCODE_BFE; }
 "bfind"                         { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_BFIND; }
+"bmsk"                          { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_BMSK; }
 "bra"                           { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_BRA; }
 "brev"                          { sstrcpy( yylval->text, yytext, 1024 ); \
@@ -138,24 +140,45 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return OPCODE_COS; }
 "cvt"                           { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_CVT; }
+"createpolicy"                  { sstrcpy(yylval->text, yytext, 1024); return OPCODE_CREATEPOLICY; }
 "cvta"                          { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_CVTA; }
 "div"                           { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_DIV; }
+"dp2a"                          { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_DP2A; }
+"dp4a"                          { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_DP4A; }
 "ex2"                           { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_EX2; }
 "exit"                          { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_EXIT; }
+"fence"                         { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_FENCE; }
 "fma"                           { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_FMA; }
+"fns"                           { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_FNS; }
 "isspacep"                      { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_ISSPACEP; }
 "ld"                            { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_LD; }
+"match" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MATCH; }
+"redux" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_REDUX; }
+"activemask" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_ACTIVEMASK; }
+"movmatrix" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MOVMATRIX; }
+"ldmatrix" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_LDMATRIX; }
+".m8n8" { return TOKEN_M8N8; }
+".x1" { yylval->value = 1; return TOKEN_X1; }
+".x2" { yylval->value = 2; return TOKEN_X2; }
+".x4" { yylval->value = 4; return TOKEN_X4; }
+".trans" { return TOKEN_TRANS; }
 "ldu"                            { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_LDU; }
 "lg2"                           { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_LG2; }
+"lop3"                          { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_LOP3; }
 "membar"                        { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_MEMBAR; }
 "min"                           { sstrcpy( yylval->text, yytext, 1024 ); \
@@ -166,6 +189,8 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return OPCODE_MADC; }
 "mad24"                         { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_MAD24; }
+"mma"                           { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_MMA; }
 "max"                           { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_MAX; }
 "mov"                           { sstrcpy( yylval->text, yytext, 1024 ); \
@@ -182,6 +207,34 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return OPCODE_OR; }
 "pmevent"                       { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_PMEVENT; }
+"pmevent.mask"                  { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_PMEVENT_MASK; }
+"nanosleep"                    { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_NANOSLEEP; }
+"discard"                      { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_DISCARD; }
+"applypriority"                { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_APPLYPRIORITY; }
+"mbarrier.arrive"|"mbarrier.arrive_drop" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_ARRIVE; }
+".noComplete" { return TOKEN_NO_COMPLETE; }
+"mbarrier.pending_count" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_PENDING; }
+"mbarrier.test_wait"|"mbarrier.test_wait.parity" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_WAIT; }
+"cp.async.mbarrier.arrive"|"cp.async.mbarrier.arrive.noinc" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_CP; }
+"wmma.mma"|"wmma.mma.xor.popc"|"wmma.mma.and.popc" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_WMMA_MMA; }
+"wmma.load.a" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_WMMA_MEMORY; }
+"wmma.load.b" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_WMMA_MEMORY; }
+"wmma.load.c" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_WMMA_MEMORY; }
+"wmma.store.d" { sstrcpy(yylval->text, yytext, 1024); return OPCODE_WMMA_MEMORY; }
+".m16n16k16" { yylval->value = TOKEN_M16N16K16; return TOKEN_M16N16K16; }
+".m8n32k16" { yylval->value = TOKEN_M8N32K16; return TOKEN_M8N32K16; }
+".m32n8k16" { yylval->value = TOKEN_M32N8K16; return TOKEN_M32N8K16; }
+".m16n16k8" { yylval->value = TOKEN_M16N16K8; return TOKEN_M16N16K8; }
+"mbarrier.init"                { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_INIT; }
+"mbarrier.inval"               { sstrcpy(yylval->text, yytext, 1024); return OPCODE_MBAR_INVAL; }
+"cp.async"                      { sstrcpy(yylval->text, yytext, 1024); return OPCODE_CP_ASYNC; }
+"cp.async.commit_group"         { sstrcpy(yylval->text, yytext, 1024); return OPCODE_CP_COMMIT; }
+"cp.async.wait_group"           { sstrcpy(yylval->text, yytext, 1024); return OPCODE_CP_WAIT_GROUP; }
+"cp.async.wait_all"             { sstrcpy(yylval->text, yytext, 1024); return OPCODE_CP_WAIT_ALL; }
 "prefetch"                      { sstrcpy( yylval->text, yytext, 1024 ); \
                                   return OPCODE_PREFETCH; }
 "prefetchu"                     { sstrcpy( yylval->text, yytext, 1024 ); \
@@ -236,6 +289,10 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return OPCODE_SURED; }
 "suq"                           { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_SUQ; }
+"szext"                         { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_SZEXT; }
+"tanh"                          { sstrcpy( yylval->text, yytext, 1024 ); \
+                                    return OPCODE_TANH; }
 "testp"                         { sstrcpy( yylval->text, yytext, 1024 ); \
                                     return OPCODE_TESTP; }
 "tex"                           { sstrcpy( yylval->text, yytext, 1024 ); \
@@ -296,6 +353,8 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return TOKEN_SAMPLERREF; }
 ".section"                      { yylval->value = TOKEN_SECTION; \
                                     return TOKEN_SECTION; }
+".shared::cta"                  { yylval->value = TOKEN_SHARED; \
+                                    return TOKEN_SHARED_CTA; }
 ".shared"                       { yylval->value = TOKEN_SHARED; \
                                     return TOKEN_SHARED;}
 ".shiftamt"                     { yylval->value = TOKEN_SHIFT_AMOUNT; \
@@ -313,9 +372,17 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
 ".weak"                         { yylval->value = TOKEN_WEAK; \
                                     return TOKEN_WEAK; }
 
+".warp"                         { yylval->value = TOKEN_WARP; return TOKEN_WARP; }
 ".cta"                          { yylval->value = TOKEN_CTA; return TOKEN_CTA; }
 ".gl"                           { yylval->value = TOKEN_GL; return TOKEN_GL; }
 ".sys"                          { yylval->value = TOKEN_SYS; return TOKEN_SYS; }
+".gpu"                          { yylval->value = TOKEN_GPU; return TOKEN_GPU; }
+".sc"                           { yylval->value = TOKEN_SC; return TOKEN_SC; }
+".acq_rel"                      { yylval->value = TOKEN_ACQ_REL; return TOKEN_ACQ_REL; }
+".acquire"                      { yylval->value = TOKEN_ACQUIRE; return TOKEN_ACQUIRE; }
+".release"                      { yylval->value = TOKEN_RELEASE; return TOKEN_RELEASE; }
+".relaxed"                      { yylval->value = TOKEN_RELAXED; return TOKEN_RELAXED; }
+".mmio"                         { yylval->value = TOKEN_MMIO; return TOKEN_MMIO; }
 
 "sm_10"                         { yylval->value = TOKEN_SM10; 
                                     return TOKEN_SM10; }
@@ -333,6 +400,10 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return TOKEN_SM30; }
 "sm_35"                         { yylval->value = TOKEN_SM35; 
                                     return TOKEN_SM35; }
+"sm_50"                         { yylval->value = TOKEN_SM50; 
+                                    return TOKEN_SM50; }
+"sm_86"                         { yylval->value = TOKEN_SM86;
+                                    return TOKEN_SM86; }
 "map_f64_to_f32"                { yylval->value = TOKEN_MAP_F64_TO_F32; 
                                     return TOKEN_MAP_F64_TO_F32; }
 "texmode_independent"           { yylval->value = TOKEN_TEXMODE_INDEPENDENT; 
@@ -342,6 +413,14 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
 
 ".u32"				            { yylval->value = TOKEN_U32; return TOKEN_U32; }
 ".s32"				            { yylval->value = TOKEN_S32; return TOKEN_S32; }
+".s4" { yylval->value = TOKEN_S4; return TOKEN_S4; }
+".u4" { yylval->value = TOKEN_U4; return TOKEN_U4; }
+".m8n8k32" { yylval->value = TOKEN_M8N8K32; return TOKEN_M8N8K32; }
+".m16n8k64" { yylval->value = TOKEN_M16N8K64; return TOKEN_M16N8K64; }
+".m8n8k128" { yylval->value = TOKEN_M8N8K128; return TOKEN_M8N8K128; }
+".m16n8k128" { yylval->value = TOKEN_M16N8K128; return TOKEN_M16N8K128; }
+".m16n8k256" { yylval->value = TOKEN_M16N8K256; return TOKEN_M16N8K256; }
+".b1" { yylval->value = TOKEN_B1; return TOKEN_B1; }
 ".s8"				            { yylval->value = TOKEN_S8; return TOKEN_S8; }
 ".s16"			            	{ yylval->value = TOKEN_S16; return TOKEN_S16; }
 ".s64"			            	{ yylval->value = TOKEN_S64; return TOKEN_S64; }
@@ -353,8 +432,12 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
 ".b32"			            	{ yylval->value = TOKEN_B32; return TOKEN_B32; }
 ".b64"			            	{ yylval->value = TOKEN_B64; return TOKEN_B64; }
 ".f16"			            	{ yylval->value = TOKEN_F16; return TOKEN_F16; }
+".f16x2"			            { yylval->value = TOKEN_F16X2; return TOKEN_F16X2; }
 ".f64"			            	{ yylval->value = TOKEN_F64; return TOKEN_F64; }
 ".f32"			            	{ yylval->value = TOKEN_F32; return TOKEN_F32; }
+".bf16"			            	{ yylval->value = TOKEN_BF16; return TOKEN_BF16; }
+".bf16x2"			            { yylval->value = TOKEN_BF16X2; return TOKEN_BF16X2; }
+".tf32"			            	{ yylval->value = TOKEN_TF32; return TOKEN_TF32; }
 ".pred"		                    { yylval->value = TOKEN_PRED; \
                                     return TOKEN_PRED; }
 
@@ -374,6 +457,9 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
 ".geu"                          { yylval->value = TOKEN_GEU; return TOKEN_GEU; }
 ".num"                          { yylval->value = TOKEN_NUM; return TOKEN_NUM; }
 ".nan"                          { yylval->value = TOKEN_NAN; return TOKEN_NAN; }
+".NaN"                          { yylval->value = TOKEN_NAN_MODIFIER; return TOKEN_NAN_MODIFIER; }
+".xorsign"                      { yylval->value = TOKEN_XORSIGN; return TOKEN_XORSIGN; }
+".abs"                          { yylval->value = TOKEN_ABS_MODIFIER; return TOKEN_ABS_MODIFIER; }
 
 ".and"                          { yylval->value = TOKEN_AND; return TOKEN_AND; }
 ".or"                           { yylval->value = TOKEN_OR; return TOKEN_OR; }
@@ -382,6 +468,7 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
 ".hi"                           { yylval->value = TOKEN_HI; return TOKEN_HI; }
 ".lo"                           { yylval->value = TOKEN_LO; return TOKEN_LO; }
 ".rn"                           { yylval->value = TOKEN_RN; return TOKEN_RN; }
+".rna"                          { yylval->value = TOKEN_RNA; return TOKEN_RNA; }
 ".rm"                           { yylval->value = TOKEN_RM; return TOKEN_RM; }
 ".rz"                           { yylval->value = TOKEN_RZ; return TOKEN_RZ; }
 ".rp"                           { yylval->value = TOKEN_RP; return TOKEN_RP; }
@@ -389,8 +476,11 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
 ".rmi"                          { yylval->value = TOKEN_RMI; return TOKEN_RMI; }
 ".rzi"                          { yylval->value = TOKEN_RZI; return TOKEN_RZI; }
 ".rpi"                          { yylval->value = TOKEN_RPI; return TOKEN_RPI; }
+".satfinite"                    { yylval->value = TOKEN_SATFINITE; return TOKEN_SATFINITE; }
 ".sat"                          { yylval->value = TOKEN_SAT; return TOKEN_SAT; }
 ".ftz"                          { yylval->value = TOKEN_FTZ; return TOKEN_FTZ; }
+".noftz"                        { yylval->value = TOKEN_NOFTZ; return TOKEN_NOFTZ; }
+".relu"                         { yylval->value = TOKEN_RELU; return TOKEN_RELU; }
 ".approx"                       { yylval->value = TOKEN_APPROX; \
                                     return TOKEN_APPROX; }
 
@@ -458,6 +548,22 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
 
 ".L1"                           { yylval->value = TOKEN_L1; return TOKEN_L1; }
 ".L2"                           { yylval->value = TOKEN_L2; return TOKEN_L2; }
+".L2::64B"                     { yylval->value = 64; return TOKEN_L2_PREFETCH; }
+".L2::128B"                    { yylval->value = 128; return TOKEN_L2_PREFETCH; }
+".L2::256B"                    { yylval->value = 256; return TOKEN_L2_PREFETCH; }
+".L2::cache_hint"               { yylval->value = TOKEN_L2_CACHE_HINT; return TOKEN_L2_CACHE_HINT; }
+".fractional"                   { return TOKEN_FRACTIONAL; }
+".range"                        { return TOKEN_POLICY_RANGE; }
+".cvt"                          { return TOKEN_POLICY_CVT; }
+".L2::evict_normal"             { return TOKEN_EVICT_NORMAL; }
+".L2::evict_last"               { return TOKEN_EVICT_LAST; }
+".L2::evict_first"              { return TOKEN_EVICT_FIRST; }
+".L2::evict_unchanged"          { return TOKEN_EVICT_UNCHANGED; }
+".L1::evict_normal"             { yylval->value = 0; return TOKEN_L1_EVICT; }
+".L1::evict_unchanged"          { yylval->value = 1; return TOKEN_L1_EVICT; }
+".L1::evict_first"              { yylval->value = 2; return TOKEN_L1_EVICT; }
+".L1::evict_last"               { yylval->value = 3; return TOKEN_L1_EVICT; }
+".L1::no_allocate"              { yylval->value = 4; return TOKEN_L1_EVICT; }
 
 ".width"                        { yylval->value = TOKEN_WIDTH; \
                                     return TOKEN_WIDTH; }
@@ -494,6 +600,22 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return TOKEN_RED; }
 ".sync"                          { yylval->value = TOKEN_SYNC; \
                                     return TOKEN_SYNC; }
+".sp"                            { yylval->value = TOKEN_SP; return TOKEN_SP; }
+".aligned"                       { yylval->value = TOKEN_ALIGNED; \
+                                    return TOKEN_ALIGNED; }
+".m8n8k4"                        { yylval->value = TOKEN_M8N8K4; return TOKEN_M8N8K4; }
+".m16n8k4"                       { yylval->value = TOKEN_M16N8K4; \
+                                    return TOKEN_M16N8K4; }
+".m16n8k8"                       { yylval->value = TOKEN_M16N8K8; \
+                                    return TOKEN_M16N8K8; }
+".m16n8k16"                      { yylval->value = TOKEN_M16N8K16; \
+                                    return TOKEN_M16N8K16; }
+".m8n8k16"                       { yylval->value = TOKEN_M8N8K16; \
+                                    return TOKEN_M8N8K16; }
+".m16n8k32"                      { yylval->value = TOKEN_M16N8K32; \
+                                    return TOKEN_M16N8K32; }
+".row"                           { yylval->value = TOKEN_ROW; return TOKEN_ROW; }
+".col"                           { yylval->value = TOKEN_COL; return TOKEN_COL; }
 ".popc"                         { yylval->value = TOKEN_POPC; \
                                     return TOKEN_POPC; }
 
@@ -538,11 +660,15 @@ LABEL ({IDENTIFIER}{WHITESPACE}":")
                                     return TOKEN_DECIMAL_CONSTANT; }
 {HEX_CONSTANT}                  { std::stringstream stream; \
                                     stream << std::hex; stream << yytext; \
-                                    stream >> yylval->value; \
+                                    unsigned long long hexValue = 0; \
+                                    stream >> hexValue; \
+                                    yylval->value = (long long int) hexValue; \
                                     return TOKEN_DECIMAL_CONSTANT; }
-{OCT_CONSTANT}                  { std::stringstream stream; \
+{OCT_CONSTANT}                { std::stringstream stream; \
                                     stream << std::oct; stream << yytext; \
-                                    stream >> yylval->value; \
+                                    unsigned long long octValue = 0; \
+                                    stream >> octValue; \
+                                    yylval->value = (long long int) octValue; \
                                     return TOKEN_DECIMAL_CONSTANT; }
 
 {UNSIGNED_DECIMAL_CONSTANT}     { std::stringstream stream; stream << yytext; \
@@ -648,4 +774,3 @@ void sstrcpy( char* destination, const char* source, unsigned int max )
 #endif
 
 /******************************************************************************/
-
